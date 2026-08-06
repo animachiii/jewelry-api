@@ -1,0 +1,4 @@
+{
+  "this_is_not_a_valid_gemini_response": true,
+  "candidates": "should be a list, not a string"
+}

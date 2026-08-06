@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": 429,
+    "status": "RESOURCE_EXHAUSTED",
+    "message": "Quota exceeded for quota metric 'Generate requests' and limit 'per minute'."
+  }
+}

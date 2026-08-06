@@ -94,14 +94,23 @@ class SubJob(Base):
         Enum(SourceType, name="source_type_t"), nullable=False
     )
     celery_task_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # use_alter=True + explicit names: assets <-> sub_jobs is a genuine circular FK
+    # (see docs/schema.md relationships) — without this, SQLAlchemy can't sort
+    # tables for create_all/drop_all and Alembic's `check` can't resolve it either.
     input_asset_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("assets.id"), nullable=True
+        UUID(as_uuid=True),
+        ForeignKey("assets.id", name="fk_sub_jobs_input_asset_id", use_alter=True),
+        nullable=True,
     )
     matte_asset_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("assets.id"), nullable=True
+        UUID(as_uuid=True),
+        ForeignKey("assets.id", name="fk_sub_jobs_matte_asset_id", use_alter=True),
+        nullable=True,
     )
     output_asset_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("assets.id"), nullable=True
+        UUID(as_uuid=True),
+        ForeignKey("assets.id", name="fk_sub_jobs_output_asset_id", use_alter=True),
+        nullable=True,
     )
     prompt_snapshot: Mapped[str | None] = mapped_column(String, nullable=True)
     model_version: Mapped[str | None] = mapped_column(String, nullable=True)

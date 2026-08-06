@@ -1,0 +1,12 @@
+{
+  "candidates": [
+    {
+      "content": { "parts": [] },
+      "finish_reason": "SAFETY",
+      "safety_ratings": [
+        { "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "probability": "LOW", "blocked": true }
+      ]
+    }
+  ],
+  "model_version": "gemini-2.5-flash-image-preview"
+}

@@ -1,0 +1,11 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [{ "inline_data": { "mime_type": "image/png", "data": "<base64-image-bytes>" } }]
+      },
+      "finish_reason": "STOP"
+    }
+  ],
+  "model_version": "gemini-2.5-flash-image-preview"
+}

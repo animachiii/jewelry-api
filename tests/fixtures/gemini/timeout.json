@@ -1,0 +1,6 @@
+{
+  "_meta": {
+    "description": "Not a real API response — the test harness raises httpx.TimeoutException instead of returning this body. Kept for documentation of the scenario.",
+    "simulated_exception": "httpx.ConnectTimeout"
+  }
+}

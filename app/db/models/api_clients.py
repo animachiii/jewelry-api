@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Index, Integer, String, UniqueConstraint, text
+from sqlalchemy import Boolean, CheckConstraint, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -15,6 +15,7 @@ class ApiClient(Base):
     __table_args__ = (
         UniqueConstraint("key_prefix", name="uq_api_clients_key_prefix"),
         Index("ix_api_clients_key_prefix", "key_prefix"),
+        CheckConstraint("scope IN ('client', 'ops')", name="ck_api_clients_scope"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -23,6 +24,7 @@ class ApiClient(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     key_prefix: Mapped[str] = mapped_column(String, nullable=False)
     key_hash: Mapped[str] = mapped_column(String, nullable=False)
+    scope: Mapped[str] = mapped_column(String, nullable=False, server_default="client")
     rate_limit_per_min: Mapped[int] = mapped_column(Integer, nullable=False, server_default="60")
     daily_job_quota: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))

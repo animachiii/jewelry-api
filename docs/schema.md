@@ -54,6 +54,7 @@ Machine credentials for the Flutter ERP and any future consumer.
 | `name` | TEXT NOT NULL | e.g. "Asish Flutter ERP — production" |
 | `key_prefix` | TEXT NOT NULL UNIQUE | First 8 chars of the key, for lookup and logs |
 | `key_hash` | TEXT NOT NULL | Argon2 hash of the full key. Raw key never stored. |
+| `scope` | TEXT NOT NULL DEFAULT 'client' | `client` \| `ops` — see docs/api-routes.md Auth scopes. Added in migration 0002; missing from the original Phase 0 plan. |
 | `rate_limit_per_min` | INT NOT NULL DEFAULT 60 | |
 | `daily_job_quota` | INT NULL | NULL = unlimited |
 | `is_active` | BOOLEAN NOT NULL DEFAULT TRUE | |
