@@ -11,7 +11,7 @@ Status values: `Not started` · `In progress` · `Complete`
 
 | # | Phase | Description | Dependency | Split? | File | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| 0 | Foundation & Environment | Repo scaffold, Supabase Postgres + full schema, Storage buckets, Redis/Celery split queues, seed data, CI skeleton, matting model benchmark + licensing decision. | **Sequential** — blocks all | 0a infra ‖ 0b benchmark | `phase-0-foundation.md` | Not started |
+| 0 | Foundation & Environment | Repo scaffold, Supabase Postgres + full schema, Storage buckets, Redis/Celery split queues, seed data, CI skeleton, matting model benchmark + licensing decision. | **Sequential** — blocks all | 0a infra ‖ 0b benchmark | `phase-0-foundation.md` | In progress — 0a code-complete against local substitutes (no Supabase project yet); 0b blocked (no GPU / client photos) |
 | 1 | API Contract & Mock Server | Full OpenAPI 3.1 spec, real auth, mock fixtures for all 8 job states. **Client + Flutter sign-off gate.** | Sequential after 0a | No | `phase-1-api-contract.md` | Not started |
 | 2 | Data Model & Job State Machine | Repositories, job/sub-job creation, state transitions, parent-status rollup, idempotency, `job_events` audit trail. | Sequential after 1 | No | — | Not started |
 | 3 | Config Service | Sheets → versioned Postgres snapshot → Redis cache. Real `GET /config`. Cold-cache and Sheets-outage fallback. Beat sync task. | After 2 · **‖ with 4** | No | — | Not started |

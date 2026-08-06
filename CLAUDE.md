@@ -50,6 +50,7 @@ app/
     cost_service.py       Cost event recording
   workers/
     celery_app.py         Celery config, queue routing, beat schedule
+    health.py              ping_gpu/ping_io verification tasks (added Step 4, not in original plan)
     matting.py            GPU queue: BiRefNet alpha matte extraction
     generation.py         IO queue: Gemini calls
     qa.py                 IO queue: perceptual similarity gate
@@ -125,5 +126,15 @@ phases/                   Phase specification files
 
 ## Current Status
 
-Phase 0 — Foundation & Environment. Nothing is built yet.
-Check `phases/phase-roadmap.md` before starting any work.
+Phase 0 — Foundation & Environment. In progress. Steps 1, 2, 4, 6, 7 are
+code-complete and verified against local substitutes (local Postgres/Redis,
+not a real Supabase project). Step 3 (storage service) is code-complete but
+not live-verified — needs a real Supabase project. Step 5 (matting
+benchmark) is blocked — needs GPU access and real client jewelry photos.
+Check `phases/phase-0-foundation.md` for the itemized checkpoint status and
+`phases/phase-roadmap.md` before starting any work.
+
+`app/workers/health.py` was added during Step 4 for the `health.ping_gpu`/
+`health.ping_io` verification tasks — it isn't in the folder structure below
+because Step 4 asked for these tasks without specifying a file and neither
+belonged in `matting.py` or `generation.py`.
