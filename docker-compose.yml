@@ -1,0 +1,35 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  api:
+    build: .
+    env_file: .env
+    depends_on:
+      - redis
+    ports:
+      - "8000:8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  worker-gpu:
+    build: .
+    env_file: .env
+    depends_on:
+      - redis
+    command: celery -A app.workers.celery_app worker -Q gpu -c ${GPU_QUEUE_CONCURRENCY:-1} --hostname=worker-gpu@%h
+
+  worker-io:
+    build: .
+    env_file: .env
+    depends_on:
+      - redis
+    command: celery -A app.workers.celery_app worker -Q io -c ${IO_QUEUE_CONCURRENCY:-20} --hostname=worker-io@%h
+
+  beat:
+    build: .
+    env_file: .env
+    depends_on:
+      - redis
+    command: celery -A app.workers.celery_app beat
