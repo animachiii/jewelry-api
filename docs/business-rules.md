@@ -32,15 +32,18 @@ backward transition and it exists only via the retry endpoint.
 **Sub-job:**
 
 ```
-PENDING ──► MATTING ──► GENERATING ──► QA_REVIEW ──► COMPLETED
-                                   └──► COMPLETED  (QA not applicable)
+PENDING ──► GENERATING ──► QA_REVIEW ──► COMPLETED
+                       └──► COMPLETED  (QA not applicable)
    any ──► FAILED | REJECTED
 PENDING ──► SKIPPED  (set at creation, never transitions)
 ```
 
-- `MATTING` is skipped for `SYNTHETIC` sub-jobs — there is no source image to matte.
+- No `MATTING` step — see `docs/decisions/0001-drop-local-matting.md`. Every
+  sub-job goes `PENDING` → `GENERATING` directly, real or synthetic.
 - `QA_REVIEW` is entered **only** for `SYNTHETIC` sub-jobs, and only when the similarity
   score falls below threshold. Above threshold, go straight to `COMPLETED`.
+  Real-photo (`UPLOADED`) sub-jobs have no QA gate at all — see
+  `docs/ai-integration.md`.
 
 ---
 
@@ -77,7 +80,7 @@ what the ERP shows.
 | `RATE_LIMITED` | Provider 429 | Yes — 3 attempts, exponential + jitter | Yes |
 | `TRANSIENT_PROVIDER` | Provider 5xx | Yes — 3 attempts | Yes |
 | `TRANSIENT_NETWORK` | Timeout, connection reset | Yes — 3 attempts | Yes |
-| `INVALID_INPUT` | Corrupt image, unsupported format, matte empty | No | No |
+| `INVALID_INPUT` | Corrupt image, unsupported format | No | No |
 | `SAFETY_REFUSAL` | Provider declined to generate | No | No |
 | `QA_REJECTED` | Similarity gate failed, or human rejected | No | No |
 | `INTERNAL` | Unhandled backend exception | No | Yes |
@@ -104,8 +107,8 @@ and `retryable: false`. The ERP must not render a retry button for these.
 - Retry reuses the job's **pinned** `config_version_id`, not the currently active version.
   Angles within one job must be visually consistent; a prompt change between the original
   run and the retry would break that.
-- Retry re-runs the full sub-pipeline including matting. It does not reuse a stale matte,
-  because `INVALID_INPUT` failures are often matting failures.
+- Retry re-runs the full generation call from scratch. It does not reuse any
+  artifact from the failed attempt.
 - Every retry writes a new `cost_events` row. Retries cost money and must be visible in
   cost reporting.
 
@@ -130,7 +133,8 @@ cosmetic detail.
 
 ## 7. QA gate
 
-Applies to `SYNTHETIC` sub-jobs only. Real-photo angles are matte-anchored and skip QA.
+Applies to `SYNTHETIC` sub-jobs only. Real-photo angles have no QA gate — see
+`docs/decisions/0001-drop-local-matting.md` for the accepted risk this carries.
 
 | Score vs threshold | Outcome |
 | :--- | :--- |

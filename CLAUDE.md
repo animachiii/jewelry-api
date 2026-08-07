@@ -23,7 +23,7 @@ which POSTs a job and polls for status.
 ## Tech Stack
 
 FastAPI + Pydantic v2 · Celery 5.4 + Redis · Supabase (Postgres 15 + Storage buckets) ·
-BiRefNet-matting on local GPU · Gemini Image API · Docker Compose · Sentry + structlog
+Gemini Image API · Docker Compose · Sentry + structlog
 
 ## Folder Structure
 
@@ -50,10 +50,9 @@ app/
     cost_service.py       Cost event recording
   workers/
     celery_app.py         Celery config, queue routing, beat schedule
-    health.py              ping_gpu/ping_io verification tasks (added Step 4, not in original plan)
-    matting.py            GPU queue: BiRefNet alpha matte extraction
-    generation.py         IO queue: Gemini calls
-    qa.py                 IO queue: perceptual similarity gate
+    health.py              ping_io verification task (added Step 4, not in original plan)
+    generation.py         IO queue: Gemini calls (real-photo and synthetic — no matting step, see docs/decisions/0001-drop-local-matting.md)
+    qa.py                 IO queue: perceptual similarity gate (synthetic angles only)
     orchestration.py      Group fan-out, chord callback, parent rollup
   providers/
     base.py               GenerationProvider ABC
@@ -70,11 +69,12 @@ phases/                   Phase specification files
 - **Postgres is the system of record. Redis is not.** Redis holds the Celery broker,
   the config cache, rate-limit buckets, and idempotency keys. Every one of those is
   reconstructible from Postgres or Sheets. Nothing is lost if Redis is flushed.
-- **GPU and IO work run on separate Celery queues.** Matting is VRAM-bound and needs
-  concurrency 1–2 per card; Gemini calls are network-bound and want concurrency 20+.
-  Sharing a pool starves one or OOMs the other.
-- **The matting model loads once per worker process,** at `worker_process_init`, never
-  inside a task. Under prefork, loading in-task multiplies VRAM by the child count.
+- **No local ML models.** Background removal, relighting, and shadow generation all
+  happen in a single Gemini call — real-photo angles use the same shape as synthetic
+  ones. Dropped local BiRefNet matting on 2026-08-07; see
+  `docs/decisions/0001-drop-local-matting.md` for the tradeoff this accepted. Celery
+  runs a single `io` queue as a result — the old `gpu`/`io` split existed only to
+  isolate VRAM-bound matting, and there is no VRAM-bound work left.
 - **Partial success is a first-class terminal state,** not an error path. The parent job
   rolls up from sub-job states; a mixed result returns completed URLs plus retry flags.
 - **Failures are classified before they are handled.** Transient classes get bounded
@@ -97,21 +97,20 @@ phases/                   Phase specification files
    Postgres first, cached second.
 2. **Never call a floating Gemini model alias.** Always a pinned version string from
    config, always recorded on the sub-job.
-3. **Never load an ML model inside a Celery task body.** Process-init only.
-4. **Never write business logic in a route handler.** Routes validate, delegate to a
+3. **Never write business logic in a route handler.** Routes validate, delegate to a
    service, and serialize. Nothing else.
-5. **Never query the database from a route or a task directly.** Go through
+4. **Never query the database from a route or a task directly.** Go through
    `db/repositories/`.
-6. **Never call the live Gemini or Sheets API in tests.** Use recorded fixtures.
-7. **Never return a synthetic angle as `COMPLETED` without a QA score.**
-8. **Never accept a `/generate` request without checking the `Idempotency-Key`.**
+5. **Never call the live Gemini or Sheets API in tests.** Use recorded fixtures.
+6. **Never return a synthetic angle as `COMPLETED` without a QA score.**
+7. **Never accept a `/generate` request without checking the `Idempotency-Key`.**
    Duplicate submissions bill the client twice.
-9. **Never fail a job because Google Sheets was unreachable.** Fall back to the last
+8. **Never fail a job because Google Sheets was unreachable.** Fall back to the last
    active `config_versions` row in Postgres.
-10. **Never log raw API keys, Supabase service keys, or full signed URLs.**
-11. **Never delete an asset row.** Soft-expire via `expires_at`; storage lifecycle
+9. **Never log raw API keys, Supabase service keys, or full signed URLs.**
+10. **Never delete an asset row.** Soft-expire via `expires_at`; storage lifecycle
     handles the bytes.
-12. **Never mutate a `config_versions` row.** New sync means new version.
+11. **Never mutate a `config_versions` row.** New sync means new version.
 
 ## Reference Documentation
 
@@ -126,19 +125,19 @@ phases/                   Phase specification files
 
 ## Current Status
 
-Phase 0 — Foundation & Environment. Steps 1, 2, 3, 4, 6, 7 are complete and
-verified live against real infrastructure: repo pushed to
+Phase 0 — Foundation & Environment is **complete**. Steps 1, 2, 3, 4, 6, 7
+are verified live against real infrastructure: repo pushed to
 github.com/animachiii/jewelry-api (public, branch-protected, CI green),
 schema migrated to the real Supabase Postgres (session pooler, port 5432)
 with all constraints and `alembic check` drift-free, Storage buckets live
-(jewelry-inputs/mattes/outputs, private, signed-URL round trip verified),
+(jewelry-inputs/jewelry-outputs, private, signed-URL round trip verified),
 and seed data loaded showing all 8 job scenarios with correct parent
-status. Step 5 (matting benchmark) is the only remaining blocker — needs
-GPU access and real client jewelry photos. Check
-`phases/phase-0-foundation.md` for the itemized checkpoint status and
+status. Step 5 (matting benchmark) is **moot** — local matting was dropped
+entirely on 2026-08-07, see `docs/decisions/0001-drop-local-matting.md`.
+Check `phases/phase-0-foundation.md` for the itemized checkpoint status and
 `phases/phase-roadmap.md` before starting any work.
 
-`app/workers/health.py` was added during Step 4 for the `health.ping_gpu`/
-`health.ping_io` verification tasks — it isn't in the folder structure below
-because Step 4 asked for these tasks without specifying a file and neither
-belonged in `matting.py` or `generation.py`.
+`app/workers/health.py` was added during Step 4 for the `health.ping_io`
+verification task — it isn't in the folder structure below because Step 4
+asked for this without specifying a file and it doesn't belong in
+`generation.py` or `qa.py`.

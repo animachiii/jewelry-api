@@ -28,9 +28,16 @@ from app.db.session import async_session_factory
 hasher = PasswordHasher()
 
 
-def _generate_key(prefix: str) -> tuple[str, str]:
-    """Returns (key_prefix, raw_key). Only the Argon2 hash is ever stored."""
-    raw = f"{prefix}_{secrets.token_urlsafe(24)}"
+def _generate_key() -> tuple[str, str]:
+    """Returns (key_prefix, raw_key). Only the Argon2 hash is ever stored.
+
+    key_prefix is docs/schema.md's "first 8 chars of the key, for lookup and
+    logs" — the raw key must be fully random from the start, not prefixed
+    with a human-readable label. A label like "client_" eats into that fixed
+    8-char window and collapses same-scope keys down to ~1 char of entropy,
+    causing key_prefix collisions.
+    """
+    raw = secrets.token_urlsafe(32)
     return raw[:8], raw
 
 
@@ -48,7 +55,7 @@ async def seed_api_clients(session: AsyncSession) -> dict[str, ApiClient]:
         if existing is not None:
             clients[name] = existing
             continue
-        key_prefix, raw_key = _generate_key(scope)
+        key_prefix, raw_key = _generate_key()
         client = ApiClient(
             name=name,
             key_prefix=key_prefix,

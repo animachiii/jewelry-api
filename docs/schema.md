@@ -42,6 +42,12 @@ sync_status_t    SUCCESS | FAILED
 `SKIPPED` means the client explicitly did not submit this angle. It is not a failure and
 does not count toward partial-success math.
 
+`sub_job_status_t.MATTING` and `asset_kind_t.MATTE` are **vestigial** — see
+`docs/decisions/0001-drop-local-matting.md`. Local matting was dropped after
+this schema landed; removing an enum value requires recreating the Postgres
+type, which wasn't worth it for values nothing referenced yet. No code path
+sets either value. Do not use them in new code.
+
 ---
 
 ## `api_clients`
@@ -199,8 +205,9 @@ Index: `(job_id, kind)`, `(expires_at)` where not null.
 | Bucket | Public? | Contents | Retention |
 | :--- | :--- | :--- | :--- |
 | `jewelry-inputs` | Private | Client-uploaded source photos | 90 days (retry window + audit) |
-| `jewelry-mattes` | Private | 8-bit alpha mattes | 30 days |
 | `jewelry-outputs` | Private | Final generated images | Indefinite until client policy set |
+
+`jewelry-mattes` was deleted 2026-08-07 — see `docs/decisions/0001-drop-local-matting.md`.
 
 Path convention: `{job_id}/{angle}/{kind}_{short_uuid}.{ext}`
 

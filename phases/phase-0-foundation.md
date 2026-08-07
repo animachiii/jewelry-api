@@ -1,5 +1,14 @@
 # Phase 0 — Foundation & Environment
 
+> **Superseded 2026-08-07:** local matting (Step 5, and the `gpu`/`io` queue
+> split it motivated in Steps 1/4) was dropped — see
+> `docs/decisions/0001-drop-local-matting.md`. Step 5's checkpoints were
+> never run (correctly blocked pending GPU access + client photos) and are
+> now moot rather than pending. Steps 1-4/6/7 below are historical record of
+> what Phase 0 actually verified at the time — they describe a two-queue
+> design that no longer exists in the codebase. Current architecture lives
+> in `CLAUDE.md` and `docs/`, not here.
+
 ## Objective
 
 Stand up the skeleton every later phase depends on: repo structure, Supabase Postgres with
