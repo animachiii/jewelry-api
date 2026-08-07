@@ -29,6 +29,28 @@ async def store(client_id: str, idempotency_key: str, job_id: str) -> None:
     await _client().set(f"idem:{client_id}:{idempotency_key}", job_id, ex=TTL_SECONDS)
 
 
+class IdempotencyKeyConflictError(AppError):
+    code = ErrorCode.IDEMPOTENCY_KEY_CONFLICT
+    http_status = 409
+
+
+async def get_replay(client_id: str, idempotency_key: str) -> tuple[str, str] | None:
+    """Returns (job_id, payload_hash) if this key has been used before."""
+    value = await _client().get(f"idem:{client_id}:{idempotency_key}")
+    if value is None:
+        return None
+    job_id, _, payload_hash = str(value).partition("|")
+    return job_id, payload_hash
+
+
+async def store_replay(
+    client_id: str, idempotency_key: str, job_id: str, payload_hash: str
+) -> None:
+    await _client().set(
+        f"idem:{client_id}:{idempotency_key}", f"{job_id}|{payload_hash}", ex=TTL_SECONDS
+    )
+
+
 class IdempotencyKeyRequiredError(AppError):
     code = ErrorCode.IDEMPOTENCY_KEY_REQUIRED
     http_status = 400
