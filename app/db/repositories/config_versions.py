@@ -1,5 +1,6 @@
 """All queries against `config_versions`. See docs/conventions.md."""
 
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -12,6 +13,16 @@ from app.db.models.enums import SyncStatus
 
 async def get_active(session: AsyncSession) -> ConfigVersion | None:
     result = await session.execute(select(ConfigVersion).where(ConfigVersion.is_active))
+    return result.scalar_one_or_none()
+
+
+async def get_by_id(session: AsyncSession, config_version_id: uuid.UUID) -> ConfigVersion | None:
+    """A job pins its config_version_id at creation — workers must read the
+    pinned row, never the currently active one. See docs/business-rules.md §9.
+    """
+    result = await session.execute(
+        select(ConfigVersion).where(ConfigVersion.id == config_version_id)
+    )
     return result.scalar_one_or_none()
 
 

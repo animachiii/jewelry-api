@@ -60,16 +60,27 @@ app/
     status_service.py      GET /status response assembly, retryable/signed-URL logic
                             (Phase 1 Step 3 — not in the original sketch)
     storage_service.py     Supabase Storage upload/download/signed URLs
-    cost_service.py        Cost event recording
+    cost_service.py        Cost event recording (Phase 6)
+    generation_service.py  Real single-sub-job generation call: prompt resolution,
+                            Mode A/B input sourcing, rate limiting, cost logging,
+                            failure classification (Phase 6 — not in the original
+                            sketch; app/workers/generation.py is a thin wrapper)
+    rate_limiter.py         Redis fixed-window counter for the Gemini provider,
+                            `provider:gemini:tokens:{minute}` (Phase 6 — distinct
+                            from app/core/ratelimit.py's per-client API limiting,
+                            still unwired, Phase 10)
   workers/
     celery_app.py          Celery config, queue routing, beat schedule
     health.py              ping_io verification task (added Step 4, not in original plan)
-    generation.py          IO queue: Gemini calls (real-photo and synthetic — no matting step, see docs/decisions/0001-drop-local-matting.md)
-    qa.py                  IO queue: perceptual similarity gate (synthetic angles only)
-    orchestration.py       Group fan-out, chord callback, parent rollup
+    generation.py          `generation.transform_photo` — session lifecycle only,
+                            real logic in services/generation_service.py (Phase 6)
+    qa.py                  IO queue: perceptual similarity gate (synthetic angles only,
+                            Phase 9 — still a stub)
+    orchestration.py       Group fan-out, chord callback, parent rollup (Phase 7 — still a stub)
   providers/
-    base.py                GenerationProvider ABC
-    gemini.py               Gemini implementation
+    base.py                GenerationProvider ABC + GenerationResult (Phase 6)
+    gemini.py               GeminiProvider — the only module that imports google.genai,
+                            and only inside a deferred _call_api seam (Phase 6)
 migrations/                Alembic
 scripts/
   seed_dev.py              Idempotent dev seed data — all 8 job-state scenarios
@@ -252,3 +263,27 @@ asset of any kind and stamps the new `assets.purged_at` column (migration
 open decision #5); the mechanism is generic across `AssetKind` so that
 decision only ever needs to change one dict. See
 `phases/phase-4-storage-ingest.md` for the full self-audit.
+
+Phase 6 — Gemini Generation Worker is **complete**: `GenerationProvider`
+(`app/providers/base.py`) is a real abstraction — `GeminiProvider`
+(`app/providers/gemini.py`) is the only module that imports `google.genai`,
+and even there the import is deferred inside a `_call_api` seam so unit
+tests never touch the network (no real `GEMINI_API_KEY` exists in this
+environment, same situation Phase 3 hit with Sheets — `success.json`'s
+`data` field was a literal placeholder, not valid base64, so this phase also
+fixed that fixture). `app/services/rate_limiter.py` is a Redis fixed-window
+counter (`provider:gemini:tokens:{minute}`) shared across workers; a window
+at capacity routes through the same `RATE_LIMITED` path as a live 429.
+`app/services/generation_service.py::transform_photo` runs one sub-job
+end-to-end: Mode A (real-photo) completes straight to `COMPLETED`; Mode B
+(synthetic) success lands in `QA_REVIEW` unscored — Phase 9 owns actual
+scoring, this phase deliberately does not preempt it. `SAFETY_REFUSAL`
+rejects immediately with no retry; transient classes get up to 3 in-process
+attempts (a documented simplification — not literal Celery
+`autoretry_for`/backoff, see `phases/phase-6-generation-worker.md`). A cost
+event is written for every provider call, including refusals. Added
+`config_versions.payload.global.unit_cost_usd` (schema gap: nothing priced
+a Gemini call before this). `app/workers/generation.py` is a thin
+session-lifecycle wrapper — nothing calls it yet (Phase 7's fan-out is what
+wires a real job to it); a job created via `/generate` still sits at
+`PENDING` forever until then, which is correct, not a regression.

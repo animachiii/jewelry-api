@@ -135,7 +135,7 @@ def resolve_angle_plan(body: GenerateJobRequest) -> list[ResolvedAnglePlan]:
     return plan
 
 
-def _find_category(config_version: ConfigVersion, category_code: str) -> dict[str, Any] | None:
+def find_category(config_version: ConfigVersion, category_code: str) -> dict[str, Any] | None:
     for cat in config_version.payload["categories"]:
         if cat["code"] == category_code:
             return dict(cat)
@@ -232,7 +232,7 @@ async def create_job_for_request(
             )
         return await _build_accepted_response(existing.id, body)
 
-    category = _find_category(config_version, body.category_code)
+    category = find_category(config_version, body.category_code)
     if category is None:
         raise CategoryNotFoundError(
             f"Category {body.category_code} not found.",

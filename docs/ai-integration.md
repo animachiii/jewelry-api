@@ -50,26 +50,37 @@ Never chain Mode B off another generated image; hallucination compounds.
 **Recorded on every call** (to `sub_jobs`): `prompt_snapshot`, `model_version`, `seed`.
 Without all three, a bad output cannot be reproduced or debugged.
 
-**Rate limiting.** All provider calls pass through a **Redis token bucket**
-(`provider:gemini:tokens`) shared across every worker. Four sub-tasks per job
+**Rate limiting (Phase 6, `app/services/rate_limiter.py`).** All provider
+calls pass through a **Redis fixed-window counter**
+(`provider:gemini:tokens:{minute-window}`) shared across every worker,
+capacity from `GEMINI_RATE_LIMIT_PER_MINUTE`. Four sub-tasks per job
 multiplied across concurrent jobs will otherwise burst straight into 429s,
 which under fail-fast converts directly into `PARTIAL_SUCCESS` for every
-in-flight job at once.
+in-flight job at once. A window at capacity is treated identically to a live
+429 from Gemini — same `RATE_LIMITED` failure path, not a special case.
 
 **Abstraction boundary.** All calls go through `GenerationProvider` in
-`app/providers/base.py`. Task bodies must not import `google-genai`. A second
-provider is deferred to v3, but the seam costs an afternoon now and a
-rewrite later.
+`app/providers/base.py`. Task bodies must not import `google-genai` — only
+`app/providers/gemini.py` does, and even there the import is deferred inside
+`_call_api` so unit tests never touch it. A second provider is deferred to
+v3, but the seam costs an afternoon now and a rewrite later.
 
 **Failure modes:**
 
 | Symptom | Class | Internal backoff |
 | :--- | :--- | :--- |
-| HTTP 429 | `RATE_LIMITED` | Yes, 3 attempts |
+| HTTP 429 / local rate-limit window exhausted | `RATE_LIMITED` | Yes, 3 attempts |
 | HTTP 5xx | `TRANSIENT_PROVIDER` | Yes, 3 attempts |
 | Timeout / connection reset | `TRANSIENT_NETWORK` | Yes, 3 attempts |
 | Safety refusal / empty candidate | `SAFETY_REFUSAL` → `REJECTED` | **No** |
 | Malformed response | `INTERNAL` | No |
+
+**Retry implementation (Phase 6):** the "3 attempts" above is a tight
+in-process loop inside `app/services/generation_service.py`
+(`transform_photo`), not Celery-level `autoretry_for`/`retry_backoff` — no
+exponential/jitter delay between in-process attempts yet. Chosen for
+deterministic testability under `task_always_eager`; revisit as real Celery
+retry if backoff timing between attempts becomes operationally necessary.
 
 A safety refusal is deterministic. Retrying it wastes money and time, and the
 ERP must not offer a retry button for it.

@@ -110,7 +110,8 @@ Partial unique index: `CREATE UNIQUE INDEX ON config_versions (is_active) WHERE 
   "global": {
     "model_version": "gemini-<pinned-version>",
     "qa_similarity_threshold": 0.82,
-    "default_negative_prompt": "..."
+    "default_negative_prompt": "...",
+    "unit_cost_usd": 0.02
   }
 }
 ```
@@ -123,6 +124,12 @@ category/angle pair plus a `Global` key/value tab. The exact column layout is an
 assumed convention, not yet confirmed against a real client sheet (roadmap open
 decision #2) — see `app/providers/sheets.py`'s module docstring for the assumed
 columns.
+
+**`global.unit_cost_usd` (Phase 6):** added to satisfy docs/business-rules.md
+§10 — "`unit_cost_usd` comes from configuration, never a hardcoded constant."
+The original payload shape had no cost field at all; this is a placeholder
+Gemini image-generation price, to be confirmed against real billing before
+launch, same status as `qa_similarity_threshold`.
 
 ---
 
@@ -285,7 +292,7 @@ jobs 1──∞ job_events
 | `config:active` | Serialized active config payload | 15 min |
 | `idem:{client_id}:{key}` | Idempotency key → job_id | 24 h |
 | `ratelimit:{client_id}:{minute}` | Token bucket counter | 2 min |
-| `provider:gemini:tokens` | Global provider token bucket | rolling |
+| `provider:gemini:tokens:{minute-window}` | Global provider rate-limit counter (Phase 6, `app/services/rate_limiter.py`) — fixed-window, not a true token bucket | 2 min |
 | `celery-*` | Broker and result backend | Celery-managed |
 
 Every one of these is rebuildable. Flushing Redis must not lose client-visible state.

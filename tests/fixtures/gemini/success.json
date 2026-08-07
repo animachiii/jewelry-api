@@ -2,7 +2,14 @@
   "candidates": [
     {
       "content": {
-        "parts": [{ "inline_data": { "mime_type": "image/png", "data": "<base64-image-bytes>" } }]
+        "parts": [
+          {
+            "inline_data": {
+              "mime_type": "image/png",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGPkEpFjYGBgYgADAALmAEAUQs4PAAAAAElFTkSuQmCC"
+            }
+          }
+        ]
       },
       "finish_reason": "STOP"
     }

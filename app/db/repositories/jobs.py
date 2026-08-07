@@ -20,6 +20,19 @@ async def get_by_id_for_client(
     return result.scalar_one_or_none()
 
 
+async def get_by_id(session: AsyncSession, job_id: uuid.UUID) -> Job | None:
+    """Unscoped — for worker use, where there is no requesting client to
+    scope against. Routes must use `get_by_id_for_client` instead.
+    """
+    result = await session.execute(select(Job).where(Job.id == job_id))
+    return result.scalar_one_or_none()
+
+
+async def get_sub_job_by_id(session: AsyncSession, sub_job_id: uuid.UUID) -> SubJob | None:
+    result = await session.execute(select(SubJob).where(SubJob.id == sub_job_id))
+    return result.scalar_one_or_none()
+
+
 async def get_sub_jobs(session: AsyncSession, job_id: uuid.UUID) -> list[SubJob]:
     result = await session.execute(
         select(SubJob).where(SubJob.job_id == job_id).order_by(SubJob.angle)

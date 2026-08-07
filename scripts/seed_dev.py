@@ -140,6 +140,9 @@ CATEGORY_PAYLOAD = {
         "model_version": "gemini-2.5-flash-image-preview",
         "qa_similarity_threshold": 0.82,
         "default_negative_prompt": "blurry, distorted, extra gemstones, wrong prong count",
+        # Placeholder — Gemini image-generation pricing, to be confirmed against
+        # real billing before launch. See docs/schema.md and phases/phase-6-generation-worker.md.
+        "unit_cost_usd": 0.02,
     },
 }
 
@@ -277,8 +280,8 @@ async def _add_sub_job(
                 provider="gemini",
                 operation="image_generation",
                 model_version=CATEGORY_PAYLOAD["global"]["model_version"],
-                unit_cost_usd=0.02,
-                total_cost_usd=0.02,
+                unit_cost_usd=CATEGORY_PAYLOAD["global"]["unit_cost_usd"],
+                total_cost_usd=CATEGORY_PAYLOAD["global"]["unit_cost_usd"],
             )
         )
 
