@@ -4,6 +4,7 @@ real Supabase project for the presign -> PUT -> /generate round trip (same
 approach as tests/integration/test_mock_fixtures.py).
 """
 
+import io
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
@@ -12,6 +13,7 @@ import httpx
 import pytest
 from argon2 import PasswordHasher
 from httpx import ASGITransport, AsyncClient
+from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,6 +78,14 @@ async def api_client_key(db_session: AsyncSession, active_config: ConfigVersion)
     return raw
 
 
+def _real_jpeg_bytes(size: tuple[int, int] = (32, 24)) -> bytes:
+    """A tiny but fully valid JPEG — Phase 4 makes /generate actually decode
+    uploaded bytes, so fixtures need a real image, not placeholder text."""
+    buf = io.BytesIO()
+    Image.new("RGB", size, color=(200, 10, 10)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
 async def _presign_and_upload(client: AsyncClient, key: str, angle: str) -> str:
     resp = await client.post(
         "/api/v2/uploads/presign",
@@ -85,7 +95,9 @@ async def _presign_and_upload(client: AsyncClient, key: str, angle: str) -> str:
     assert resp.status_code == 200, resp.text
     presigned = resp.json()["angles"][0]
     put_resp = httpx.put(
-        presigned["upload_url"], content=b"test-bytes", headers={"Content-Type": "image/jpeg"}
+        presigned["upload_url"],
+        content=_real_jpeg_bytes(),
+        headers={"Content-Type": "image/jpeg"},
     )
     assert put_resp.status_code == 200
     return str(presigned["storage_path"])
@@ -130,6 +142,20 @@ async def test_happy_path_creates_job_sub_jobs_asset_and_event(
     assert sub_jobs["DIAGONAL"].source_type.value == "SYNTHETIC"
     assert sub_jobs["SIDE"].status.value == "SKIPPED"
     assert sub_jobs["TOP"].status.value == "SKIPPED"
+
+    from app.db.models.assets import Asset
+
+    input_asset = (
+        await db_session.execute(select(Asset).where(Asset.id == sub_jobs["FRONT"].input_asset_id))
+    ).scalar_one()
+    assert input_asset.mime_type == "image/jpeg"
+    assert input_asset.width_px == 32
+    assert input_asset.height_px == 24
+    assert input_asset.bytes is not None and input_asset.bytes > 0
+    assert input_asset.checksum_sha256 is not None and len(input_asset.checksum_sha256) == 64
+    assert input_asset.expires_at is not None
+    delta_days = (input_asset.expires_at - input_asset.created_at).days
+    assert 89 <= delta_days <= 90
 
     events = (
         (await db_session.execute(select(JobEvent).where(JobEvent.job_id == job_id)))

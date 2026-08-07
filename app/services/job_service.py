@@ -17,12 +17,13 @@ from app.core.idempotency import IdempotencyKeyConflictError
 from app.db.models.api_clients import ApiClient
 from app.db.models.assets import Asset
 from app.db.models.config_versions import ConfigVersion
-from app.db.models.enums import AssetKind, SourceType, SubJobStatus
+from app.db.models.enums import Angle, AssetKind, SourceType, SubJobStatus
 from app.db.models.jobs import SubJob
 from app.db.repositories import assets as assets_repo
 from app.db.repositories import job_events as job_events_repo
 from app.db.repositories import jobs as jobs_repo
-from app.services import storage_service
+from app.services import image_validation, retention_policy, storage_service
+from app.services.image_validation import ImageMetadata
 
 MAX_RETRY_ATTEMPTS = 3
 POLL_AFTER_MS = 1500
@@ -143,9 +144,17 @@ def _find_category(config_version: ConfigVersion, category_code: str) -> dict[st
 
 def _validate_request(
     body: GenerateJobRequest, category: dict[str, Any], client_id: uuid.UUID
-) -> None:
+) -> dict[Angle, ImageMetadata]:
     """See docs/api-routes.md /generate validation rules 1-5 (rule 1, category
-    lookup, already happened by the time this is called)."""
+    lookup, already happened by the time this is called).
+
+    Phase 4 adds a real content check to rule 4: existence in the bucket is
+    no longer sufficient. The object is downloaded and structurally
+    validated as a decodable image (see app/services/image_validation.py) —
+    a client PUTting arbitrary bytes to a signed upload URL used to sail
+    straight through to job creation. Returns the extracted image metadata
+    per uploaded angle so the caller does not have to re-download.
+    """
     if not category["is_active"]:
         raise CategoryInactiveError(
             f"Category {category['code']} is not active.",
@@ -153,6 +162,7 @@ def _validate_request(
         )
 
     requested_count = 0
+    image_metadata: dict[Angle, ImageMetadata] = {}
     for angle, spec in body.angles.items():
         angle_config = category["angles"].get(angle.value, {})
         if spec.mode == "skipped":
@@ -182,9 +192,14 @@ def _validate_request(
                     f"storage_path {spec.storage_path} does not belong to this client.",
                     details={"storage_path": spec.storage_path},
                 )
+            image_metadata[angle] = image_validation.inspect_and_validate(
+                settings.BUCKET_INPUTS, spec.storage_path
+            )
 
     if requested_count == 0:
         raise NoAnglesRequestedError("At least one angle must not be skipped.")
+
+    return image_metadata
 
 
 async def _build_accepted_response(
@@ -223,7 +238,7 @@ async def create_job_for_request(
             f"Category {body.category_code} not found.",
             details={"category_code": body.category_code},
         )
-    _validate_request(body, category, client.id)
+    image_metadata = _validate_request(body, category, client.id)
 
     requested_angles = sum(1 for spec in body.angles.values() if spec.mode != "skipped")
 
@@ -264,12 +279,19 @@ async def create_job_for_request(
             )
         else:
             assert spec.storage_path is not None
+            meta = image_metadata[angle]
             asset = assets_repo.create_asset(
                 session,
                 job_id=job.id,
                 kind=AssetKind.INPUT,
                 bucket=settings.BUCKET_INPUTS,
                 storage_path=spec.storage_path,
+                mime_type=meta.mime_type,
+                width_px=meta.width_px,
+                height_px=meta.height_px,
+                bytes_=meta.bytes,
+                checksum_sha256=meta.checksum_sha256,
+                expires_at=retention_policy.compute_expires_at(AssetKind.INPUT),
             )
             await session.flush()  # assigns asset.id
             jobs_repo.create_sub_job(

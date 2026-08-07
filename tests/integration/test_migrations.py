@@ -68,3 +68,34 @@ def test_0003_adds_and_removes_payload_hash(
     assert "payload_hash" not in asyncio.run(_columns(async_url, "jobs"))
 
     command.upgrade(cfg, "head")
+
+
+def test_0004_adds_and_removes_assets_purged_at(
+    postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 4 — assets.purged_at backs the retention worker's "already
+    swept" check (app/services/retention_service.py)."""
+    async_url = postgres_container.get_connection_url()
+    monkeypatch.setattr("app.config.settings.DATABASE_URL", async_url)
+
+    async def _reset_schema() -> None:
+        engine = create_async_engine(async_url)
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+        await engine.dispose()
+
+    asyncio.run(_reset_schema())
+
+    cfg = Config("alembic.ini")
+
+    command.upgrade(cfg, "0003")
+    assert "purged_at" not in asyncio.run(_columns(async_url, "assets"))
+
+    command.upgrade(cfg, "0004")
+    assert "purged_at" in asyncio.run(_columns(async_url, "assets"))
+
+    command.downgrade(cfg, "0003")
+    assert "purged_at" not in asyncio.run(_columns(async_url, "assets"))
+
+    command.upgrade(cfg, "head")
