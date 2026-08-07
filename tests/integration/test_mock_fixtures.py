@@ -261,27 +261,22 @@ async def test_presign_returns_url_accepting_real_put(
     assert put_resp.status_code == 200
 
 
-async def test_generate_mock_returns_202_with_seeded_job_id_and_replays_on_same_key(
+async def test_generate_creates_a_real_new_job_not_a_seeded_one(
     client: AsyncClient, dev_client_key: str, seeded_jobs: dict[str, Job]
 ) -> None:
-    body = {"category_code": "RING", "angles": {"FRONT": {"synthetic": True}}}
+    """/generate became real in Phase 2 (phases/phase-2-data-model.md) — it no
+    longer stands in with an existing seeded job the way Phase 1's mock did.
+    Full validation/idempotency coverage lives in test_generate_real.py; this
+    just confirms the seeded-job-scoped fixtures in this file don't
+    accidentally still exercise mock behavior.
+    """
+    body = {"category_code": "RING", "angles": {"DIAGONAL": {"synthetic": True}}}
     headers = {"X-API-Key": dev_client_key, "Idempotency-Key": "test-key-1"}
-    resp1 = await client.post("/api/v2/generate", headers=headers, json=body)
-    assert resp1.status_code == 202
-    job_id_1 = resp1.json()["job_id"]
-    assert uuid.UUID(job_id_1)
-
-    resp2 = await client.post("/api/v2/generate", headers=headers, json=body)
-    assert resp2.status_code == 202
-    assert resp2.json()["job_id"] == job_id_1
-
-    resp3 = await client.post(
-        "/api/v2/generate",
-        headers=headers,
-        json={"category_code": "NECKLACE", "angles": {"FRONT": {"synthetic": True}}},
-    )
-    assert resp3.status_code == 409
-    assert resp3.json()["error"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
+    resp = await client.post("/api/v2/generate", headers=headers, json=body)
+    assert resp.status_code == 202, resp.text
+    job_id = resp.json()["job_id"]
+    assert uuid.UUID(job_id)
+    assert job_id not in {str(j.id) for j in seeded_jobs.values()}
 
 
 async def test_generate_missing_idempotency_key_400(
@@ -336,21 +331,17 @@ async def test_retry_on_completed_angle_returns_409(
     assert retry_resp.status_code == 409
 
 
-async def test_mock_mode_false_makes_generate_and_retry_raise(
+async def test_mock_mode_false_makes_retry_raise(
     client: AsyncClient,
     dev_client_key: str,
     seeded_jobs: dict[str, Job],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Only /retry is still MOCK_MODE-gated as of Phase 2 — real retry
+    execution is Phase 8's job. /generate became real in Phase 2 and works
+    the same regardless of MOCK_MODE; see test_generate_real.py.
+    """
     monkeypatch.setattr(settings, "MOCK_MODE", False)
-
-    resp = await client.post(
-        "/api/v2/generate",
-        headers={"X-API-Key": dev_client_key, "Idempotency-Key": "k"},
-        json={"category_code": "RING", "angles": {"FRONT": {"synthetic": True}}},
-    )
-    assert resp.status_code == 500
-    assert resp.json()["error"]["code"] == "INTERNAL_ERROR"
 
     job = seeded_jobs["seed-partial-retryable"]
     retry_resp = await client.post(
@@ -358,3 +349,4 @@ async def test_mock_mode_false_makes_generate_and_retry_raise(
         headers={"X-API-Key": dev_client_key, "Idempotency-Key": "k2"},
     )
     assert retry_resp.status_code == 500
+    assert retry_resp.json()["error"]["code"] == "INTERNAL_ERROR"

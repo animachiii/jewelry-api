@@ -128,6 +128,7 @@ One row per `POST /api/v2/generate`.
 | `id` | UUID PK | This is the `job_id` returned to the client |
 | `client_id` | UUID NOT NULL FK → `api_clients.id` | |
 | `idempotency_key` | TEXT NOT NULL | Client-supplied |
+| `payload_hash` | TEXT NOT NULL | SHA-256 of the normalized `/generate` request body. Added in migration 0003 — durable version of the same-key/different-payload 409 check in docs/business-rules.md §8; a Redis-only hash doesn't survive the 24h TTL. |
 | `category_code` | TEXT NOT NULL | Must exist in the active config version |
 | `config_version_id` | UUID NOT NULL FK → `config_versions.id` | Pinned at creation. Never changes. |
 | `status` | `job_status_t` NOT NULL DEFAULT `PENDING` | |

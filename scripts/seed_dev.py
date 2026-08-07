@@ -190,6 +190,7 @@ async def _make_job(
     job = Job(
         client_id=client.id,
         idempotency_key=idempotency_key,
+        payload_hash=hashlib.sha256(idempotency_key.encode()).hexdigest(),
         category_code="RING",
         config_version_id=config_version.id,
         status=status,

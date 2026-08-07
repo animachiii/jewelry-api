@@ -51,8 +51,12 @@ app/
     repositories/          All queries live here. Routes never query directly.
   services/
     config_service.py      GET /config response assembly from the active config_versions row
-    job_service.py          MOCK_MODE retry-precondition checks (Phase 1); real job
-                            creation/state machine lands in Phase 2
+    job_service.py          Real POST /generate: validation (docs/business-rules.md §1),
+                            job/sub-job/asset creation, idempotency with payload_hash
+                            (Phase 2). Also still holds retry-precondition checks for
+                            the MOCK_MODE retry endpoint (real retry execution is Phase 8).
+    status_rollup.py        compute_parent_status — pure function, docs/business-rules.md §3
+                            (Phase 2 — not in the original sketch)
     status_service.py      GET /status response assembly, retryable/signed-URL logic
                             (Phase 1 Step 3 — not in the original sketch)
     storage_service.py     Supabase Storage upload/download/signed URLs
@@ -183,3 +187,30 @@ something this session can complete unattended. See
 `health.ping_io` verification task — it isn't in the folder structure below
 because Step 4 asked for this without specifying a file and it doesn't
 belong in `generation.py` or `qa.py`.
+
+Phase 2 — Data Model & Job State Machine is **complete**, verified live
+against the real Supabase project:
+
+- `POST /generate` is real: validates category/angle/synthetic against the
+  client's pinned active config version, verifies uploaded `storage_path`s
+  exist and belong to the client, creates `Job` + `SubJob` (one per angle,
+  correct `status`/`source_type`) + `Asset` (uploaded angles) + a
+  `JOB_CREATED` `JobEvent` in one transaction. It no longer checks
+  `MOCK_MODE` at all — only `/retry` still does (real retry execution is
+  Phase 8).
+- Idempotency is durable: `jobs.payload_hash` (migration `0003`) makes the
+  same-key/different-payload `409` survive past Redis's 24h TTL; a
+  concurrent-insert race on the same new key is caught and resolved as a
+  replay.
+- `POST /uploads/presign` paths now embed `client_id`
+  (`pending/{client_id}/{group_id}/{angle}/...`) so `/generate` can verify
+  asset ownership without a database row existing yet — a gap found and
+  closed while starting this phase, documented in
+  `phases/phase-2-data-model.md`.
+- `compute_parent_status` (`app/services/status_rollup.py`) implements
+  `docs/business-rules.md` §3 exactly, tested against every row of that
+  table — ready for Phase 7/8/9 to call, though nothing calls it yet since
+  no sub-job executes in this phase (jobs sit at `PENDING` until a worker
+  exists).
+- A job created here does not progress on its own — Celery/Gemini
+  execution is Phase 6/7's job, not this one's.

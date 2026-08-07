@@ -45,6 +45,7 @@ class Job(Base):
         UUID(as_uuid=True), ForeignKey("api_clients.id"), nullable=False
     )
     idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String, nullable=False)
     category_code: Mapped[str] = mapped_column(String, nullable=False)
     config_version_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("config_versions.id"), nullable=False

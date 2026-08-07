@@ -3,8 +3,11 @@
 Real signed upload URLs against the live `jewelry-inputs` bucket. The path
 convention in docs/schema.md is `{job_id}/{angle}/{kind}_{short_uuid}.{ext}`,
 but no job exists yet at presign time — this endpoint runs before /generate.
-We group this request's angles under a `pending/{uuid}` prefix; the client
-quotes the resulting `storage_path` back verbatim on /generate.
+We group this request's angles under `pending/{client_id}/{group_id}`; the
+client_id segment is what lets /generate's "storage_path belongs to this
+client" check (docs/api-routes.md validation rule 4) verify ownership without
+a database row, since no Asset exists yet either. The client quotes the
+resulting `storage_path` back verbatim on /generate and never parses it.
 """
 
 import uuid
@@ -41,7 +44,9 @@ async def presign_uploads(
 
     angles = []
     for angle in body.angles:
-        storage_path = f"pending/{group_id}/{angle.value}/input_{uuid.uuid4().hex[:8]}.jpg"
+        storage_path = (
+            f"pending/{client.id}/{group_id}/{angle.value}/input_{uuid.uuid4().hex[:8]}.jpg"
+        )
         result = storage_service.generate_upload_url(settings.BUCKET_INPUTS, storage_path)
         angles.append(
             PresignedAngle(
