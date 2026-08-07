@@ -37,7 +37,25 @@ Pulls Google Sheets, normalizes, hashes, and writes a new `config_versions` row 
 hash changed. Activates it and invalidates the Redis cache. **Ops-only auth scope.**
 
 Idempotent: an unchanged sheet returns the existing active version and creates nothing.
-Also runs on a Celery beat schedule.
+Also runs on a Celery beat schedule (`CONFIG_SYNC_CRON`, Celery task `config.sync`).
+
+Returns `202` with `{ "config_version": int, "sync_status": "SUCCESS" | "FAILED",
+"activated": bool }`. `sync_status`/`activated` describe the version the response
+refers to, not necessarily a version created by this call — see the three outcomes
+below.
+
+Three distinct outcomes, all `202` (this is an accepted-and-resolved sync, not an
+error path unless both Redis and Postgres are down — see docs/business-rules.md §9):
+
+1. **Sheets unreachable or not configured** — no new row is written (there is no
+   payload to record); returns the currently active version unchanged,
+   `activated: true`. This is the path exercised in every environment today, since
+   no real Google Sheets project exists yet (see phases/phase-3-config-service.md).
+2. **Sheets reachable, payload fails validation** — a new row is written with
+   `sync_status: FAILED` and `error_message` set, `is_active` stays `false`; the
+   response reports the *previous* (still active) version, not the failed one.
+3. **Sheets reachable, payload valid, hash changed** — a new row is written,
+   activated, and the Redis cache is invalidated; response reports the new version.
 
 ---
 

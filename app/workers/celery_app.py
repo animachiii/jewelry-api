@@ -33,6 +33,7 @@ celery_app = Celery(
         "app.workers.qa",
         "app.workers.orchestration",
         "app.workers.health",
+        "app.workers.config",
     ],
 )
 

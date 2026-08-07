@@ -214,6 +214,30 @@
         "title": "ConfigResponse",
         "type": "object"
       },
+      "ConfigSyncResponse": {
+        "description": "POST /internal/config/sync response \u2014 see docs/api-routes.md.",
+        "properties": {
+          "activated": {
+            "title": "Activated",
+            "type": "boolean"
+          },
+          "config_version": {
+            "title": "Config Version",
+            "type": "integer"
+          },
+          "sync_status": {
+            "title": "Sync Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "config_version",
+          "sync_status",
+          "activated"
+        ],
+        "title": "ConfigSyncResponse",
+        "type": "object"
+      },
       "CostEventItem": {
         "properties": {
           "angle": {
@@ -1113,7 +1137,9 @@
           "202": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigSyncResponse"
+                }
               }
             },
             "description": "Successful Response"

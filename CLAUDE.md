@@ -214,3 +214,22 @@ against the real Supabase project:
   exists).
 - A job created here does not progress on its own — Celery/Gemini
   execution is Phase 6/7's job, not this one's.
+
+Phase 3 — Config Service is **complete**, verified against real local Redis and
+testcontainers Postgres: `GET /config` now reads through the Redis `config:active`
+cache (15 min TTL, `app/services/config_service.py`) with Postgres as the fallback
+on a cache miss or a Redis error, never failing the request while either is up —
+`docs/business-rules.md` §9's fallback order. `POST /internal/config/sync`
+(`app/services/config_sync_service.py`) is real: it fetches Google Sheets through a
+new `app/providers/sheets.py` seam, normalizes rows into the `config_versions.payload`
+shape, SHA-256 hashes the normalized payload, and only writes+activates a new
+immutable row when the hash changed, invalidating the cache on activation. A
+validation failure records a `FAILED` row without activating it; a Sheets outage
+(the real state of every environment right now — no Sheets project exists, see
+roadmap open decision #2) writes nothing and falls back to the currently active
+version instead of failing. A Celery beat task `config.sync` (`app/workers/config.py`)
+now backs the `beat_schedule` entry that previously pointed at a nonexistent task.
+No migration was needed — `config_versions` already had every column this phase
+uses. See `phases/phase-3-config-service.md` for the full self-audit, including
+what's explicitly unverified (the real Sheets column layout, and a live beat tick
+against standing worker processes).
