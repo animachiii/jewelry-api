@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     BUCKET_INPUTS: str = "jewelry-inputs"
     BUCKET_OUTPUTS: str = "jewelry-outputs"
     SIGNED_URL_TTL_SECONDS: int = 3600
+    # Phase 4 — Celery beat schedule for app.workers.retention.expire_assets.
+    RETENTION_SWEEP_CRON: str = "0 3 * * *"
 
     # --- Redis ---
     REDIS_URL: str = "redis://localhost:6379/0"

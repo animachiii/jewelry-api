@@ -214,3 +214,22 @@ against the real Supabase project:
   exists).
 - A job created here does not progress on its own — Celery/Gemini
   execution is Phase 6/7's job, not this one's.
+
+Phase 4 — Storage & Ingest Pipeline is **complete**, verified live against
+the real Supabase project (Storage never mocked): `/generate` now
+downloads and structurally validates every uploaded image (decodable,
+supported format, non-empty — no local ML, see
+`docs/decisions/0001-drop-local-matting.md`) via
+`app/services/image_validation.py`, rejecting bad uploads with the existing
+`VALIDATION_ERROR` code rather than a new one; `Asset` rows for uploaded
+angles now get real `width_px`/`height_px`/`bytes`/`checksum_sha256`/
+`mime_type` and a `retention_policy`-computed `expires_at` (`INPUT`: 90
+days) instead of `NULL`s and a hardcoded MIME type. A new Celery beat task,
+`retention.expire_assets` (`app/workers/retention.py` +
+`app/services/retention_service.py`), removes Storage bytes for any expired
+asset of any kind and stamps the new `assets.purged_at` column (migration
+`0005`) — the row is never deleted. `OUTPUT` retention stays `NULL`
+(indefinite) pending the client policy decision (`phases/phase-roadmap.md`
+open decision #5); the mechanism is generic across `AssetKind` so that
+decision only ever needs to change one dict. See
+`phases/phase-4-storage-ingest.md` for the full self-audit.

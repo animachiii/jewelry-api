@@ -15,7 +15,7 @@ Status values: `Not started` · `In progress` · `Complete`
 | 1 | API Contract & Mock Server | Full OpenAPI 3.1 spec, real auth, mock fixtures for all 8 job states. **Client + Flutter sign-off gate.** | Sequential after 0a | No | `phase-1-api-contract.md` | **Built & verified, sign-off pending** — spec/auth/fixtures done against real Supabase; no deployment for the Flutter team yet and the actual sign-off walkthrough hasn't happened (needs a human session) |
 | 2 | Data Model & Job State Machine | Repositories, job/sub-job creation, state transitions, parent-status rollup, idempotency, `job_events` audit trail. | Sequential after 1 | No | `phase-2-data-model.md` | **Complete** — verified live against real Supabase; `/generate` is real, `/retry` still MOCK_MODE (Phase 8) |
 | 3 | Config Service | Sheets → versioned Postgres snapshot → Redis cache. Real `GET /config`. Cold-cache and Sheets-outage fallback. Beat sync task. | After 2 · **‖ with 4** | No | — | Not started |
-| 4 | Storage & Ingest Pipeline | Real presigned uploads, image validation, asset persistence, retention/expiry lifecycle. | After 2 · **‖ with 3** | No | — | Not started |
+| 4 | Storage & Ingest Pipeline | Real presigned uploads, image validation, asset persistence, retention/expiry lifecycle. | After 2 · **‖ with 3** | No | `phase-4-storage-ingest.md` | **Complete** — verified live against real Supabase Storage; structural image validation, real asset metadata, `purged_at`-tracked retention worker |
 | 5 | ~~Matting Worker~~ | **Removed 2026-08-07** — see `docs/decisions/0001-drop-local-matting.md`. Background removal now happens inside Phase 6's Gemini call. | — | No | — | Removed |
 | 6 | Gemini Generation Worker | `GenerationProvider` abstraction, pinned model, token-bucket rate limiter, cost logging, refusal handling. Real-photo angles now include background removal in this one call (no matting step). | After 3 | 6a real-photo, 6b synthetic/reference-matrix | — | Not started |
 | 7 | Orchestration & Partial Success | Fat payload intake, Celery group fan-out, chord rollup, `PARTIAL_SUCCESS` computation, real `GET /status`. | **Sequential** after 6 | No | — | Not started |
@@ -65,7 +65,7 @@ Blocking or shaping later phases. Resolve during Phase 0 where possible.
 | 2 | The 7 exact category codes and per-category angle enablement | Phases 3, 6 | Open |
 | 3 | GPU host: RunPod / Lambda / bare metal / GCP | Phase 12 | Open |
 | 4 | Volume at launch and peak (jobs/day) | Phases 12, 13 | Open |
-| 5 | Output image retention policy | Phase 4 | Open |
+| 5 | Output image retention policy | Phase 4 | **Mechanism ready, policy value pending** — the retention worker (Phase 4) sweeps any `AssetKind` generically via `app/services/retention_policy.py`'s `RETENTION_DAYS` dict; `OUTPUT` is `None` (indefinite) until the client sets a number, at which point only that dict changes |
 | 6 | Tenancy — single-client or resold? | Phase 2 schema | Open |
 | 7 | Does any n8n v1 generation history need preserving? | Phase 14 scope | Open |
 | 8 | Has the client seen and accepted synthetic-angle output quality? | Phase 6b, 9 | Open |

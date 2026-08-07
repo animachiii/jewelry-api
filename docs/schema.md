@@ -197,6 +197,7 @@ Every stored image. Rows are never deleted.
 | `checksum_sha256` | TEXT NULL | |
 | `created_at` | TIMESTAMPTZ NOT NULL DEFAULT now() | |
 | `expires_at` | TIMESTAMPTZ NULL | Retention deadline; storage lifecycle removes bytes |
+| `purged_at` | TIMESTAMPTZ NULL | Set by the Phase 4 retention worker (`app/workers/retention.py`) once bytes are actually removed from Storage. `NULL` until then. Added in migration `0005`. The row itself is never deleted — a row with `purged_at` set and no bytes still answers "what did we produce for this SKU." |
 
 Unique: `(bucket, storage_path)`.
 Index: `(job_id, kind)`, `(expires_at)` where not null.

@@ -73,3 +73,11 @@ def exists(bucket: str, storage_path: str) -> bool:
     filename = Path(storage_path).name
     listing = get_client().storage.from_(bucket).list(parent)
     return any(item.get("name") == filename for item in listing)
+
+
+def delete(bucket: str, storage_path: str) -> None:
+    """Removes bytes for a single object. Idempotent — deleting an object
+    that is already gone does not raise. Used by the retention worker
+    (app/workers/retention.py); never deletes the Asset row itself.
+    """
+    get_client().storage.from_(bucket).remove([storage_path])
