@@ -1,7 +1,10 @@
 """Celery config, queue routing, beat schedule.
 
-Routing is declared here, not decided at call time — a task on the wrong
-queue is the failure mode the gpu/io split exists to prevent.
+Single "io" queue — the gpu/io split existed only to isolate VRAM-bound
+local matting from network-bound Gemini calls. Background removal now
+happens in the same Gemini call as everything else (see
+docs/decisions/0001-drop-local-matting.md), so there is no VRAM-bound work
+left to isolate.
 """
 
 from celery import Celery
@@ -26,7 +29,6 @@ celery_app = Celery(
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,
     include=[
-        "app.workers.matting",
         "app.workers.generation",
         "app.workers.qa",
         "app.workers.orchestration",
@@ -35,8 +37,6 @@ celery_app = Celery(
 )
 
 celery_app.conf.task_routes = {
-    "matting.*": {"queue": "gpu"},
-    "health.ping_gpu": {"queue": "gpu"},
     "generation.*": {"queue": "io"},
     "qa.*": {"queue": "io"},
     "config.sync": {"queue": "io"},

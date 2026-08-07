@@ -61,7 +61,6 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = [
-    "gpu: requires a physical GPU, skipped when unavailable",
     "integration: requires external services (testcontainers, etc.)",
 ]
 testpaths = ["tests"]

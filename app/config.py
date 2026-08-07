@@ -22,7 +22,6 @@ class Settings(BaseSettings):
     SUPABASE_URL: str = ""
     SUPABASE_SERVICE_KEY: str = ""
     BUCKET_INPUTS: str = "jewelry-inputs"
-    BUCKET_MATTES: str = "jewelry-mattes"
     BUCKET_OUTPUTS: str = "jewelry-outputs"
     SIGNED_URL_TTL_SECONDS: int = 3600
 
@@ -32,12 +31,9 @@ class Settings(BaseSettings):
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
 
     # --- Celery / workers ---
-    GPU_QUEUE_CONCURRENCY: int = 1
     IO_QUEUE_CONCURRENCY: int = 20
 
     # --- Models (pinned, never floating aliases) ---
-    MATTING_MODEL_ID: str = "ZhengPeng7/BiRefNet-matting"
-    MATTING_MODEL_REVISION: str = ""
     QA_MODEL_ID: str = ""
 
     # --- Google Sheets ---

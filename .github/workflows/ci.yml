@@ -56,8 +56,8 @@ jobs:
       - name: alembic upgrade head
         run: uv run alembic upgrade head
 
-      - name: pytest (excluding gpu)
-        run: uv run pytest -m "not gpu" --cov=app --cov-report=term-missing
+      - name: pytest
+        run: uv run pytest --cov=app --cov-report=term-missing
 
       - name: docker build
         run: docker build -t jewelry-api:ci .

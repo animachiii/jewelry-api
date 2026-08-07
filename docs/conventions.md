@@ -20,7 +20,7 @@
 | API routes | `kebab-case`, plural nouns | `/api/v2/jobs/{job_id}/angles/{angle}/retry` |
 | JSON fields | `snake_case` | `config_version` |
 | Env vars | `UPPER_SNAKE` | `SUPABASE_SERVICE_KEY` |
-| Celery tasks | `<module>.<verb>_<noun>` | `matting.extract_matte` |
+| Celery tasks | `<module>.<verb>_<noun>` | `generation.transform_photo` |
 | Redis keys | `colon:separated:lowercase` | `idem:{client_id}:{key}` |
 | Alembic migrations | `NNNN_short_description` | `0003_add_qa_columns` |
 
@@ -151,7 +151,6 @@ image bytes. Log the `key_prefix`, log the `storage_path`, never the signed URL.
   tests.
 - Provider calls use recorded fixtures in `tests/fixtures/`. **No live API calls in CI**
   — see @docs/ai-integration.md.
-- GPU tests are marked `@pytest.mark.gpu` and skipped when no card is present.
 - Test names state the expectation: `test_partial_success_when_one_of_four_angles_fails`.
 - Every phase checkpoint should map to a test that can be run to prove it.
 

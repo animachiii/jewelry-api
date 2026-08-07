@@ -11,14 +11,14 @@ Status values: `Not started` · `In progress` · `Complete`
 
 | # | Phase | Description | Dependency | Split? | File | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| 0 | Foundation & Environment | Repo scaffold, Supabase Postgres + full schema, Storage buckets, Redis/Celery split queues, seed data, CI skeleton, matting model benchmark + licensing decision. | **Sequential** — blocks all | 0a infra ‖ 0b benchmark | `phase-0-foundation.md` | In progress — 0a fully verified live against real Supabase (schema, storage, seed data); 0b blocked (no GPU / client photos) |
+| 0 | Foundation & Environment | Repo scaffold, Supabase Postgres + full schema, Storage buckets, Redis/Celery, seed data, CI skeleton. Matting benchmark dropped — see decision 0001. | **Sequential** — blocks all | No | `phase-0-foundation.md` | **Complete** — fully verified live against real Supabase (schema, storage, seed data), CI green with branch protection |
 | 1 | API Contract & Mock Server | Full OpenAPI 3.1 spec, real auth, mock fixtures for all 8 job states. **Client + Flutter sign-off gate.** | Sequential after 0a | No | `phase-1-api-contract.md` | Not started |
 | 2 | Data Model & Job State Machine | Repositories, job/sub-job creation, state transitions, parent-status rollup, idempotency, `job_events` audit trail. | Sequential after 1 | No | — | Not started |
 | 3 | Config Service | Sheets → versioned Postgres snapshot → Redis cache. Real `GET /config`. Cold-cache and Sheets-outage fallback. Beat sync task. | After 2 · **‖ with 4** | No | — | Not started |
 | 4 | Storage & Ingest Pipeline | Real presigned uploads, image validation, asset persistence, retention/expiry lifecycle. | After 2 · **‖ with 3** | No | — | Not started |
-| 5 | Matting Worker | BiRefNet on the `gpu` queue. Process-init model loading, VRAM-bounded concurrency, 8-bit alpha output. | After 0b + 4 · **‖ with 6** | 5a model wrapper, 5b Celery/VRAM | — | Not started |
-| 6 | Gemini Generation Worker | `GenerationProvider` abstraction, pinned model, token-bucket rate limiter, cost logging, refusal handling. | After 3 · **‖ with 5** | 6a real-photo, 6b synthetic/reference-matrix | — | Not started |
-| 7 | Orchestration & Partial Success | Fat payload intake, Celery group fan-out, chord rollup, `PARTIAL_SUCCESS` computation, real `GET /status`. | **Sequential** after 5 + 6 | No | — | Not started |
+| 5 | ~~Matting Worker~~ | **Removed 2026-08-07** — see `docs/decisions/0001-drop-local-matting.md`. Background removal now happens inside Phase 6's Gemini call. | — | No | — | Removed |
+| 6 | Gemini Generation Worker | `GenerationProvider` abstraction, pinned model, token-bucket rate limiter, cost logging, refusal handling. Real-photo angles now include background removal in this one call (no matting step). | After 3 | 6a real-photo, 6b synthetic/reference-matrix | — | Not started |
+| 7 | Orchestration & Partial Success | Fat payload intake, Celery group fan-out, chord rollup, `PARTIAL_SUCCESS` computation, real `GET /status`. | **Sequential** after 6 | No | — | Not started |
 | 8 | Failure Taxonomy & Retry | Failure classification, bounded backoff for transient classes, per-angle retry endpoint, `REJECTED` handling. | Sequential after 7 | No | — | Not started |
 | 9 | Output QA Gate | Perceptual similarity scoring for synthetic angles, threshold calibration, human review queue + decision endpoints. | After 6 · **‖ with 7/8** | No | — | Not started |
 | 10 | Auth & Security Hardening | Key rotation, per-client rate limits and quotas, secrets management, input sanitization, URL scoping, pen-test pass. | **‖ with 7/8/9** · before 12 | No | — | Not started |
@@ -27,7 +27,7 @@ Status values: `Not started` · `In progress` · `Complete`
 | 13 | Load, Soak & Capacity Tuning | Concurrency ceilings, queue depth under burst, VRAM saturation, Gemini quota behavior at peak, tuned worker counts. | Sequential after 12 | No | — | Not started |
 | 14 | V1 Decommission & Cutover | Migrate prompt/reference assets off Higgsfield-era config, parallel-run v1 and v2, ERP cutover, retire n8n bot. | **Sequential** — last | No | — | Not started |
 
-**Recommended order:** 0 → 1 → 2 → (3 ‖ 4) → (5 ‖ 6) → 7 → 8 → (9 ‖ 10 ‖ 11) → 12 → 13 → 14
+**Recommended order:** 0 → 1 → 2 → (3 ‖ 4) → 6 → 7 → 8 → (9 ‖ 10 ‖ 11) → 12 → 13 → 14
 
 ---
 
@@ -61,7 +61,7 @@ Blocking or shaping later phases. Resolve during Phase 0 where possible.
 
 | # | Question | Blocks | Status |
 | :--- | :--- | :--- | :--- |
-| 1 | Matting model + licensing — BiRefNet (MIT) or paid Bria license? | Phase 5 | Open — Phase 0 Step 5 |
+| 1 | ~~Matting model + licensing~~ | — | **Resolved N/A 2026-08-07** — local matting dropped, see decision 0001 |
 | 2 | The 7 exact category codes and per-category angle enablement | Phases 3, 6 | Open |
 | 3 | GPU host: RunPod / Lambda / bare metal / GCP | Phase 12 | Open |
 | 4 | Volume at launch and peak (jobs/day) | Phases 12, 13 | Open |
