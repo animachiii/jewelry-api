@@ -1,0 +1,1671 @@
+{
+  "components": {
+    "schemas": {
+      "Angle": {
+        "enum": [
+          "FRONT",
+          "SIDE",
+          "DIAGONAL",
+          "TOP"
+        ],
+        "title": "Angle",
+        "type": "string"
+      },
+      "AngleAvailability": {
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "synthetic_allowed": {
+            "title": "Synthetic Allowed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled",
+          "synthetic_allowed"
+        ],
+        "title": "AngleAvailability",
+        "type": "object"
+      },
+      "AngleSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "skip": {
+            "anyOf": [
+              {
+                "const": true,
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Skip"
+          },
+          "storage_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage Path"
+          },
+          "synthetic": {
+            "anyOf": [
+              {
+                "const": true,
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Synthetic"
+          }
+        },
+        "title": "AngleSpec",
+        "type": "object"
+      },
+      "AngleStatus": {
+        "properties": {
+          "angle": {
+            "$ref": "#/components/schemas/Angle"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "failure_class": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FailureClass"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
+          },
+          "qa_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qa Score"
+          },
+          "qa_status": {
+            "$ref": "#/components/schemas/QAStatus"
+          },
+          "retry_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry Url"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "source_type": {
+            "$ref": "#/components/schemas/SourceType"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SubJobStatus"
+          },
+          "synthetic": {
+            "title": "Synthetic",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "angle",
+          "status",
+          "source_type",
+          "synthetic",
+          "qa_status",
+          "retryable"
+        ],
+        "title": "AngleStatus",
+        "type": "object"
+      },
+      "CategoryConfig": {
+        "properties": {
+          "angles": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/AngleAvailability"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/Angle"
+            },
+            "title": "Angles",
+            "type": "object"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "is_active": {
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "name",
+          "is_active",
+          "angles"
+        ],
+        "title": "CategoryConfig",
+        "type": "object"
+      },
+      "ConfigResponse": {
+        "properties": {
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/CategoryConfig"
+            },
+            "title": "Categories",
+            "type": "array"
+          },
+          "config_version": {
+            "title": "Config Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "config_version",
+          "categories"
+        ],
+        "title": "ConfigResponse",
+        "type": "object"
+      },
+      "CostEventItem": {
+        "properties": {
+          "angle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Angle"
+          },
+          "attempt_count": {
+            "title": "Attempt Count",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "model_version": {
+            "title": "Model Version",
+            "type": "string"
+          },
+          "operation": {
+            "title": "Operation",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "sub_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sub Job Id"
+          },
+          "total_cost_usd": {
+            "title": "Total Cost Usd",
+            "type": "number"
+          },
+          "unit_cost_usd": {
+            "title": "Unit Cost Usd",
+            "type": "number"
+          },
+          "units": {
+            "title": "Units",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sub_job_id",
+          "angle",
+          "attempt_count",
+          "provider",
+          "operation",
+          "model_version",
+          "units",
+          "unit_cost_usd",
+          "total_cost_usd",
+          "created_at"
+        ],
+        "title": "CostEventItem",
+        "type": "object"
+      },
+      "DependencyStatus": {
+        "properties": {
+          "active_config_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Config Version"
+          },
+          "db": {
+            "enum": [
+              "ok",
+              "down"
+            ],
+            "title": "Db",
+            "type": "string"
+          },
+          "redis": {
+            "enum": [
+              "ok",
+              "down"
+            ],
+            "title": "Redis",
+            "type": "string"
+          },
+          "storage": {
+            "enum": [
+              "ok",
+              "down"
+            ],
+            "title": "Storage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "db",
+          "redis",
+          "storage",
+          "active_config_version"
+        ],
+        "title": "DependencyStatus",
+        "type": "object"
+      },
+      "FailureClass": {
+        "enum": [
+          "TRANSIENT_PROVIDER",
+          "TRANSIENT_NETWORK",
+          "RATE_LIMITED",
+          "INVALID_INPUT",
+          "SAFETY_REFUSAL",
+          "QA_REJECTED",
+          "INTERNAL"
+        ],
+        "title": "FailureClass",
+        "type": "string"
+      },
+      "GenerateJobRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "angles": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/AngleSpec"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/Angle"
+            },
+            "title": "Angles",
+            "type": "object"
+          },
+          "category_code": {
+            "title": "Category Code",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "sku_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sku Reference"
+          }
+        },
+        "required": [
+          "category_code",
+          "angles"
+        ],
+        "title": "GenerateJobRequest",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "properties": {
+          "dependencies": {
+            "$ref": "#/components/schemas/DependencyStatus"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "degraded"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "dependencies"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "JobAcceptedResponse": {
+        "properties": {
+          "angles": {
+            "items": {
+              "$ref": "#/components/schemas/ResolvedAnglePlan"
+            },
+            "title": "Angles",
+            "type": "array"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "poll_after_ms": {
+            "title": "Poll After Ms",
+            "type": "integer"
+          },
+          "status": {
+            "const": "PENDING",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "status",
+          "angles",
+          "poll_after_ms"
+        ],
+        "title": "JobAcceptedResponse",
+        "type": "object"
+      },
+      "JobCostResponse": {
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/CostEventItem"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "total_cost_usd": {
+            "title": "Total Cost Usd",
+            "type": "number"
+          }
+        },
+        "required": [
+          "job_id",
+          "total_cost_usd",
+          "events"
+        ],
+        "title": "JobCostResponse",
+        "type": "object"
+      },
+      "JobListResponse": {
+        "properties": {
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/JobSummary"
+            },
+            "title": "Jobs",
+            "type": "array"
+          },
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_size": {
+            "title": "Page Size",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "jobs",
+          "total",
+          "page",
+          "page_size"
+        ],
+        "title": "JobListResponse",
+        "type": "object"
+      },
+      "JobStatus": {
+        "enum": [
+          "PENDING",
+          "PROCESSING",
+          "COMPLETED",
+          "PARTIAL_SUCCESS",
+          "FAILED"
+        ],
+        "title": "JobStatus",
+        "type": "string"
+      },
+      "JobStatusResponse": {
+        "properties": {
+          "angles": {
+            "items": {
+              "$ref": "#/components/schemas/AngleStatus"
+            },
+            "title": "Angles",
+            "type": "array"
+          },
+          "category_code": {
+            "title": "Category Code",
+            "type": "string"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "failed_angles": {
+            "title": "Failed Angles",
+            "type": "integer"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "requested_angles": {
+            "title": "Requested Angles",
+            "type": "integer"
+          },
+          "sku_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sku Reference"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "succeeded_angles": {
+            "title": "Succeeded Angles",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id",
+          "status",
+          "category_code",
+          "requested_angles",
+          "succeeded_angles",
+          "failed_angles",
+          "created_at",
+          "angles"
+        ],
+        "title": "JobStatusResponse",
+        "type": "object"
+      },
+      "JobSummary": {
+        "properties": {
+          "category_code": {
+            "title": "Category Code",
+            "type": "string"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "failed_angles": {
+            "title": "Failed Angles",
+            "type": "integer"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "requested_angles": {
+            "title": "Requested Angles",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "succeeded_angles": {
+            "title": "Succeeded Angles",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id",
+          "status",
+          "category_code",
+          "requested_angles",
+          "succeeded_angles",
+          "failed_angles",
+          "created_at"
+        ],
+        "title": "JobSummary",
+        "type": "object"
+      },
+      "PresignUploadRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "angles": {
+            "items": {
+              "$ref": "#/components/schemas/Angle"
+            },
+            "title": "Angles",
+            "type": "array"
+          },
+          "category_code": {
+            "title": "Category Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category_code",
+          "angles"
+        ],
+        "title": "PresignUploadRequest",
+        "type": "object"
+      },
+      "PresignUploadResponse": {
+        "properties": {
+          "angles": {
+            "items": {
+              "$ref": "#/components/schemas/PresignedAngle"
+            },
+            "title": "Angles",
+            "type": "array"
+          }
+        },
+        "required": [
+          "angles"
+        ],
+        "title": "PresignUploadResponse",
+        "type": "object"
+      },
+      "PresignedAngle": {
+        "properties": {
+          "angle": {
+            "$ref": "#/components/schemas/Angle"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "storage_path": {
+            "title": "Storage Path",
+            "type": "string"
+          },
+          "upload_url": {
+            "title": "Upload Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "angle",
+          "upload_url",
+          "storage_path",
+          "expires_at"
+        ],
+        "title": "PresignedAngle",
+        "type": "object"
+      },
+      "QAStatus": {
+        "enum": [
+          "NOT_APPLICABLE",
+          "PASSED",
+          "FLAGGED",
+          "FAILED"
+        ],
+        "title": "QAStatus",
+        "type": "string"
+      },
+      "QaDecisionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "approve",
+              "reject"
+            ],
+            "title": "Decision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "QaDecisionRequest",
+        "type": "object"
+      },
+      "QaReviewItem": {
+        "properties": {
+          "angle": {
+            "$ref": "#/components/schemas/Angle"
+          },
+          "category_code": {
+            "title": "Category Code",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "image_url": {
+            "title": "Image Url",
+            "type": "string"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "qa_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qa Score"
+          },
+          "reference_image_urls": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reference Image Urls",
+            "type": "array"
+          },
+          "sub_job_id": {
+            "title": "Sub Job Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sub_job_id",
+          "job_id",
+          "angle",
+          "category_code",
+          "qa_score",
+          "image_url",
+          "reference_image_urls",
+          "created_at"
+        ],
+        "title": "QaReviewItem",
+        "type": "object"
+      },
+      "QaReviewQueueResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/QaReviewItem"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "QaReviewQueueResponse",
+        "type": "object"
+      },
+      "ResolvedAnglePlan": {
+        "properties": {
+          "angle": {
+            "$ref": "#/components/schemas/Angle"
+          },
+          "source_type": {
+            "$ref": "#/components/schemas/SourceType"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SubJobStatus"
+          },
+          "storage_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage Path"
+          }
+        },
+        "required": [
+          "angle",
+          "source_type",
+          "status"
+        ],
+        "title": "ResolvedAnglePlan",
+        "type": "object"
+      },
+      "SourceType": {
+        "enum": [
+          "UPLOADED",
+          "SYNTHETIC"
+        ],
+        "title": "SourceType",
+        "type": "string"
+      },
+      "SubJobStatus": {
+        "enum": [
+          "PENDING",
+          "MATTING",
+          "GENERATING",
+          "QA_REVIEW",
+          "COMPLETED",
+          "FAILED",
+          "REJECTED",
+          "SKIPPED"
+        ],
+        "title": "SubJobStatus",
+        "type": "string"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "in": "header",
+        "name": "X-API-Key",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "description": "Headless catalog imagery pipeline. Submit up to four camera angles per jewelry piece; poll for per-angle status. See docs/api-routes.md.",
+    "title": "Jewelry Generation API",
+    "version": "2.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v2/config": {
+      "get": {
+        "operationId": "get_config_api_v2_config_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Invalid API key"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "Config unavailable"
+          }
+        },
+        "summary": "Get Config",
+        "tags": [
+          "config"
+        ]
+      }
+    },
+    "/api/v2/generate": {
+      "post": {
+        "operationId": "create_job_api_v2_generate_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateJobRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAcceptedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "Idempotency-Key missing"
+          },
+          "401": {
+            "description": "Invalid API key"
+          },
+          "409": {
+            "description": "Idempotency key conflict"
+          },
+          "422": {
+            "description": "Bad category, disabled angle, or synthetic not allowed"
+          },
+          "429": {
+            "description": "Rate limit or quota exceeded"
+          }
+        },
+        "summary": "Create Job",
+        "tags": [
+          "generate"
+        ]
+      }
+    },
+    "/api/v2/health": {
+      "get": {
+        "operationId": "get_health_api_v2_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "503": {
+            "description": "Down"
+          }
+        },
+        "security": [],
+        "summary": "Get Health",
+        "tags": [
+          "health"
+        ]
+      }
+    },
+    "/api/v2/internal/config/sync": {
+      "post": {
+        "operationId": "sync_config_api_v2_internal_config_sync_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Invalid API key"
+          },
+          "403": {
+            "description": "Insufficient scope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sync Config",
+        "tags": [
+          "config"
+        ]
+      }
+    },
+    "/api/v2/jobs": {
+      "get": {
+        "operationId": "list_jobs_api_v2_jobs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/JobStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category_code",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category Code"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Page Size",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Invalid API key"
+          },
+          "403": {
+            "description": "Insufficient scope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Jobs",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/api/v2/jobs/{job_id}/angles/{angle}/retry": {
+      "post": {
+        "operationId": "retry_angle_api_v2_jobs__job_id__angles__angle__retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "angle",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Angle"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "Idempotency-Key missing"
+          },
+          "401": {
+            "description": "Invalid API key"
+          },
+          "404": {
+            "description": "Not found, or not owned by this client"
+          },
+          "409": {
+            "description": "Not FAILED, retry ceiling reached, or input expired"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Angle",
+        "tags": [
+          "retry"
+        ]
+      }
+    },
+    "/api/v2/jobs/{job_id}/cost": {
+      "get": {
+        "operationId": "get_job_cost_api_v2_jobs__job_id__cost_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobCostResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Invalid API key"
+          },
+          "403": {
+            "description": "Insufficient scope"
+          },
+          "404": {
+            "description": "Job not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Job Cost",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/api/v2/qa/review-queue": {
+      "get": {
+        "operationId": "get_review_queue_api_v2_qa_review_queue_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QaReviewQueueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Invalid API key"
+          },
+          "403": {
+            "description": "Insufficient scope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Review Queue",
+        "tags": [
+          "qa"
+        ]
+      }
+    },
+    "/api/v2/qa/{sub_job_id}/decision": {
+      "post": {
+        "operationId": "submit_qa_decision_api_v2_qa__sub_job_id__decision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sub_job_id",
+            "required": true,
+            "schema": {
+              "title": "Sub Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QaDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Invalid API key"
+          },
+          "403": {
+            "description": "Insufficient scope"
+          },
+          "404": {
+            "description": "Sub-job not found"
+          },
+          "409": {
+            "description": "Sub-job not in QA_REVIEW"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Qa Decision",
+        "tags": [
+          "qa"
+        ]
+      }
+    },
+    "/api/v2/status/{job_id}": {
+      "get": {
+        "operationId": "get_status_api_v2_status__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Invalid API key"
+          },
+          "404": {
+            "description": "Not found, or not owned by this client"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Status",
+        "tags": [
+          "status"
+        ]
+      }
+    },
+    "/api/v2/uploads/presign": {
+      "post": {
+        "operationId": "presign_uploads_api_v2_uploads_presign_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PresignUploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresignUploadResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Invalid API key"
+          },
+          "422": {
+            "description": "Bad category or angle"
+          }
+        },
+        "summary": "Presign Uploads",
+        "tags": [
+          "uploads"
+        ]
+      }
+    }
+  },
+  "security": [
+    {
+      "ApiKeyAuth": []
+    }
+  ]
+}

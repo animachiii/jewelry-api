@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError as PydanticValidationError
 
 from app.api.v2.schemas.generate import GenerateJobRequest
+from app.db.models.enums import Angle
 
 
 def test_valid_request_parses_each_angle_mode() -> None:
@@ -17,9 +18,9 @@ def test_valid_request_parses_each_angle_mode() -> None:
             },
         }
     )
-    assert req.angles["FRONT"].mode == "uploaded"
-    assert req.angles["SIDE"].mode == "synthetic"
-    assert req.angles["DIAGONAL"].mode == "skipped"
+    assert req.angles[Angle.FRONT].mode == "uploaded"
+    assert req.angles[Angle.SIDE].mode == "synthetic"
+    assert req.angles[Angle.DIAGONAL].mode == "skipped"
 
 
 def test_angle_with_both_skip_and_storage_path_rejected_422() -> None:

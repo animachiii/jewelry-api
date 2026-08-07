@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     APP_ENV: str = "local"
     LOG_LEVEL: str = "INFO"
     API_BASE_PATH: str = "/api/v2"
+    # Phase 1 mock server switch — see phases/phase-1-api-contract.md Step 3.
+    # Routes serve fixtures instead of real business logic. Must be false in production;
+    # unimplemented routes raise instead of silently returning mock data.
+    MOCK_MODE: bool = False
 
     # --- Supabase Postgres ---
     # Session pooler (5432), NOT transaction pooler (6543) — SQLAlchemy uses prepared statements.

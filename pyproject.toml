@@ -34,6 +34,7 @@ dev = [
     "pytest-cov>=5.0",
     "testcontainers[postgres]>=4.8",
     "fakeredis>=2.24",
+    "openapi-spec-validator>=0.9.0",
 ]
 
 [build-system]

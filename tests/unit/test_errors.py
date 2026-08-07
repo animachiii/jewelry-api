@@ -1,5 +1,7 @@
 """Step 1 checkpoint tests — error envelope, exception handlers, request-ID middleware."""
 
+from collections.abc import AsyncGenerator
+
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -47,7 +49,7 @@ def _build_test_app() -> FastAPI:
 
 
 @pytest.fixture
-async def client() -> AsyncClient:
+async def client() -> AsyncGenerator[AsyncClient, None]:
     app = _build_test_app()
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
