@@ -33,35 +33,51 @@ app/
   config.py               Pydantic Settings — all env vars, single source
   api/v2/                 Route handlers only. No business logic.
     config.py  generate.py  status.py  retry.py  uploads.py  health.py
+    jobs.py  qa.py         Ops routes (Phase 1 Step 2 — not in the original folder
+                            sketch; api-routes.md always specified them, they just
+                            hadn't been split into their own modules yet)
+    schemas/               Pydantic request/response models, one file per route family
   core/
-    auth.py               API key verification dependency
-    errors.py             Exception classes + handlers, error envelope
-    logging.py            structlog setup, job_id correlation
-    ratelimit.py          Redis token bucket
-    idempotency.py        Idempotency-Key storage and replay
+    auth.py                X-API-Key -> Argon2 verify -> ApiClient, scope enforcement
+    errors.py              Exception classes + handlers, error envelope, ErrorCode enum
+    logging.py             structlog JSON setup, request_id/job_id contextvars
+    middleware.py          ULID request-ID middleware (Phase 1 Step 1 — not in the
+                            original sketch, request-ID handling needed its own module)
+    ratelimit.py           Redis token bucket
+    idempotency.py         Idempotency-Key storage, replay, and conflict detection
   db/
-    session.py            SQLAlchemy async engine + session factory
-    models/               ORM models, one file per table group
-    repositories/         All queries live here. Routes never query directly.
+    session.py             SQLAlchemy async engine + session factory (+ get_db FastAPI dep)
+    models/                ORM models, one file per table group
+    repositories/          All queries live here. Routes never query directly.
   services/
-    config_service.py     Sheets sync, version snapshot, Redis cache
-    job_service.py        Job creation, state machine, partial-success rollup
-    storage_service.py    Supabase Storage upload/download/signed URLs
-    cost_service.py       Cost event recording
+    config_service.py      GET /config response assembly from the active config_versions row
+    job_service.py          MOCK_MODE retry-precondition checks (Phase 1); real job
+                            creation/state machine lands in Phase 2
+    status_service.py      GET /status response assembly, retryable/signed-URL logic
+                            (Phase 1 Step 3 — not in the original sketch)
+    storage_service.py     Supabase Storage upload/download/signed URLs
+    cost_service.py        Cost event recording
   workers/
-    celery_app.py         Celery config, queue routing, beat schedule
+    celery_app.py          Celery config, queue routing, beat schedule
     health.py              ping_io verification task (added Step 4, not in original plan)
-    generation.py         IO queue: Gemini calls (real-photo and synthetic — no matting step, see docs/decisions/0001-drop-local-matting.md)
-    qa.py                 IO queue: perceptual similarity gate (synthetic angles only)
-    orchestration.py      Group fan-out, chord callback, parent rollup
+    generation.py          IO queue: Gemini calls (real-photo and synthetic — no matting step, see docs/decisions/0001-drop-local-matting.md)
+    qa.py                  IO queue: perceptual similarity gate (synthetic angles only)
+    orchestration.py       Group fan-out, chord callback, parent rollup
   providers/
-    base.py               GenerationProvider ABC
-    gemini.py             Gemini implementation
-migrations/               Alembic
+    base.py                GenerationProvider ABC
+    gemini.py               Gemini implementation
+migrations/                Alembic
+scripts/
+  seed_dev.py              Idempotent dev seed data — all 8 job-state scenarios
+  export_openapi.py        Writes docs/openapi.json from the live FastAPI app
+  upload_seed_assets.py    Backfills real placeholder bytes for seeded COMPLETED
+                            output assets (Supabase's sign endpoint 404s otherwise)
 tests/
   unit/  integration/  fixtures/
-docs/                     Reference files imported below
-phases/                   Phase specification files
+docs/                      Reference files imported below, plus:
+  openapi.json              Committed OpenAPI 3.1 spec, diff-checked in CI
+  integration-guide.md      Flutter ERP integration guide (Phase 1 deliverable)
+phases/                    Phase specification files
 ```
 
 ## Key Architectural Decisions
@@ -125,19 +141,45 @@ phases/                   Phase specification files
 
 ## Current Status
 
-Phase 0 — Foundation & Environment is **complete**. Steps 1, 2, 3, 4, 6, 7
-are verified live against real infrastructure: repo pushed to
-github.com/animachiii/jewelry-api (public, branch-protected, CI green),
-schema migrated to the real Supabase Postgres (session pooler, port 5432)
-with all constraints and `alembic check` drift-free, Storage buckets live
-(jewelry-inputs/jewelry-outputs, private, signed-URL round trip verified),
-and seed data loaded showing all 8 job scenarios with correct parent
-status. Step 5 (matting benchmark) is **moot** — local matting was dropped
-entirely on 2026-08-07, see `docs/decisions/0001-drop-local-matting.md`.
-Check `phases/phase-0-foundation.md` for the itemized checkpoint status and
-`phases/phase-roadmap.md` before starting any work.
+Phase 0 — Foundation & Environment is **complete** (see prior note on
+Steps 1-4/6/7 verified live, Step 5 moot).
 
-`app/workers/health.py` was added during Step 4 for the `health.ping_io`
-verification task — it isn't in the folder structure below because Step 4
-asked for this without specifying a file and it doesn't belong in
-`generation.py` or `qa.py`.
+Phase 1 — API Contract & Mock Server is **complete pending sign-off**. All
+four steps built and verified against the real Supabase project (not a
+local stub):
+
+- Error envelope, `ErrorCode` enum (every code in `docs/api-routes.md`),
+  exception handlers, ULID request-ID middleware — all test-covered.
+- Real `X-API-Key` -> Argon2 -> `ApiClient` auth with `client`/`ops` scope
+  enforcement on every route in `docs/api-routes.md`. OpenAPI 3.1 spec
+  generated, validated, and committed at `docs/openapi.json`.
+- `GET /config`, `GET /status/{job_id}`, `POST /uploads/presign` are real
+  reads/writes against Postgres and Supabase Storage — not fixtures. Only
+  `POST /generate` and the retry endpoint are behind `MOCK_MODE` (true
+  locally, must be false in production), standing in for Phase 2/8 logic
+  against real seeded rows.
+- All 8 seeded job-state scenarios verified reachable with real signed URLs
+  that return real, downloadable image bytes (`scripts/upload_seed_assets.py`
+  backfills placeholder bytes, since Supabase's sign endpoint 404s on a path
+  with no object — this was a real gap, not a hypothetical one).
+- `docs/integration-guide.md` written for the Flutter team, including a
+  fresh handoff API key and the seeded `job_id` table.
+
+**One known, accepted spec deviation:** `phases/phase-1-api-contract.md`
+assumed an expired signed URL returns `403`. Supabase actually returns `400`
+for an expired/invalid signing token — this is Supabase's behavior, not
+something this codebase controls, and is documented in
+`docs/integration-guide.md` §7.
+
+**Open item — not yet done:** no standing deployment exists for the Flutter
+team to reach over the network; the mock server has only been run and
+verified locally against the live Supabase project. Client/Flutter sign-off
+itself (the actual walkthrough and written confirmation) has not happened —
+that requires a human session with the client and Flutter lead, not
+something this session can complete unattended. See
+`phases/phase-1-api-contract.md` Checkpoint 4 for the exact remaining items.
+
+`app/workers/health.py` was added during Phase 0 Step 4 for the
+`health.ping_io` verification task — it isn't in the folder structure below
+because Step 4 asked for this without specifying a file and it doesn't
+belong in `generation.py` or `qa.py`.
