@@ -3,14 +3,16 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v2.schemas.config import ConfigResponse
+from app.api.v2.schemas.config import ConfigResponse, ConfigSyncResponse
 from app.core.auth import require_client_scope, require_ops_scope
+from app.core.redis_client import get_redis
 from app.db.models.api_clients import ApiClient
-from app.db.repositories import config_versions as config_versions_repo
 from app.db.session import get_db
-from app.services.config_service import ConfigUnavailableError, build_config_response
+from app.services.config_service import get_config_response
+from app.services.config_sync_service import sync_config as sync_config_service
 
 router = APIRouter(tags=["config"])
 
@@ -23,16 +25,15 @@ router = APIRouter(tags=["config"])
 async def get_config(
     client: Annotated[ApiClient, Depends(require_client_scope)],
     session: Annotated[AsyncSession, Depends(get_db)],
+    redis: Annotated[Redis, Depends(get_redis)],
 ) -> ConfigResponse:
-    active = await config_versions_repo.get_active(session)
-    if active is None:
-        raise ConfigUnavailableError("No active config version found.")
-    return build_config_response(active)
+    return await get_config_response(session, redis)
 
 
 @router.post(
     "/internal/config/sync",
     status_code=202,
+    response_model=ConfigSyncResponse,
     responses={
         401: {"description": "Invalid API key"},
         403: {"description": "Insufficient scope"},
@@ -40,5 +41,12 @@ async def get_config(
 )
 async def sync_config(
     client: Annotated[ApiClient, Depends(require_ops_scope)],
-) -> None:
-    raise NotImplementedError("Sheets sync lands in Phase 3.")
+    session: Annotated[AsyncSession, Depends(get_db)],
+    redis: Annotated[Redis, Depends(get_redis)],
+) -> ConfigSyncResponse:
+    version = await sync_config_service(session, redis)
+    return ConfigSyncResponse(
+        config_version=version.version_number,
+        sync_status=version.sync_status.value,
+        activated=version.is_active,
+    )

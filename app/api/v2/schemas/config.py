@@ -20,3 +20,11 @@ class CategoryConfig(BaseModel):
 class ConfigResponse(BaseModel):
     config_version: int
     categories: list[CategoryConfig]
+
+
+class ConfigSyncResponse(BaseModel):
+    """POST /internal/config/sync response — see docs/api-routes.md."""
+
+    config_version: int
+    sync_status: str
+    activated: bool

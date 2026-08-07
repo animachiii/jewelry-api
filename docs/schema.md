@@ -117,6 +117,13 @@ Partial unique index: `CREATE UNIQUE INDEX ON config_versions (is_active) WHERE 
 
 Seven categories total. Exact codes are confirmed during Phase 0 from the client's sheet.
 
+**Sheets -> payload normalization (Phase 3):** `app/services/config_sync_service.py`
+builds this shape from raw Sheets rows (`app/providers/sheets.py`) — one row per
+category/angle pair plus a `Global` key/value tab. The exact column layout is an
+assumed convention, not yet confirmed against a real client sheet (roadmap open
+decision #2) — see `app/providers/sheets.py`'s module docstring for the assumed
+columns.
+
 ---
 
 ## `jobs`
