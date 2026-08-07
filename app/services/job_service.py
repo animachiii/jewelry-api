@@ -317,6 +317,12 @@ async def create_job_for_request(
         await session.rollback()
         return await _handle_replay_race(session, client, idempotency_key, payload_hash, body)
 
+    # Phase 7: dispatch real work only for a genuinely new job — an
+    # idempotency replay (both branches above) must never re-dispatch.
+    from app.workers.orchestration import fan_out_job
+
+    fan_out_job.delay(str(job.id))
+
     return await _build_accepted_response(job.id, body)
 
 

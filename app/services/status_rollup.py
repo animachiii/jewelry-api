@@ -7,6 +7,8 @@ see docs/conventions.md.
 
 from app.db.models.enums import JobStatus
 
+TERMINAL_STATUSES = {JobStatus.COMPLETED, JobStatus.PARTIAL_SUCCESS, JobStatus.FAILED}
+
 
 def compute_parent_status(requested: int, succeeded: int, failed: int) -> JobStatus:
     if succeeded + failed < requested:

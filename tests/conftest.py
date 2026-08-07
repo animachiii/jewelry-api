@@ -2,7 +2,9 @@
 Celery task_always_eager. No shared dev database — see docs/conventions.md.
 """
 
+import json
 from collections.abc import AsyncGenerator, Iterator
+from pathlib import Path
 
 import fakeredis.aioredis
 import pytest
@@ -38,8 +40,22 @@ async def db_engine(postgres_container: PostgresContainer) -> AsyncGenerator[Asy
 
 
 @pytest_asyncio.fixture
-async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
+async def db_session(
+    db_engine: AsyncEngine, postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
+) -> AsyncGenerator[AsyncSession, None]:
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    # Phase 7: /generate now dispatches Celery tasks (orchestration.fan_out_job
+    # -> generation.transform_photo) that, under task_always_eager, run inline
+    # during the test — sometimes on a fresh thread+loop (app/workers/_async_utils.py),
+    # so they can't share this fixture's connection pool (asyncpg connections
+    # aren't shareable across event loops). Those workers build their own
+    # engine per call from settings.DATABASE_URL read live — redirect that to
+    # this test's container, same pattern as
+    # tests/integration/test_migrations.py, so any cascaded task lands in the
+    # test DB, never production.
+    monkeypatch.setattr("app.config.settings.DATABASE_URL", postgres_container.get_connection_url())
+
     async with factory() as session:
         yield session
 
@@ -67,3 +83,23 @@ def _celery_eager() -> Iterator[None]:
     yield
     celery_app.conf.task_always_eager = False
     celery_app.conf.task_eager_propagates = False
+
+
+_GEMINI_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "gemini"
+
+
+@pytest.fixture(autouse=True)
+def _fake_gemini_success_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase 7: /generate now dispatches real generation work
+    (orchestration.fan_out_job -> generation.transform_photo), which under
+    task_always_eager runs inline during any test that calls /generate — see
+    docs/ai-integration.md's "never call the live Gemini API in CI." Any test
+    that wants a different outcome (failure, refusal, ...) monkeypatches
+    GeminiProvider._call_api itself, same as before — a test-level patch
+    always overrides this fixture-level default since it's applied later in
+    the same test.
+    """
+    from app.providers.gemini import GeminiProvider
+
+    fixture = json.loads((_GEMINI_FIXTURES / "success.json").read_text())
+    monkeypatch.setattr(GeminiProvider, "_call_api", lambda self, *a, **k: fixture)

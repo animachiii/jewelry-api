@@ -69,14 +69,29 @@ app/
                             `provider:gemini:tokens:{minute}` (Phase 6 — distinct
                             from app/core/ratelimit.py's per-client API limiting,
                             still unwired, Phase 10)
+    orchestration_service.py  dispatch_job — marks a job PROCESSING, returns the
+                            sub-job IDs to fan out (Phase 7 — not in the original
+                            sketch; app/workers/orchestration.py is a thin wrapper)
   workers/
     celery_app.py          Celery config, queue routing, beat schedule
     health.py              ping_io verification task (added Step 4, not in original plan)
+    _async_utils.py         run_async — lets a sync Celery task body call async
+                            service code whether or not it's already inside a
+                            running event loop (Phase 7 — not in the original
+                            sketch; needed once /generate started dispatching
+                            work from its own async route handler)
     generation.py          `generation.transform_photo` — session lifecycle only,
-                            real logic in services/generation_service.py (Phase 6)
+                            real logic in services/generation_service.py (Phase 6).
+                            Builds its own DB engine per call from
+                            settings.DATABASE_URL read live, not the shared
+                            app.db.session.async_session_factory (Phase 7 — see
+                            phases/phase-7-orchestration.md for why)
     qa.py                  IO queue: perceptual similarity gate (synthetic angles only,
                             Phase 9 — still a stub)
-    orchestration.py       Group fan-out, chord callback, parent rollup (Phase 7 — still a stub)
+    orchestration.py       `orchestration.fan_out_job` — a loop of independent
+                            generation.transform_photo dispatches, not a Celery
+                            group/chord (Phase 7 — see phases/phase-7-orchestration.md's
+                            reality-check section for why)
   providers/
     base.py                GenerationProvider ABC + GenerationResult (Phase 6)
     gemini.py               GeminiProvider — the only module that imports google.genai,
@@ -287,3 +302,28 @@ a Gemini call before this). `app/workers/generation.py` is a thin
 session-lifecycle wrapper — nothing calls it yet (Phase 7's fan-out is what
 wires a real job to it); a job created via `/generate` still sits at
 `PENDING` forever until then, which is correct, not a regression.
+
+Phase 7 — Orchestration & Partial Success is **complete**: `POST /generate`
+now dispatches `orchestration.fan_out_job`, which marks the job `PROCESSING`
+and calls `generation.transform_photo` for every non-skipped angle — a loop
+of independent dispatches, not a Celery group/chord (`docs/conventions.md`
+requires parent-status recompute in the same transaction as the sub-job
+transition that triggered it, which a chord's out-of-band callback doesn't
+match; see `phases/phase-7-orchestration.md`). `transform_photo` now sets
+`GENERATING` before calling the provider (a Phase 6 gap — it previously left
+the row at stale `PENDING` for the whole call) and recomputes+persists the
+parent's status via `status_rollup.compute_parent_status` right after its
+own terminal write, in the same transaction. A job created via `/generate`
+now actually runs to `COMPLETED`/`PARTIAL_SUCCESS`/`FAILED` (or `PROCESSING`
+if a synthetic angle is awaiting Phase 9's QA decision) instead of sitting
+at `PENDING` forever. Wiring this up surfaced a real bug, not anticipated
+when this phase was planned: a sync Celery task's `asyncio.run()` can't run
+from inside `/generate`'s own async event loop under `task_always_eager`,
+and a naive fresh-loop-per-call fix broke the Redis client singleton across
+loops. Fixed with `app/workers/_async_utils.py::run_async`, which routes
+such calls onto one persistent background loop; both worker task wrappers
+also now build their own DB engine per call from `settings.DATABASE_URL`
+read live rather than a shared engine bound at import time, for the same
+cross-loop reason. `tests/conftest.py` gained an autouse fixture that fakes
+Gemini success by default, since every `/generate` test now cascades into
+real generation execution.

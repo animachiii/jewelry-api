@@ -1,8 +1,9 @@
 """Runs a single sub-job's generation call end-to-end. See docs/ai-integration.md
-Call Site 1 and phases/phase-6-generation-worker.md. Testable directly against
-testcontainers Postgres + real local Redis, without going through Celery —
-see app/workers/generation.py for the thin task wrapper (same split as
-app/services/retention_service.py / app/workers/retention.py in Phase 4).
+Call Site 1 and phases/phase-6-generation-worker.md / phase-7-orchestration.md.
+Testable directly against testcontainers Postgres + real local Redis, without
+going through Celery — see app/workers/generation.py for the thin task wrapper
+(same split as app/services/retention_service.py / app/workers/retention.py in
+Phase 4).
 
 Retry policy: up to MAX_ATTEMPTS calls to the provider, in-process — not
 Celery's own task-level retry/backoff. `docs/business-rules.md` §4 asks for
@@ -13,10 +14,18 @@ every attempt, and the sub-job still lands on FAILED only once the budget is
 exhausted — and it is far more testable under `task_always_eager` than
 timing real Celery backoff. This is a deliberate simplification, called out
 here and in the phase file's self-audit rather than left implicit.
+
+Parent-status recompute (Phase 7): after writing its own sub-job's terminal
+status, this function recomputes and persists the parent job's status in the
+same transaction — see docs/conventions.md ("Parent status recomputation and
+the sub-job transition that triggered it happen in the same transaction")
+and phases/phase-7-orchestration.md's reality-check section for why this
+replaced a chord-based rollup.
 """
 
 import random
 import uuid
+from datetime import UTC, datetime
 
 import httpx
 import structlog
@@ -26,15 +35,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.errors import ProviderError
 from app.db.models.enums import AssetKind, FailureClass, SourceType, SubJobStatus
-from app.db.models.jobs import SubJob
+from app.db.models.jobs import Job, SubJob
 from app.db.repositories import assets as assets_repo
 from app.db.repositories import config_versions as config_versions_repo
+from app.db.repositories import job_events as job_events_repo
 from app.db.repositories import jobs as jobs_repo
 from app.providers.base import GenerationResult
 from app.providers.gemini import GeminiProvider
 from app.services import cost_service, storage_service
 from app.services.job_service import find_category
 from app.services.rate_limiter import acquire as acquire_rate_limit
+from app.services.status_rollup import TERMINAL_STATUSES, compute_parent_status
 
 logger = structlog.get_logger()
 
@@ -76,6 +87,13 @@ async def transform_photo(
     job = await jobs_repo.get_by_id(session, sub_job.job_id)
     if job is None:
         raise SubJobNotFoundError(f"Job {sub_job.job_id} for sub-job {sub_job_id} not found.")
+
+    # docs/business-rules.md §2: PENDING -> GENERATING -> terminal. Committed
+    # immediately so a concurrent GET /status mid-call sees GENERATING, not
+    # a stale PENDING — see phases/phase-7-orchestration.md Step 1.
+    sub_job.status = SubJobStatus.GENERATING
+    sub_job.started_at = datetime.now(UTC)
+    await session.commit()
 
     config_version = await config_versions_repo.get_by_id(session, job.config_version_id)
     if config_version is None:
@@ -155,11 +173,45 @@ async def transform_photo(
             unit_cost_usd=unit_cost_usd,
         )
         await _complete_success(session, job.id, sub_job, result, prompt, seed)
+        await _recompute_parent_status(session, job)
         return sub_job
 
     assert last_error is not None
     _fail(sub_job, last_error, prompt, seed)
+    await _recompute_parent_status(session, job)
     return sub_job
+
+
+async def _recompute_parent_status(session: AsyncSession, job: Job) -> None:
+    """Recomputes and persists the parent job's status from its sub-jobs'
+    current state, in the same transaction as the sub-job write that
+    triggered it — see docs/conventions.md and phases/phase-7-orchestration.md
+    Step 2.
+    """
+    sub_jobs = await jobs_repo.get_sub_jobs(session, job.id)
+    non_skipped = [sj for sj in sub_jobs if sj.status != SubJobStatus.SKIPPED]
+    requested = len(non_skipped)
+    succeeded = sum(1 for sj in non_skipped if sj.status == SubJobStatus.COMPLETED)
+    failed = sum(
+        1 for sj in non_skipped if sj.status in (SubJobStatus.FAILED, SubJobStatus.REJECTED)
+    )
+
+    from_status = job.status
+    new_status = compute_parent_status(requested, succeeded, failed)
+
+    job.status = new_status
+    job.succeeded_angles = succeeded
+    job.failed_angles = failed
+    job.completed_at = datetime.now(UTC) if new_status in TERMINAL_STATUSES else None
+
+    job_events_repo.record_event(
+        session,
+        job.id,
+        "SUBJOB_STATUS_CHANGE",
+        from_status=from_status.value if from_status != new_status else None,
+        to_status=new_status.value,
+        detail={"requested": requested, "succeeded": succeeded, "failed": failed},
+    )
 
 
 async def _complete_success(

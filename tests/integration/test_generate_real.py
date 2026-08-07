@@ -127,7 +127,13 @@ async def test_happy_path_creates_job_sub_jobs_asset_and_event(
 
     job = (await db_session.execute(select(Job).where(Job.id == job_id))).scalar_one()
     assert job.requested_angles == 2
-    assert job.status.value == "PENDING"
+    # Phase 7: /generate now dispatches real work, which under
+    # task_always_eager runs inline with a fake-success Gemini response
+    # (tests/conftest.py). FRONT (real-photo) completes straight to
+    # COMPLETED; DIAGONAL (synthetic) lands in QA_REVIEW pending Phase 9's
+    # scoring — which holds the parent at PROCESSING even though the other
+    # angle already succeeded (docs/business-rules.md §3/§7).
+    assert job.status.value == "PROCESSING"
 
     sub_jobs = {
         sj.angle.value: sj
@@ -135,10 +141,11 @@ async def test_happy_path_creates_job_sub_jobs_asset_and_event(
         .scalars()
         .all()
     }
-    assert sub_jobs["FRONT"].status.value == "PENDING"
+    assert sub_jobs["FRONT"].status.value == "COMPLETED"
     assert sub_jobs["FRONT"].source_type.value == "UPLOADED"
     assert sub_jobs["FRONT"].input_asset_id is not None
-    assert sub_jobs["DIAGONAL"].status.value == "PENDING"
+    assert sub_jobs["FRONT"].output_asset_id is not None
+    assert sub_jobs["DIAGONAL"].status.value == "QA_REVIEW"
     assert sub_jobs["DIAGONAL"].source_type.value == "SYNTHETIC"
     assert sub_jobs["SIDE"].status.value == "SKIPPED"
     assert sub_jobs["TOP"].status.value == "SKIPPED"
@@ -168,7 +175,14 @@ async def test_happy_path_creates_job_sub_jobs_asset_and_event(
         f"/api/v2/status/{job_id}", headers={"X-API-Key": api_client_key}
     )
     assert status_resp.status_code == 200
-    assert status_resp.json()["status"] == "PENDING"
+    status_body = status_resp.json()
+    assert status_body["status"] == "PROCESSING"
+    angles_by_name = {a["angle"]: a for a in status_body["angles"]}
+    assert angles_by_name["FRONT"]["status"] == "COMPLETED"
+    assert angles_by_name["FRONT"]["image_url"] is not None
+    assert angles_by_name["DIAGONAL"]["status"] == "QA_REVIEW"
+    assert angles_by_name["DIAGONAL"]["image_url"] is None
+    assert angles_by_name["DIAGONAL"]["synthetic"] is True
 
 
 async def test_idempotent_replay_creates_no_second_job(

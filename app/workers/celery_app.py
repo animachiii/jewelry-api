@@ -40,6 +40,7 @@ celery_app = Celery(
 
 celery_app.conf.task_routes = {
     "generation.*": {"queue": "io"},
+    "orchestration.*": {"queue": "io"},
     "qa.*": {"queue": "io"},
     "config.sync": {"queue": "io"},
     "health.ping_io": {"queue": "io"},

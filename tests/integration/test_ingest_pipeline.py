@@ -200,7 +200,14 @@ async def test_valid_jpeg_extracts_real_metadata(
     assert resp.status_code == 202, resp.text
     job_id = uuid.UUID(resp.json()["job_id"])
 
-    asset = (await db_session.execute(select(Asset).where(Asset.job_id == job_id))).scalar_one()
+    # Phase 7: /generate now dispatches real generation, so this job also
+    # gets an OUTPUT asset once the (fixture-faked) cascade completes —
+    # filter to the INPUT row this test actually cares about.
+    asset = (
+        await db_session.execute(
+            select(Asset).where(Asset.job_id == job_id, Asset.kind == AssetKind.INPUT)
+        )
+    ).scalar_one()
     assert asset.mime_type == "image/png"
     assert asset.width_px == 64
     assert asset.height_px == 48

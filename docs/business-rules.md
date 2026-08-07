@@ -50,7 +50,11 @@ PENDING ──► SKIPPED  (set at creation, never transitions)
 ## 3. Parent status computation
 
 Recomputed after every sub-job terminal transition, inside the same transaction.
-`SKIPPED` sub-jobs are excluded from all counts.
+`SKIPPED` sub-jobs are excluded from all counts. Implemented in
+`app/services/status_rollup.py::compute_parent_status` (Phase 2) and called from
+`app/services/generation_service.py::transform_photo` (Phase 7) — per-transition,
+not via a Celery chord; see `phases/phase-7-orchestration.md`'s reality-check
+section for why a chord doesn't match "the same transaction" above.
 
 Let `R` = requested (non-skipped) sub-jobs, `S` = succeeded (`COMPLETED`),
 `F` = failed (`FAILED` + `REJECTED`).
