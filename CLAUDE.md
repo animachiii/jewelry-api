@@ -126,16 +126,16 @@ phases/                   Phase specification files
 
 ## Current Status
 
-Phase 0 — Foundation & Environment. Steps 1, 3, 4, 6, 7 are complete and
-verified live: repo pushed to github.com/animachiii/jewelry-api (public,
-branch-protected, CI green), Storage buckets live on a real Supabase
-project (jewelry-inputs/mattes/outputs, private, signed-URL round trip
-verified). Step 2 (schema/migration) is verified against a local Postgres
-container, not yet re-run against the real Supabase Postgres — needs the
-session-pooler (port 5432) connection string/password, which is separate
-from the Storage service-role key already wired in. Step 5 (matting
-benchmark) is blocked — needs GPU access and real client jewelry photos.
-Check `phases/phase-0-foundation.md` for the itemized checkpoint status and
+Phase 0 — Foundation & Environment. Steps 1, 2, 3, 4, 6, 7 are complete and
+verified live against real infrastructure: repo pushed to
+github.com/animachiii/jewelry-api (public, branch-protected, CI green),
+schema migrated to the real Supabase Postgres (session pooler, port 5432)
+with all constraints and `alembic check` drift-free, Storage buckets live
+(jewelry-inputs/mattes/outputs, private, signed-URL round trip verified),
+and seed data loaded showing all 8 job scenarios with correct parent
+status. Step 5 (matting benchmark) is the only remaining blocker — needs
+GPU access and real client jewelry photos. Check
+`phases/phase-0-foundation.md` for the itemized checkpoint status and
 `phases/phase-roadmap.md` before starting any work.
 
 `app/workers/health.py` was added during Step 4 for the `health.ping_gpu`/
