@@ -103,3 +103,25 @@ def _fake_gemini_success_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
     fixture = json.loads((_GEMINI_FIXTURES / "success.json").read_text())
     monkeypatch.setattr(GeminiProvider, "_call_api", lambda self, *a, **k: fixture)
+
+
+_QA_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "qa"
+
+
+@pytest.fixture(autouse=True)
+def _fake_qa_pass_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase 9: a successful synthetic-angle generation now dispatches real
+    QA scoring (app/workers/generation.py -> qa.score_similarity), which
+    under task_always_eager runs inline during any test whose /generate call
+    happens to include a synthetic angle — same cascade Phase 7 already hit
+    for generation itself. Defaults to a high-similarity fixture so an
+    existing test that doesn't care about QA scoring gets a plain COMPLETED
+    sub-job rather than an unmocked network call (no real GEMINI_API_KEY
+    exists in this environment). Tests that want a different QA outcome
+    monkeypatch GeminiQaProvider._call_api themselves, same override rule as
+    the generation fixture above.
+    """
+    from app.providers.gemini_qa import GeminiQaProvider
+
+    fixture = json.loads((_QA_FIXTURES / "high_similarity.json").read_text())
+    monkeypatch.setattr(GeminiQaProvider, "_call_api", lambda self, *a, **k: fixture)

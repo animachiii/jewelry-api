@@ -778,11 +778,6 @@
             "title": "Category Code",
             "type": "string"
           },
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
-            "type": "string"
-          },
           "image_url": {
             "title": "Image Url",
             "type": "string"
@@ -809,6 +804,18 @@
             "title": "Reference Image Urls",
             "type": "array"
           },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
           "sub_job_id": {
             "title": "Sub Job Id",
             "type": "string"
@@ -822,7 +829,7 @@
           "qa_score",
           "image_url",
           "reference_image_urls",
-          "created_at"
+          "started_at"
         ],
         "title": "QaReviewItem",
         "type": "object"
@@ -1493,7 +1500,7 @@
     },
     "/api/v2/qa/{sub_job_id}/decision": {
       "post": {
-        "operationId": "submit_qa_decision_api_v2_qa__sub_job_id__decision_post",
+        "operationId": "submit_qa_decision_route_api_v2_qa__sub_job_id__decision_post",
         "parameters": [
           {
             "in": "path",
@@ -1563,7 +1570,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Submit Qa Decision",
+        "summary": "Submit Qa Decision Route",
         "tags": [
           "qa"
         ]

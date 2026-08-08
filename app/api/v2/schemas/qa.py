@@ -24,7 +24,12 @@ class QaReviewItem(BaseModel):
     qa_score: float | None
     image_url: str
     reference_image_urls: list[str]
-    created_at: datetime
+    # Renamed from the Phase 1 scaffold's `created_at` (Phase 9) — sub_jobs
+    # has no created_at column (docs/schema.md), only started_at/
+    # completed_at. started_at is set when the sub-job entered GENERATING
+    # (app/services/generation_service.py), the closest real timestamp to
+    # "when this item's generation began."
+    started_at: datetime | None
 
 
 class QaReviewQueueResponse(BaseModel):

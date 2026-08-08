@@ -32,6 +32,8 @@ class ErrorCode(StrEnum):
     SUBJOB_NOT_RETRYABLE = "SUBJOB_NOT_RETRYABLE"
     RETRY_LIMIT_EXCEEDED = "RETRY_LIMIT_EXCEEDED"
     INPUT_ASSET_EXPIRED = "INPUT_ASSET_EXPIRED"
+    SUB_JOB_NOT_FOUND = "SUB_JOB_NOT_FOUND"
+    QA_NOT_PENDING = "QA_NOT_PENDING"
     RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED"
     QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
     CONFIG_UNAVAILABLE = "CONFIG_UNAVAILABLE"
@@ -87,6 +89,34 @@ class RateLimitError(AppError):
     code = ErrorCode.RATE_LIMIT_EXCEEDED
     http_status = 429
 
+    def __init__(
+        self,
+        message: str,
+        details: dict[str, Any] | None = None,
+        retry_after_seconds: int = 60,
+    ) -> None:
+        super().__init__(message, details=details)
+        self.retry_after_seconds = retry_after_seconds
+
+
+class QuotaExceededError(AppError):
+    """See docs/api-routes.md's documented 429 behavior and
+    phases/phase-10-auth-security.md Step 1 — wired for real here, the
+    ErrorCode existed since Phase 1 with nothing raising it.
+    """
+
+    code = ErrorCode.QUOTA_EXCEEDED
+    http_status = 429
+
+    def __init__(
+        self,
+        message: str,
+        details: dict[str, Any] | None = None,
+        retry_after_seconds: int = 60,
+    ) -> None:
+        super().__init__(message, details=details)
+        self.retry_after_seconds = retry_after_seconds
+
 
 class ProviderError(AppError):
     """Carries failure_class, mapped by the worker. See docs/business-rules.md §4."""
@@ -126,10 +156,14 @@ def register_exception_handlers(app: FastAPI) -> None:
         request_id = _request_id(request)
         if exc.http_status >= 500:
             logger.error("app_error", code=exc.code, message=exc.message, request_id=request_id)
+        headers = {"X-Request-ID": request_id}
+        retry_after = getattr(exc, "retry_after_seconds", None)
+        if retry_after is not None:
+            headers["Retry-After"] = str(retry_after)
         return JSONResponse(
             status_code=exc.http_status,
             content=exc.to_envelope(request_id),
-            headers={"X-Request-ID": request_id},
+            headers=headers,
         )
 
     @app.exception_handler(RequestValidationError)

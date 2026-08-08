@@ -104,9 +104,28 @@ async def _presign_and_upload(client: AsyncClient, key: str, angle: str) -> str:
 
 
 async def test_happy_path_creates_job_sub_jobs_asset_and_event(
-    client: AsyncClient, api_client_key: str, db_session: AsyncSession
+    client: AsyncClient,
+    api_client_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     front_path = await _presign_and_upload(client, api_client_key, "FRONT")
+
+    # Phase 9: QA scoring now runs for real (tests/conftest.py's autouse
+    # fixture defaults to a high-similarity fixture, which would complete
+    # DIAGONAL immediately) — this test wants the lingering QA_REVIEW state
+    # it originally asserted, so it forces a below-threshold score instead.
+    import json
+    from pathlib import Path
+
+    from app.providers.gemini_qa import GeminiQaProvider
+
+    qa_fixture = json.loads(
+        (
+            Path(__file__).resolve().parent.parent / "fixtures" / "qa" / "low_similarity.json"
+        ).read_text()
+    )
+    monkeypatch.setattr(GeminiQaProvider, "_call_api", lambda self, *a, **k: qa_fixture)
 
     resp = await client.post(
         "/api/v2/generate",

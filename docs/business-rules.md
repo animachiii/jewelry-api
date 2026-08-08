@@ -164,6 +164,11 @@ A sub-job in `QA_REVIEW` counts as neither succeeded nor failed; the parent stay
 - Keys are retained 24 hours in Redis and permanently on the `jobs` row.
 - The same key with a *different* payload returns `409`. Silently returning the old job
   for a different request is worse than erroring.
+- `/retry`'s dedup (Phase 8) is Redis-only, 24h TTL — there is no row of its
+  own to persist a durable marker on the way `jobs.payload_hash` does for
+  `/generate`. A replay past that window runs as a fresh retry instead of a
+  no-op; bounded by the 3-attempt ceiling, so at most one extra call on one
+  angle, not a whole extra job.
 
 ---
 

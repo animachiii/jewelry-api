@@ -242,6 +242,26 @@ async def test_other_clients_job_id_returns_404_not_403(
     assert resp.json()["error"]["code"] == "JOB_NOT_FOUND"
 
 
+async def test_other_clients_job_id_404_body_leaks_nothing(
+    client: AsyncClient, other_client_key: str, seeded_jobs: dict[str, Job]
+) -> None:
+    """Phase 10 Step 3 — URL scoping regression: a client can never be
+    handed a signed URL, storage path, or any other asset detail for a job
+    it doesn't own. The 404 response body is exactly the standard error
+    envelope and nothing else — no image_url, no angles array, no
+    storage-shaped fields could leak through it.
+    """
+    job = seeded_jobs["seed-completed"]
+    resp = await client.get(f"/api/v2/status/{job.id}", headers={"X-API-Key": other_client_key})
+    assert resp.status_code == 404
+    body = resp.json()
+    assert set(body.keys()) == {"error"}
+    assert set(body["error"].keys()) == {"code", "message", "details", "request_id"}
+    assert "image_url" not in resp.text
+    assert "storage_path" not in resp.text
+    assert "supabase" not in resp.text.lower()
+
+
 async def test_presign_returns_url_accepting_real_put(
     client: AsyncClient, other_client_key: str
 ) -> None:
@@ -331,22 +351,26 @@ async def test_retry_on_completed_angle_returns_409(
     assert retry_resp.status_code == 409
 
 
-async def test_mock_mode_false_makes_retry_raise(
+async def test_retry_is_real_regardless_of_mock_mode(
     client: AsyncClient,
     dev_client_key: str,
     seeded_jobs: dict[str, Job],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only /retry is still MOCK_MODE-gated as of Phase 2 — real retry
-    execution is Phase 8's job. /generate became real in Phase 2 and works
-    the same regardless of MOCK_MODE; see test_generate_real.py.
+    """/retry became real in Phase 8 — settings.MOCK_MODE no longer gates it
+    (nor /generate, real since Phase 2). Full real-retry coverage
+    (idempotency, ceiling, dispatch) lives in test_retry_real.py; this just
+    confirms the flag has no effect either way, in either direction, on this
+    fixture-seeded file's own scenarios.
     """
     monkeypatch.setattr(settings, "MOCK_MODE", False)
 
-    job = seeded_jobs["seed-partial-retryable"]
+    job = seeded_jobs["seed-partial-rejected"]
+    resp = await client.get(f"/api/v2/status/{job.id}", headers={"X-API-Key": dev_client_key})
+    rejected_angle = next(a["angle"] for a in resp.json()["angles"] if a["status"] == "REJECTED")
     retry_resp = await client.post(
-        f"/api/v2/jobs/{job.id}/angles/TOP/retry",
-        headers={"X-API-Key": dev_client_key, "Idempotency-Key": "k2"},
+        f"/api/v2/jobs/{job.id}/angles/{rejected_angle}/retry",
+        headers={"X-API-Key": dev_client_key, "Idempotency-Key": "mock-mode-off-still-real"},
     )
-    assert retry_resp.status_code == 500
-    assert retry_resp.json()["error"]["code"] == "INTERNAL_ERROR"
+    assert retry_resp.status_code == 409
+    assert retry_resp.json()["error"]["code"] == "SUBJOB_NOT_RETRYABLE"

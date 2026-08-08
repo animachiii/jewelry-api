@@ -1,0 +1,17 @@
+{
+  "candidates": [
+    {
+      "finish_reason": "STOP",
+      "content": {
+        "parts": [
+          {
+            "json": {
+              "reasoning": "Missing the similarity_score field entirely."
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "model_version": "gemini-2.5-flash-image-preview"
+}

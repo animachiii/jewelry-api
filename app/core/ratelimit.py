@@ -6,14 +6,19 @@ import redis.asyncio as redis
 
 from app.config import settings
 
-_redis: redis.Redis | None = None
-
 
 def _client() -> redis.Redis:
-    global _redis
-    if _redis is None:
-        _redis = redis.from_url(settings.REDIS_URL, decode_responses=True)  # type: ignore[no-untyped-call]
-    return _redis
+    """A fresh client per call, deliberately not cached at module scope —
+    see app/core/idempotency.py::_client's docstring for why (Phase 8 hit
+    this exact bug first: a cached module-global client binds its
+    connection to whichever event loop created it, and pytest-asyncio's
+    per-test event loop makes a cached singleton here crash the moment a
+    second test reuses it). This module was never actually exercised by any
+    test until Phase 10 wired allow() into /generate — same first-real-use
+    exposure as idempotency.py's Redis calls were in Phase 8.
+    """
+    client: redis.Redis = redis.from_url(settings.REDIS_URL, decode_responses=True)  # type: ignore[no-untyped-call]
+    return client
 
 
 async def allow(client_id: str, limit_per_minute: int) -> bool:

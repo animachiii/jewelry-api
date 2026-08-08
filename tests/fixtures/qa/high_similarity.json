@@ -1,0 +1,18 @@
+{
+  "candidates": [
+    {
+      "finish_reason": "STOP",
+      "content": {
+        "parts": [
+          {
+            "json": {
+              "similarity_score": 0.94,
+              "reasoning": "Matches chain style, prong count, and facet geometry."
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "model_version": "gemini-2.5-flash-image-preview"
+}

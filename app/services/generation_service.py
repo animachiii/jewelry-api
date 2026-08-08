@@ -173,16 +173,16 @@ async def transform_photo(
             unit_cost_usd=unit_cost_usd,
         )
         await _complete_success(session, job.id, sub_job, result, prompt, seed)
-        await _recompute_parent_status(session, job)
+        await recompute_parent_status(session, job)
         return sub_job
 
     assert last_error is not None
     _fail(sub_job, last_error, prompt, seed)
-    await _recompute_parent_status(session, job)
+    await recompute_parent_status(session, job)
     return sub_job
 
 
-async def _recompute_parent_status(session: AsyncSession, job: Job) -> None:
+async def recompute_parent_status(session: AsyncSession, job: Job) -> None:
     """Recomputes and persists the parent job's status from its sub-jobs'
     current state, in the same transaction as the sub-job write that
     triggered it — see docs/conventions.md and phases/phase-7-orchestration.md

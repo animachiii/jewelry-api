@@ -1,0 +1,18 @@
+{
+  "candidates": [
+    {
+      "finish_reason": "STOP",
+      "content": {
+        "parts": [
+          {
+            "json": {
+              "similarity_score": 0.41,
+              "reasoning": "Prong count differs from every reference image."
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "model_version": "gemini-2.5-flash-image-preview"
+}

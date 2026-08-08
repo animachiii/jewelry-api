@@ -13,6 +13,12 @@ connections checked out on a different thread's event loop — asyncpg
 connections are not shareable across loops. Tests redirect this by
 monkeypatching `settings.DATABASE_URL` (see tests/conftest.py's `db_session`
 fixture), same pattern as `tests/integration/test_migrations.py`.
+
+Phase 9: if the committed sub-job landed in QA_REVIEW (a successful
+synthetic-angle generation), dispatches `qa.score_similarity` after the
+commit — same dispatch-after-commit placement `orchestration.fan_out_job`
+uses for this exact task, so a QA dispatch never reads a sub-job row before
+its own creating transaction has landed.
 """
 
 import uuid
@@ -21,6 +27,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
 from app.core.redis_client import get_redis_client
+from app.db.models.enums import SubJobStatus
 from app.services.generation_service import transform_photo
 from app.workers._async_utils import run_async
 from app.workers.celery_app import celery_app
@@ -40,4 +47,9 @@ async def _run(sub_job_id: str) -> str:
 
 @celery_app.task(name="generation.transform_photo")  # type: ignore[untyped-decorator]
 def transform_photo_task(sub_job_id: str) -> str:
-    return run_async(_run(sub_job_id))
+    status = run_async(_run(sub_job_id))
+    if status == SubJobStatus.QA_REVIEW.value:
+        from app.workers.qa import score_similarity
+
+        score_similarity.delay(sub_job_id)
+    return status

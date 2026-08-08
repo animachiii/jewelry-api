@@ -1,10 +1,10 @@
-"""Job creation (real, Phase 2) and retry precondition checks (still
-MOCK_MODE — see phases/phase-1-api-contract.md Step 3; real retry execution
-lands in Phase 8).
+"""Job creation (real, Phase 2) and retry precondition checks
+(check_retry_preconditions — real execution wired up in
+app/services/retry_service.py and app/api/v2/retry.py, Phase 8).
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
@@ -12,7 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v2.schemas.generate import GenerateJobRequest, JobAcceptedResponse, ResolvedAnglePlan
 from app.config import settings
-from app.core.errors import AppError, ErrorCode
+from app.core import ratelimit
+from app.core.errors import AppError, ErrorCode, QuotaExceededError, RateLimitError
 from app.core.idempotency import IdempotencyKeyConflictError
 from app.db.models.api_clients import ApiClient
 from app.db.models.assets import Asset
@@ -231,6 +232,27 @@ async def create_job_for_request(
                 "This Idempotency-Key was already used with a different request body."
             )
         return await _build_accepted_response(existing.id, body)
+
+    # docs/api-routes.md: "Returns 429 when the client's rate limit or daily
+    # quota is exceeded" — a replay above never reaches here, so it never
+    # consumes a token or counts toward the quota (docs/business-rules.md
+    # §8: a replay doesn't bill the provider either; same reasoning).
+    if not await ratelimit.allow(str(client.id), client.rate_limit_per_min):
+        raise RateLimitError(
+            "Rate limit exceeded.",
+            details={"limit_per_minute": client.rate_limit_per_min},
+            retry_after_seconds=60,
+        )
+    if client.daily_job_quota is not None:
+        created_today = await jobs_repo.count_created_today(session, client.id)
+        if created_today >= client.daily_job_quota:
+            now = datetime.now(UTC)
+            tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            raise QuotaExceededError(
+                "Daily job quota exceeded.",
+                details={"daily_job_quota": client.daily_job_quota},
+                retry_after_seconds=int((tomorrow - now).total_seconds()),
+            )
 
     category = find_category(config_version, body.category_code)
     if category is None:

@@ -1,0 +1,55 @@
+# Staging Fly app. See phases/phase-12-cicd-deployment.md and
+# docs/deployment.md. Deployed by .github/workflows/deploy.yml's
+# deploy-staging job, triggered automatically on every push to `main` that
+# passes CI.
+#
+# Secrets (never set here — `fly secrets set NAME=value -a jewelry-api-staging`):
+# same list as fly.toml — see docs/deployment.md's checklist. Staging should
+# point at its own Supabase project / Upstash instance, not production's.
+
+app = "jewelry-api-staging"
+primary_region = "iad"
+
+[build]
+
+[deploy]
+  release_command = "alembic upgrade head"
+
+[env]
+  APP_ENV = "staging"
+  MOCK_MODE = "false"
+
+[processes]
+  app = "uvicorn app.main:app --host 0.0.0.0 --port 8000"
+  worker = "celery -A app.workers.celery_app worker -Q io -c ${IO_QUEUE_CONCURRENCY:-20} --hostname=worker@%h"
+  beat = "celery -A app.workers.celery_app beat"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/api/v2/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  processes = ["app"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  processes = ["worker"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  processes = ["beat"]

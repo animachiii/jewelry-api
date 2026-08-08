@@ -3,6 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+    # Phase 12: tag pushes also run CI, not just main — deploy.yml's
+    # deploy-production job gates on this workflow's success via
+    # workflow_run, and workflow_run only fires for events this workflow
+    # itself listens to.
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 

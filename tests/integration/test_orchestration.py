@@ -175,8 +175,7 @@ async def test_mixed_success_and_failure_parent_partial_success(
     assert job.failed_angles == 1
 
     # Phase 7 Checkpoint 4: GET /status must reflect this correctly, real
-    # data flowing through Phase 1's status-assembly logic — retryable/
-    # retry_url only on the failed angle, never on the one that succeeded.
+    # data flowing through Phase 1's status-assembly logic.
     status_resp = await client.get(
         f"/api/v2/status/{job_id}", headers={"X-API-Key": api_client_key}
     )
@@ -185,8 +184,19 @@ async def test_mixed_success_and_failure_parent_partial_success(
     assert angles_by_name["FRONT"]["retryable"] is False
     assert angles_by_name["FRONT"]["retry_url"] is None
     assert angles_by_name["SIDE"]["status"] == "FAILED"
-    assert angles_by_name["SIDE"]["retryable"] is True
-    assert angles_by_name["SIDE"]["retry_url"] == f"/api/v2/jobs/{job_id}/angles/SIDE/retry"
+    # Phase 8: retryable now also checks attempt_count against the ceiling
+    # (app/services/status_service.py). SIDE failed via
+    # generation_service.transform_photo's own internal retry loop, which
+    # always exhausts MAX_ATTEMPTS (3) before landing on FAILED — the same
+    # column job_service.MAX_RETRY_ATTEMPTS (also 3) checks, so a
+    # genuinely-internally-exhausted FAILED angle is already at the
+    # client-retry ceiling by construction. See
+    # phases/phase-8-failure-retry.md's self-audit — a real, documented
+    # consequence of the shared attempt_count column
+    # (docs/schema.md/docs/business-rules.md §5), not a bug this test papers
+    # over.
+    assert angles_by_name["SIDE"]["retryable"] is False
+    assert angles_by_name["SIDE"]["retry_url"] is None
 
 
 async def test_all_angles_fail_parent_failed(
@@ -257,8 +267,21 @@ async def test_single_angle_failure_is_failed_not_partial_success(
 
 
 async def test_qa_review_keeps_parent_processing_even_with_other_successes(
-    client: AsyncClient, api_client_key: str, db_session: AsyncSession
+    client: AsyncClient,
+    api_client_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Phase 9: QA scoring now runs for real (tests/conftest.py's autouse
+    # fixture defaults to a high-similarity fixture, which would complete
+    # DIAGONAL immediately) — this test wants the lingering QA_REVIEW state
+    # a human decision is still pending on, so it forces a below-threshold
+    # score instead.
+    import app.providers.gemini_qa as qa_module
+
+    qa_fixture = json.loads((FIXTURES.parent / "qa" / "low_similarity.json").read_text())
+    monkeypatch.setattr(qa_module.GeminiQaProvider, "_call_api", lambda self, *a, **k: qa_fixture)
+
     front_path = await _presign_and_upload(client, api_client_key, "FRONT")
 
     resp = await client.post(
@@ -276,8 +299,9 @@ async def test_qa_review_keeps_parent_processing_even_with_other_successes(
     job_id = uuid.UUID(resp.json()["job_id"])
 
     job = (await db_session.execute(select(Job).where(Job.id == job_id))).scalar_one()
-    # FRONT succeeded but DIAGONAL (synthetic) landed in QA_REVIEW, unscored —
-    # the parent must not report a terminal status while a decision is pending.
+    # FRONT succeeded but DIAGONAL (synthetic) landed in QA_REVIEW, flagged
+    # below threshold — the parent must not report a terminal status while a
+    # decision is pending.
     assert job.status.value == "PROCESSING"
     assert job.completed_at is None
 

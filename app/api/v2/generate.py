@@ -1,7 +1,8 @@
 """POST /api/v2/generate. See docs/api-routes.md and docs/business-rules.md §1, §8.
 
-Real job creation (Phase 2) — see phases/phase-2-data-model.md. Only the
-retry endpoint is still MOCK_MODE; /generate is real regardless of that flag.
+Real job creation (Phase 2) — see phases/phase-2-data-model.md. /retry is
+also real as of Phase 8 — the settings.MOCK_MODE flag no longer gates either
+route.
 """
 
 import hashlib

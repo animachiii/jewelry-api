@@ -1,15 +1,17 @@
 """Assembles JobStatusResponse from a Job + its sub_jobs. See docs/api-routes.md
 and docs/business-rules.md §3-4.
 
-Real read against Postgres + live signed URLs — not a canned fixture. Only
-`/generate` and `/retry` (whose real business logic needs Phase 2/8) are
-gated behind `MOCK_MODE`; a status read is exactly what production will do.
+Real read against Postgres + live signed URLs — not a canned fixture.
+`/retry` is real as of Phase 8, same as `/generate` (Phase 2) — a status
+read is exactly what production does; settings.MOCK_MODE no longer gates
+either route.
 """
 
 from app.api.v2.schemas.status import AngleStatus, JobStatusResponse
 from app.db.models.enums import FailureClass, JobStatus, SourceType, SubJobStatus
 from app.db.models.jobs import Job, SubJob
 from app.services import storage_service
+from app.services.job_service import MAX_RETRY_ATTEMPTS
 
 _RETRYABLE_FAILURE_CLASSES = {
     FailureClass.RATE_LIMITED,
@@ -24,9 +26,14 @@ _NON_TERMINAL_STATUSES = {JobStatus.PENDING, JobStatus.PROCESSING}
 def build_angle_status(
     job: Job, sub_job: SubJob, output_bucket_and_path: tuple[str, str] | None
 ) -> AngleStatus:
+    # docs/business-rules.md §5: a sub-job at the retry ceiling must not be
+    # offered a retry_url even if its failure_class is otherwise retryable —
+    # see phases/phase-8-failure-retry.md Step 1 (a gap found in this
+    # function, not present when it was originally written in Phase 1/7).
     retryable = (
         sub_job.status == SubJobStatus.FAILED
         and sub_job.failure_class in _RETRYABLE_FAILURE_CLASSES
+        and sub_job.attempt_count < MAX_RETRY_ATTEMPTS
     )
 
     image_url: str | None = None

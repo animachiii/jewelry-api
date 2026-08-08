@@ -1,6 +1,6 @@
 """Uploads a tiny placeholder JPEG to Supabase Storage for every seeded OUTPUT
-asset that backs a COMPLETED sub-job. Idempotent — skips paths that already
-exist.
+asset that backs a COMPLETED sub-job, and every INPUT asset that backs a
+FAILED sub-job. Idempotent — skips paths that already exist.
 
 Seed data (scripts/seed_dev.py) only writes `assets` rows; it never uploads
 bytes. Phase 1's mock server needs `image_url` to be a real signed URL that
@@ -9,6 +9,13 @@ Checkpoint 3) — Supabase's sign endpoint 404s for a path with no object, so
 this is required, not cosmetic. `upload_placeholder_bytes` is also called
 directly by tests/integration/test_mock_fixtures.py against
 testcontainers-seeded (ephemeral) job rows.
+
+The FAILED/INPUT half was added in Phase 8: a real retry
+(app/services/retry_service.py) dispatches a real
+generation.transform_photo, which downloads the sub-job's input asset from
+Storage — a seeded FAILED sub-job's fabricated storage_path 404s the same
+way an un-backfilled COMPLETED output did in Phase 1, just discovered later
+because nothing read it until retry became real.
 
 python scripts/upload_seed_assets.py
 """
@@ -36,15 +43,21 @@ _PLACEHOLDER_JPEG = bytes.fromhex(
 
 
 async def upload_placeholder_bytes(session: AsyncSession) -> tuple[int, int]:
-    """Backfills bytes for every COMPLETED sub-job's output asset visible in
-    `session`. Returns (uploaded, skipped_existing).
+    """Backfills bytes for every COMPLETED sub-job's output asset, and every
+    FAILED sub-job's input asset, visible in `session`. Returns (uploaded,
+    skipped_existing).
     """
-    result = await session.execute(
+    output_result = await session.execute(
         select(Asset)
         .join(SubJob, SubJob.output_asset_id == Asset.id)
         .where(SubJob.status == SubJobStatus.COMPLETED, Asset.kind == AssetKind.OUTPUT)
     )
-    assets = result.scalars().all()
+    input_result = await session.execute(
+        select(Asset)
+        .join(SubJob, SubJob.input_asset_id == Asset.id)
+        .where(SubJob.status == SubJobStatus.FAILED, Asset.kind == AssetKind.INPUT)
+    )
+    assets = list(output_result.scalars().all()) + list(input_result.scalars().all())
 
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
         tmp.write(_PLACEHOLDER_JPEG)

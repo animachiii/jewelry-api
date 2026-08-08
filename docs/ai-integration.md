@@ -96,22 +96,35 @@ still billed.
 | | |
 | :--- | :--- |
 | **Trigger** | A `SYNTHETIC` sub-job completes generation. Real-photo angles have no QA gate (see above). |
-| **Where** | Celery `io` queue, `app/workers/qa.py` |
-| **Model** | Perceptual embedding similarity — candidate models evaluated in Phase 9. Given the direction in `docs/decisions/0001-drop-local-matting.md`, an LLM-judged similarity check (Gemini) is the likely default; a dedicated embedding model is the fallback if that proves unreliable. Undecided until Phase 9. |
+| **Where** | Celery `io` queue, `app/workers/qa.py::score_similarity`, dispatched by `app/workers/generation.py` right after a `QA_REVIEW`-landing `transform_photo` commits (Phase 9). |
+| **Model** | LLM-judged similarity via Gemini (`app/providers/gemini_qa.py::GeminiQaProvider`) — decided in Phase 9, per this doc's own prior note that it was the likely default. No dedicated embedding model was added; revisit only if the judge proves unreliable in practice. |
 | **Input** | Reference image(s) for the category + the generated output |
 | **Output** | `qa_score` ∈ [0, 1] written to `sub_jobs`, plus `qa_status` |
 
 Threshold from `config.global.qa_similarity_threshold`, default `0.82` — **a
 placeholder until calibrated against real client pieces.** Calibrate by
 scoring known-good and known-bad outputs and picking the threshold that
-separates them, not by intuition.
+separates them, not by intuition. **Still not calibrated as of Phase 9** —
+no real client pieces exist in this environment (same situation Phase 6 hit
+with `GEMINI_API_KEY`), same as roadmap open decision #8.
 
-Below threshold → `QA_REVIEW` and the human queue. Above → `COMPLETED`.
+Below threshold → `QA_REVIEW` and the human queue (`qa_status: FLAGGED`).
+Above → `COMPLETED` (`qa_status: PASSED`). A QA provider failure (timeout,
+malformed response) is treated the same as below-threshold — `QA_REVIEW`
++ `FLAGGED`, `qa_score: NULL` — never auto-`COMPLETED` and never
+auto-`REJECTED`. Fail open to a human, never to an unscored pass — see
+`phases/phase-9-qa-gate.md`'s reality-check section; this exact case wasn't
+specified anywhere before this phase.
 
 This is the **only** mechanism in the system that catches a silent failure
 on synthetic angles. Fail-fast, partial success, and retry all handle loud
 failures — exceptions, non-200s, timeouts. A hallucinated angle throws
 nothing. If this gate is weak, nothing else catches it for Mode B.
+
+**Not billed.** No `cost_events` row is written for a QA call — neither
+`docs/business-rules.md` §10 nor this doc ever described QA scoring as a
+billed operation, so Phase 9 didn't invent one. Revisit in Phase 11 if real
+usage data shows this matters.
 
 ---
 
@@ -119,7 +132,10 @@ nothing. If this gate is weak, nothing else catches it for Mode B.
 
 - **Never call the live Gemini API in CI.** Use recorded response fixtures in
   `tests/fixtures/gemini/`, covering: success, 429, 5xx, timeout, safety
-  refusal, and malformed response.
+  refusal, and malformed response. QA-scoring fixtures live in
+  `tests/fixtures/qa/`: `high_similarity.json`, `low_similarity.json`,
+  `malformed.json` — `GeminiQaProvider._call_api` is monkeypatched the same
+  way `GeminiProvider._call_api` is.
 - Celery logic is tested with `task_always_eager`; queue routing is tested
   separately in integration.
 
