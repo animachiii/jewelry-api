@@ -68,8 +68,23 @@ def upload_from_temp(bucket: str, storage_path: str, local_path: Path, content_t
         )
 
 
+def upload_bytes(bucket: str, storage_path: str, data: bytes, content_type: str) -> None:
+    """Same as upload_from_temp but for bytes already in memory — used by the
+    generation worker (app/services/generation_service.py) to write a
+    provider's output directly, without a temp-file round trip."""
+    get_client().storage.from_(bucket).upload(storage_path, data, {"content-type": content_type})
+
+
 def exists(bucket: str, storage_path: str) -> bool:
     parent = str(Path(storage_path).parent)
     filename = Path(storage_path).name
     listing = get_client().storage.from_(bucket).list(parent)
     return any(item.get("name") == filename for item in listing)
+
+
+def delete(bucket: str, storage_path: str) -> None:
+    """Removes bytes for a single object. Idempotent — deleting an object
+    that is already gone does not raise. Used by the retention worker
+    (app/workers/retention.py); never deletes the Asset row itself.
+    """
+    get_client().storage.from_(bucket).remove([storage_path])

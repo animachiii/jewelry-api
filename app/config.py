@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     APP_ENV: str = "local"
     LOG_LEVEL: str = "INFO"
     API_BASE_PATH: str = "/api/v2"
+    # Phase 1 mock server switch — see phases/phase-1-api-contract.md Step 3.
+    # Routes serve fixtures instead of real business logic. Must be false in production;
+    # unimplemented routes raise instead of silently returning mock data.
+    MOCK_MODE: bool = False
 
     # --- Supabase Postgres ---
     # Session pooler (5432), NOT transaction pooler (6543) — SQLAlchemy uses prepared statements.
@@ -24,6 +28,8 @@ class Settings(BaseSettings):
     BUCKET_INPUTS: str = "jewelry-inputs"
     BUCKET_OUTPUTS: str = "jewelry-outputs"
     SIGNED_URL_TTL_SECONDS: int = 3600
+    # Phase 4 — Celery beat schedule for app.workers.retention.expire_assets.
+    RETENTION_SWEEP_CRON: str = "0 3 * * *"
 
     # --- Redis ---
     REDIS_URL: str = "redis://localhost:6379/0"

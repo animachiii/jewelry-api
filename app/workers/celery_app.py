@@ -33,20 +33,28 @@ celery_app = Celery(
         "app.workers.qa",
         "app.workers.orchestration",
         "app.workers.health",
+        "app.workers.config",
+        "app.workers.retention",
     ],
 )
 
 celery_app.conf.task_routes = {
     "generation.*": {"queue": "io"},
+    "orchestration.*": {"queue": "io"},
     "qa.*": {"queue": "io"},
     "config.sync": {"queue": "io"},
     "health.ping_io": {"queue": "io"},
+    "retention.*": {"queue": "io"},
 }
 
 celery_app.conf.beat_schedule = {
     "config-sync": {
         "task": "config.sync",
         "schedule": _crontab_from_string(settings.CONFIG_SYNC_CRON),
+    },
+    "asset-retention": {
+        "task": "retention.expire_assets",
+        "schedule": _crontab_from_string(settings.RETENTION_SWEEP_CRON),
     },
 }
 

@@ -42,3 +42,4 @@ class Asset(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )
     expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    purged_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)

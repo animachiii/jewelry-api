@@ -37,7 +37,25 @@ Pulls Google Sheets, normalizes, hashes, and writes a new `config_versions` row 
 hash changed. Activates it and invalidates the Redis cache. **Ops-only auth scope.**
 
 Idempotent: an unchanged sheet returns the existing active version and creates nothing.
-Also runs on a Celery beat schedule.
+Also runs on a Celery beat schedule (`CONFIG_SYNC_CRON`, Celery task `config.sync`).
+
+Returns `202` with `{ "config_version": int, "sync_status": "SUCCESS" | "FAILED",
+"activated": bool }`. `sync_status`/`activated` describe the version the response
+refers to, not necessarily a version created by this call — see the three outcomes
+below.
+
+Three distinct outcomes, all `202` (this is an accepted-and-resolved sync, not an
+error path unless both Redis and Postgres are down — see docs/business-rules.md §9):
+
+1. **Sheets unreachable or not configured** — no new row is written (there is no
+   payload to record); returns the currently active version unchanged,
+   `activated: true`. This is the path exercised in every environment today, since
+   no real Google Sheets project exists yet (see phases/phase-3-config-service.md).
+2. **Sheets reachable, payload fails validation** — a new row is written with
+   `sync_status: FAILED` and `error_message` set, `is_active` stays `false`; the
+   response reports the *previous* (still active) version, not the failed one.
+3. **Sheets reachable, payload valid, hash changed** — a new row is written,
+   activated, and the Redis cache is invalidated; response reports the new version.
 
 ---
 
@@ -103,19 +121,36 @@ by retrying, and the ERP must not offer the button.
 Response sets `Retry-After` while the job is non-terminal so the ERP can back off.
 
 ### `POST /api/v2/jobs/{job_id}/angles/{angle}/retry`
-Re-runs one failed angle. **Auth required. `Idempotency-Key` header required.**
+Re-runs one failed angle. Real as of Phase 8 — see
+`phases/phase-8-failure-retry.md`. **Auth required. `Idempotency-Key` header
+required.**
 
 Preconditions — all return `409` with a specific code:
 
 - Sub-job status must be `FAILED` (not `REJECTED`, not `COMPLETED`, not in flight)
 - `attempt_count` must be below the retry ceiling (see @docs/business-rules.md)
-- The input asset (or matte) must still exist and be unexpired
+- The input asset must still exist and be unexpired
 
-On success: resets the sub-job to `PENDING`, increments `attempt_count`, re-enqueues, and
-recomputes the parent status. Returns `202`.
+On success: resets the sub-job to `PENDING`, records a `RETRY_REQUESTED`
+`job_events` row, and dispatches a fresh `generation.transform_photo` —
+returns `202`. `attempt_count` is **not** incremented by this endpoint
+itself; `generation.transform_photo`'s own provider-attempt loop increments
+it once per call regardless of what dispatched it (one shared counter, see
+`docs/schema.md`), and the retry ceiling check above already accounts for
+that. A job whose status was terminal moves back to `PROCESSING`
+immediately on accept, ahead of the retried angle's own recompute once it
+finishes.
 
 The retry reuses the **original** `config_version_id` pinned on the job, not the currently
 active one. A retried angle must match the three that already succeeded.
+
+**Idempotency caveat:** unlike `/generate` (durable via `jobs.payload_hash`,
+Postgres), `/retry` has no row of its own to persist a dedup marker on —
+its `Idempotency-Key` dedup is Redis-only (`retryidem:` prefix, 24h TTL,
+`app/core/idempotency.py`). A replay outside that window executes as a
+fresh retry rather than a no-op. Given the 3-attempt ceiling this can cost
+at most one extra generation call on one angle, not the whole-job
+double-billing risk `/generate`'s durable dedup exists to prevent.
 
 ---
 

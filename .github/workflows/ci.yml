@@ -3,6 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+    # Phase 12: tag pushes also run CI, not just main — deploy.yml's
+    # deploy-production job gates on this workflow's success via
+    # workflow_run, and workflow_run only fires for events this workflow
+    # itself listens to.
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -23,12 +28,35 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # Added: several integration tests (idempotency, per-client rate
+      # limiting — Phases 8/10) need a genuine local Redis, not fakeredis.
+      # REDIS_URL below always pointed at localhost:6379, but nothing ever
+      # actually ran this service — this workflow had never had a real CI
+      # run before Phases 8-13's PR, since main was never pushed until now.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     env:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/jewelry_ci
       REDIS_URL: redis://localhost:6379/0
       CELERY_BROKER_URL: redis://localhost:6379/1
       CELERY_RESULT_BACKEND: redis://localhost:6379/2
+      # Several tests hit real Supabase Storage by design (documented since
+      # Phase 1 — presign/PUT/signed-URL round trips are never mocked).
+      # Same gap as above: these secrets were never actually needed until
+      # this workflow got its first real CI run. Set SUPABASE_URL and
+      # SUPABASE_SERVICE_KEY as repo secrets (Settings -> Secrets and
+      # variables -> Actions) using the same project this repo's local
+      # .env already points at.
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
 
     steps:
       - uses: actions/checkout@v4

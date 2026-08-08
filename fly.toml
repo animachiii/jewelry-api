@@ -1,0 +1,56 @@
+# Production Fly app. See phases/phase-12-cicd-deployment.md and
+# docs/deployment.md. Deployed by .github/workflows/deploy.yml's
+# deploy-production job, triggered only by a pushed `v*` tag.
+#
+# Secrets (never set here — `fly secrets set NAME=value -a jewelry-api`):
+# DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY, REDIS_URL,
+# CELERY_BROKER_URL, CELERY_RESULT_BACKEND, GEMINI_API_KEY,
+# GOOGLE_SERVICE_ACCOUNT_JSON, SENTRY_DSN — every var app/config.py::Settings
+# has no default for. See docs/deployment.md's checklist.
+
+app = "jewelry-api"
+primary_region = "iad"
+
+[build]
+
+[deploy]
+  release_command = "alembic upgrade head"
+
+[env]
+  APP_ENV = "production"
+  MOCK_MODE = "false"
+
+[processes]
+  app = "uvicorn app.main:app --host 0.0.0.0 --port 8000"
+  worker = "celery -A app.workers.celery_app worker -Q io -c ${IO_QUEUE_CONCURRENCY:-20} --hostname=worker@%h"
+  beat = "celery -A app.workers.celery_app beat"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/api/v2/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  processes = ["app"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  processes = ["worker"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  processes = ["beat"]

@@ -1,0 +1,36 @@
+# Free-tier deploy path — Render + Upstash. See docs/deployment-free-tier.md
+# for the full reality check, including why this exists alongside
+# fly.toml/fly.staging.toml (Fly requires a card on file even for its free
+# allowance; Render's free Web Service tier does not).
+#
+# One free Render Web Service running the API, Celery worker, and Celery
+# beat together via scripts/render_start.sh (Render has no free Background
+# Worker tier and no free managed Redis — Redis is Upstash's free tier
+# instead, set as the REDIS_URL/CELERY_BROKER_URL/CELERY_RESULT_BACKEND
+# secrets below).
+#
+# Deploys automatically on push once this repo is connected via Render's
+# own dashboard (New -> Blueprint) — no GitHub Actions workflow needed for
+# this path, unlike deploy.yml's Fly jobs. Render's GitHub App reads this
+# file directly, the same integration V1 (jewellery-gen-backend) already
+# uses in production.
+services:
+  - type: web
+    name: jewelry-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/v2/health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: MOCK_MODE
+        value: "false"
+      - key: IO_QUEUE_CONCURRENCY
+        value: "4"
+      # DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY, REDIS_URL,
+      # CELERY_BROKER_URL, CELERY_RESULT_BACKEND, GEMINI_API_KEY,
+      # GOOGLE_SERVICE_ACCOUNT_JSON, SENTRY_DSN are secrets — set them in
+      # the Render dashboard (Environment tab), never here. See
+      # docs/deployment-free-tier.md's checklist for the full list and
+      # where each value comes from.

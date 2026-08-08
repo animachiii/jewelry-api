@@ -21,6 +21,8 @@ dependencies = [
     "google-api-python-client>=2.140",
     "google-auth>=2.34",
     "supabase>=2.9",
+    "python-ulid>=4.0.1",
+    "pillow>=12.3.0",
 ]
 
 [dependency-groups]
@@ -33,6 +35,7 @@ dev = [
     "pytest-cov>=5.0",
     "testcontainers[postgres]>=4.8",
     "fakeredis>=2.24",
+    "openapi-spec-validator>=0.9.0",
 ]
 
 [build-system]

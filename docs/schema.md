@@ -110,12 +110,26 @@ Partial unique index: `CREATE UNIQUE INDEX ON config_versions (is_active) WHERE 
   "global": {
     "model_version": "gemini-<pinned-version>",
     "qa_similarity_threshold": 0.82,
-    "default_negative_prompt": "..."
+    "default_negative_prompt": "...",
+    "unit_cost_usd": 0.02
   }
 }
 ```
 
 Seven categories total. Exact codes are confirmed during Phase 0 from the client's sheet.
+
+**Sheets -> payload normalization (Phase 3):** `app/services/config_sync_service.py`
+builds this shape from raw Sheets rows (`app/providers/sheets.py`) — one row per
+category/angle pair plus a `Global` key/value tab. The exact column layout is an
+assumed convention, not yet confirmed against a real client sheet (roadmap open
+decision #2) — see `app/providers/sheets.py`'s module docstring for the assumed
+columns.
+
+**`global.unit_cost_usd` (Phase 6):** added to satisfy docs/business-rules.md
+§10 — "`unit_cost_usd` comes from configuration, never a hardcoded constant."
+The original payload shape had no cost field at all; this is a placeholder
+Gemini image-generation price, to be confirmed against real billing before
+launch, same status as `qa_similarity_threshold`.
 
 ---
 
@@ -128,6 +142,7 @@ One row per `POST /api/v2/generate`.
 | `id` | UUID PK | This is the `job_id` returned to the client |
 | `client_id` | UUID NOT NULL FK → `api_clients.id` | |
 | `idempotency_key` | TEXT NOT NULL | Client-supplied |
+| `payload_hash` | TEXT NOT NULL | SHA-256 of the normalized `/generate` request body. Added in migration 0003 — durable version of the same-key/different-payload 409 check in docs/business-rules.md §8; a Redis-only hash doesn't survive the 24h TTL. |
 | `category_code` | TEXT NOT NULL | Must exist in the active config version |
 | `config_version_id` | UUID NOT NULL FK → `config_versions.id` | Pinned at creation. Never changes. |
 | `status` | `job_status_t` NOT NULL DEFAULT `PENDING` | |
@@ -196,6 +211,7 @@ Every stored image. Rows are never deleted.
 | `checksum_sha256` | TEXT NULL | |
 | `created_at` | TIMESTAMPTZ NOT NULL DEFAULT now() | |
 | `expires_at` | TIMESTAMPTZ NULL | Retention deadline; storage lifecycle removes bytes |
+| `purged_at` | TIMESTAMPTZ NULL | Set by the Phase 4 retention worker (`app/workers/retention.py`) once bytes are actually removed from Storage. `NULL` until then. Added in migration `0004`. The row itself is never deleted — a row with `purged_at` set and no bytes still answers "what did we produce for this SKU." |
 
 Unique: `(bucket, storage_path)`.
 Index: `(job_id, kind)`, `(expires_at)` where not null.
@@ -276,7 +292,7 @@ jobs 1──∞ job_events
 | `config:active` | Serialized active config payload | 15 min |
 | `idem:{client_id}:{key}` | Idempotency key → job_id | 24 h |
 | `ratelimit:{client_id}:{minute}` | Token bucket counter | 2 min |
-| `provider:gemini:tokens` | Global provider token bucket | rolling |
+| `provider:gemini:tokens:{minute-window}` | Global provider rate-limit counter (Phase 6, `app/services/rate_limiter.py`) — fixed-window, not a true token bucket | 2 min |
 | `celery-*` | Broker and result backend | Celery-managed |
 
 Every one of these is rebuildable. Flushing Redis must not lose client-visible state.
