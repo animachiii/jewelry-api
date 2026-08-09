@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Jewelry Generation API v2 — Showcase</title>
+<style>
+  :root {
+    --bg: #faf8f5;
+    --panel: #ffffff;
+    --border: #e4ddd2;
+    --text: #2b2620;
+    --muted: #7a6f60;
+    --accent: #a8763e;
+    --accent-dark: #8a5f2f;
+    --ok: #3d7a4a;
+    --err: #a13a3a;
+    --warn: #b4841f;
+    --info: #35538c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.4;
+  }
+  header {
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  header h1 { margin: 0; font-size: 20px; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  main {
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 24px;
+    display: grid;
+    gap: 20px;
+  }
+  section {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px 20px;
+  }
+  section h2 { margin: 0 0 12px; font-size: 15px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+  label { display: block; font-size: 13px; margin-bottom: 4px; color: var(--muted); }
+  input[type="text"], input[type="password"], input[type="file"], select {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 14px;
+    background: #fff;
+    color: var(--text);
+  }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .field { margin-bottom: 12px; }
+  .checkbox-field { display: flex; align-items: center; gap: 8px; }
+  .checkbox-field input { width: auto; }
+  button {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 9px 18px;
+    border-radius: 6px;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button:hover { background: var(--accent-dark); }
+  button:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
+  button.secondary { background: #fff; color: var(--accent); border: 1px solid var(--accent); }
+  button.secondary:hover { background: #f5efe6; }
+  button.small { padding: 5px 12px; font-size: 12px; }
+  .status-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .status-PENDING, .status-PROCESSING, .status-GENERATING, .status-QA_REVIEW { background: #eef2fb; color: var(--info); }
+  .status-COMPLETED { background: #e6f4e8; color: var(--ok); }
+  .status-PARTIAL_SUCCESS { background: #fdf3df; color: var(--warn); }
+  .status-FAILED, .status-REJECTED { background: #fbe9e9; color: var(--err); }
+  .status-SKIPPED { background: #f0ede7; color: var(--muted); }
+  .call-error {
+    background: #fbe9e9;
+    border: 1px solid #f0c4c4;
+    color: var(--err);
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    margin-top: 8px;
+    display: none;
+    white-space: pre-wrap;
+  }
+  .call-error.visible { display: block; }
+  .angle-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .angle-card {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+  }
+  .angle-card.disabled { opacity: 0.45; }
+  .angle-card h3 { margin: 0 0 8px; font-size: 13px; letter-spacing: 0.03em; }
+  .angle-card .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .angle-result img { max-width: 100%; border-radius: 6px; border: 1px solid var(--border); margin-top: 8px; }
+  .seed-list { display: flex; flex-direction: column; gap: 6px; }
+  .seed-row {
+    display: flex; align-items: center; justify-content: space-between;
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; cursor: pointer;
+  }
+  .seed-row:hover { background: #f5f1ea; }
+  .seed-row .scenario { font-size: 13px; }
+  .seed-row .job-id { font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; }
+  .job-panel { display: none; margin-top: 16px; }
+  .job-panel.visible { display: block; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .field-hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  code { background: #f0ede7; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Jewelry Generation API v2 — Showcase</h1>
+  <p>Demo client for docs/api-routes.md. Not the ERP integration — a minimal presign → upload → generate → poll page.</p>
+</header>
+
+<main>
+
+  <section>
+    <h2>Connection</h2>
+    <div class="row">
+      <div class="field">
+        <label for="base-url">API base URL</label>
+        <input type="text" id="base-url" placeholder="https://jewelry-api-qc8b.onrender.com" />
+      </div>
+      <div class="field">
+        <label for="api-key">API key (X-API-Key, <code>client</code> scope)</label>
+        <input type="password" id="api-key" placeholder="paste your client key" />
+      </div>
+    </div>
+    <div class="field-hint">
+      Stored in this browser's localStorage. Served same-origin by this API's own
+      <code>StaticFiles</code> mount — there is no CORS setup, so this page will not
+      work loaded from anywhere else.
+    </div>
+    <div class="call-error" id="config-error"></div>
+  </section>
+
+  <section>
+    <h2>Seeded demo jobs</h2>
+    <p class="muted">Real, already-completed jobs from <code>scripts/seed_dev.py</code> — free to browse, no Gemini call.</p>
+    <div class="seed-list" id="seed-list"></div>
+  </section>
+
+  <section>
+    <h2>Submit a new job</h2>
+    <p class="muted" style="color: var(--err)">
+      This calls the real pipeline. If <code>GEMINI_API_KEY</code> is set, angles you
+      mark as photo/synthetic will trigger a real, billed Gemini call.
+    </p>
+    <div class="row">
+      <div class="field">
+        <label for="category">Category</label>
+        <select id="category"></select>
+      </div>
+      <div class="field">
+        <label for="sku">SKU reference (optional)</label>
+        <input type="text" id="sku" placeholder="e.g. RING-0142" />
+      </div>
+    </div>
+    <div class="angle-grid" id="angle-grid"></div>
+    <div style="margin-top: 14px">
+      <button type="button" id="submit-btn">Presign, upload &amp; generate</button>
+    </div>
+    <div class="call-error" id="submit-error"></div>
+  </section>
+
+  <section class="job-panel" id="job-panel">
+    <h2>Job <span id="job-id-label" class="muted"></span></h2>
+    <p>
+      <span class="status-badge" id="job-status-badge">—</span>
+      <span class="muted" id="job-counts"></span>
+    </p>
+    <div class="angle-grid" id="job-angles"></div>
+  </section>
+
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const ANGLES = ["FRONT", "SIDE", "DIAGONAL", "TOP"];
+  const JOB_TERMINAL = new Set(["COMPLETED", "PARTIAL_SUCCESS", "FAILED"]);
+  const POLL_INTERVAL_MS = 4000; // GET /status sets Retry-After: 3 while non-terminal
+
+  const SEEDED_JOBS = [
+    { id: "616451d0-9451-4563-8b0f-60697bee0234", scenario: "4/4 succeeded — COMPLETED" },
+    { id: "b682df8b-6ccb-4738-a73c-335aef128e48", scenario: "3 ok, 1 FAILED — PARTIAL_SUCCESS" },
+    { id: "fc58410e-ecd0-4427-a336-78f877213668", scenario: "3 ok, 1 REJECTED — PARTIAL_SUCCESS" },
+    { id: "6e0d97be-99f7-499b-9506-d7dad0b94836", scenario: "0/4 succeeded — FAILED" },
+    { id: "f381a410-7d16-4efa-bafd-9da13b803c06", scenario: "1 angle, failed — FAILED (not partial)" },
+    { id: "507c2dc2-7aab-4b66-95c5-21da1d348c74", scenario: "2 requested, 2 skipped, both ok — COMPLETED" },
+    { id: "6fddf78f-b8be-4dee-8116-42f0b26e21ea", scenario: "Synthetic in QA_REVIEW — PROCESSING" },
+    { id: "aa118026-9c7d-4cbe-af6d-fc4b603366e0", scenario: "2 done, 2 in flight — PROCESSING" },
+  ];
+
+  const baseUrlInput = $("base-url");
+  const apiKeyInput = $("api-key");
+  baseUrlInput.value = localStorage.getItem("jgb_v2_base_url") || window.location.origin;
+  apiKeyInput.value = localStorage.getItem("jgb_v2_api_key") || "";
+  baseUrlInput.addEventListener("change", () => {
+    localStorage.setItem("jgb_v2_base_url", baseUrlInput.value);
+    loadConfig();
+  });
+  apiKeyInput.addEventListener("change", () => {
+    localStorage.setItem("jgb_v2_api_key", apiKeyInput.value);
+    loadConfig();
+  });
+
+  function apiBase() { return baseUrlInput.value.replace(/\/+$/, ""); }
+  function apiKey() { return apiKeyInput.value.trim(); }
+
+  async function apiFetch(path, options) {
+    options = options || {};
+    const headers = Object.assign({}, options.headers || {}, { "X-API-Key": apiKey() });
+    const resp = await fetch(apiBase() + path, Object.assign({}, options, { headers }));
+    if (!resp.ok) {
+      let detail = resp.statusText;
+      try {
+        const body = await resp.json();
+        if (body && body.error) detail = body.error.code + ": " + body.error.message;
+      } catch (e) { /* not JSON */ }
+      const err = new Error(detail);
+      err.status = resp.status;
+      throw err;
+    }
+    if (resp.status === 202 && resp.headers.get("content-length") === "0") return null;
+    if (resp.status === 204) return null;
+    const text = await resp.text();
+    return text ? JSON.parse(text) : null;
+  }
+
+  function showCallError(el, err) {
+    el.textContent = "Request failed: " + err.message;
+    el.classList.add("visible");
+  }
+  function hideCallError(el) {
+    el.classList.remove("visible");
+    el.textContent = "";
+  }
+
+  // --- Seeded jobs -----------------------------------------------------
+
+  function renderSeedList() {
+    const container = $("seed-list");
+    container.innerHTML = "";
+    SEEDED_JOBS.forEach((job) => {
+      const row = document.createElement("div");
+      row.className = "seed-row";
+      row.innerHTML =
+        '<span class="scenario">' + job.scenario + "</span>" +
+        '<span class="job-id">' + job.id + "</span>";
+      row.addEventListener("click", () => startTrackingJob(job.id));
+      container.appendChild(row);
+    });
+  }
+
+  // --- Config -> category/angle form ------------------------------------
+
+  let activeConfig = null;
+
+  async function loadConfig() {
+    hideCallError($("config-error"));
+    try {
+      activeConfig = await apiFetch("/api/v2/config");
+      renderCategoryOptions();
+    } catch (err) {
+      activeConfig = null;
+      showCallError($("config-error"), err);
+    }
+  }
+
+  function renderCategoryOptions() {
+    const select = $("category");
+    select.innerHTML = "";
+    (activeConfig.categories || []).forEach((cat) => {
+      const opt = document.createElement("option");
+      opt.value = cat.code;
+      opt.textContent = cat.name + " (" + cat.code + ")";
+      select.appendChild(opt);
+    });
+    renderAngleInputs();
+  }
+
+  $("category").addEventListener("change", renderAngleInputs);
+
+  function renderAngleInputs() {
+    const grid = $("angle-grid");
+    grid.innerHTML = "";
+    if (!activeConfig) return;
+    const catCode = $("category").value;
+    const cat = (activeConfig.categories || []).find((c) => c.code === catCode);
+    if (!cat) return;
+
+    ANGLES.forEach((angle) => {
+      const rule = cat.angles[angle];
+      const card = document.createElement("div");
+      card.className = "angle-card" + (!rule || !rule.enabled ? " disabled" : "");
+      card.dataset.angle = angle;
+
+      if (!rule || !rule.enabled) {
+        card.innerHTML = "<h3>" + angle + "</h3><div class='hint'>Not enabled for " + catCode + "</div>";
+        grid.appendChild(card);
+        return;
+      }
+
+      let html = "<h3>" + angle + "</h3>";
+      html += '<input type="file" accept="image/jpeg,image/png,image/webp" data-role="file" />';
+      if (rule.synthetic_allowed) {
+        html +=
+          '<div class="checkbox-field" style="margin-top:8px">' +
+          '<input type="checkbox" data-role="synthetic" id="synthetic-' + angle + '" />' +
+          '<label for="synthetic-' + angle + '" style="margin:0">Generate synthetically (no photo)</label>' +
+          "</div>";
+      }
+      html += '<div class="hint">Leave both empty to skip this angle.</div>';
+      card.innerHTML = html;
+      grid.appendChild(card);
+    });
+  }
+
+  // --- Submit: presign -> upload -> generate ----------------------------
+
+  function uuid4() {
+    if (crypto.randomUUID) return crypto.randomUUID();
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      const v = c === "x" ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  }
+
+  $("submit-btn").addEventListener("click", async function () {
+    const errorEl = $("submit-error");
+    hideCallError(errorEl);
+    const btn = $("submit-btn");
+
+    const catCode = $("category").value;
+    if (!catCode) {
+      showCallError(errorEl, new Error("No category selected — check the connection/config above."));
+      return;
+    }
+
+    const cards = Array.from(document.querySelectorAll(".angle-card:not(.disabled)"));
+    const plan = {}; // angle -> {mode: 'upload'|'synthetic'|'skip', file?}
+    let anyNonSkip = false;
+
+    cards.forEach((card) => {
+      const angle = card.dataset.angle;
+      const fileInput = card.querySelector('[data-role="file"]');
+      const syntheticInput = card.querySelector('[data-role="synthetic"]');
+      const hasFile = fileInput && fileInput.files.length > 0;
+      const isSynthetic = syntheticInput && syntheticInput.checked;
+
+      if (hasFile) {
+        plan[angle] = { mode: "upload", file: fileInput.files[0] };
+        anyNonSkip = true;
+      } else if (isSynthetic) {
+        plan[angle] = { mode: "synthetic" };
+        anyNonSkip = true;
+      } else {
+        plan[angle] = { mode: "skip" };
+      }
+    });
+
+    if (!anyNonSkip) {
+      showCallError(errorEl, new Error("At least one angle must have a photo or be marked synthetic."));
+      return;
+    }
+
+    btn.disabled = true;
+    try {
+      // 1. Presign only the angles that need a real upload.
+      const uploadAngles = Object.keys(plan).filter((a) => plan[a].mode === "upload");
+      let presigned = [];
+      if (uploadAngles.length > 0) {
+        btn.textContent = "Requesting upload URLs…";
+        const presignResp = await apiFetch("/api/v2/uploads/presign", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ category_code: catCode, angles: uploadAngles }),
+        });
+        presigned = presignResp.angles;
+      }
+
+      // 2. PUT each file straight to its signed Supabase URL.
+      btn.textContent = "Uploading photos…";
+      await Promise.all(
+        presigned.map(async (p) => {
+          const file = plan[p.angle].file;
+          const putResp = await fetch(p.upload_url, {
+            method: "PUT",
+            headers: { "Content-Type": file.type || "application/octet-stream" },
+            body: file,
+          });
+          if (!putResp.ok) {
+            throw new Error("Upload failed for " + p.angle + ": HTTP " + putResp.status);
+          }
+          plan[p.angle].storage_path = p.storage_path;
+        })
+      );
+
+      // 3. Build the /generate body.
+      const anglesBody = {};
+      Object.keys(plan).forEach((angle) => {
+        const entry = plan[angle];
+        if (entry.mode === "upload") anglesBody[angle] = { storage_path: entry.storage_path };
+        else if (entry.mode === "synthetic") anglesBody[angle] = { synthetic: true };
+        else anglesBody[angle] = { skip: true };
+      });
+
+      const sku = $("sku").value.trim();
+      const generateBody = { category_code: catCode, angles: anglesBody };
+      if (sku) generateBody.sku_reference = sku;
+
+      btn.textContent = "Creating job…";
+      const result = await apiFetch("/api/v2/generate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": uuid4(),
+        },
+        body: JSON.stringify(generateBody),
+      });
+
+      startTrackingJob(result.job_id);
+    } catch (err) {
+      showCallError(errorEl, err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Presign, upload & generate";
+    }
+  });
+
+  // --- Job tracking / polling -------------------------------------------
+
+  let pollTimer = null;
+
+  function startTrackingJob(jobId) {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    $("job-panel").classList.add("visible");
+    $("job-id-label").textContent = jobId;
+    $("job-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+
+    pollJob(jobId);
+    pollTimer = setInterval(() => pollJob(jobId), POLL_INTERVAL_MS);
+  }
+
+  async function pollJob(jobId) {
+    let job;
+    try {
+      job = await apiFetch("/api/v2/status/" + jobId);
+    } catch (err) {
+      if (err.status === 404) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      $("job-status-badge").textContent = "poll error: " + err.message;
+      return;
+    }
+
+    renderJob(job);
+
+    if (JOB_TERMINAL.has(job.status) && pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  function renderJob(job) {
+    const badge = $("job-status-badge");
+    badge.textContent = job.status;
+    badge.className = "status-badge status-" + job.status;
+    $("job-counts").textContent =
+      job.succeeded_angles + " succeeded / " + job.failed_angles + " failed / " +
+      job.requested_angles + " requested" + (job.sku_reference ? " · " + job.sku_reference : "");
+
+    const grid = $("job-angles");
+    grid.innerHTML = "";
+    job.angles.forEach((a) => grid.appendChild(renderAngleResult(job.job_id, a)));
+  }
+
+  function renderAngleResult(jobId, a) {
+    const card = document.createElement("div");
+    card.className = "angle-card";
+    let html = "<h3>" + a.angle +
+      (a.synthetic ? ' <span class="hint">(synthetic)</span>' : "") + "</h3>";
+    html += '<span class="status-badge status-' + a.status + '">' + a.status + "</span>";
+
+    if (a.qa_status && a.qa_status !== "NOT_APPLICABLE") {
+      html += '<div class="hint">QA: ' + a.qa_status +
+        (a.qa_score != null ? " (" + a.qa_score.toFixed(3) + ")" : "") + "</div>";
+    }
+
+    if (a.status === "FAILED" || a.status === "REJECTED") {
+      html += '<div class="hint" style="color: var(--err)">' +
+        (a.failure_class || "") + (a.error_message ? ": " + a.error_message : "") + "</div>";
+    }
+
+    card.innerHTML = html;
+
+    if (a.status === "COMPLETED" && a.image_url) {
+      const img = document.createElement("img");
+      img.src = a.image_url;
+      img.alt = a.angle + " output";
+      card.appendChild(img);
+    }
+
+    if (a.retryable && a.retry_url) {
+      const retryBtn = document.createElement("button");
+      retryBtn.className = "small secondary";
+      retryBtn.style.marginTop = "8px";
+      retryBtn.textContent = "Retry " + a.angle;
+      retryBtn.addEventListener("click", () => retryAngle(jobId, a.angle, retryBtn));
+      card.appendChild(retryBtn);
+    }
+
+    return card;
+  }
+
+  async function retryAngle(jobId, angle, btn) {
+    btn.disabled = true;
+    btn.textContent = "Retrying…";
+    try {
+      await apiFetch("/api/v2/jobs/" + jobId + "/angles/" + angle + "/retry", {
+        method: "POST",
+        headers: { "Idempotency-Key": uuid4() },
+      });
+      if (!pollTimer) pollTimer = setInterval(() => pollJob(jobId), POLL_INTERVAL_MS);
+      pollJob(jobId);
+    } catch (err) {
+      btn.textContent = "Retry failed: " + err.message;
+    }
+  }
+
+  // --- Init ---------------------------------------------------------
+
+  renderSeedList();
+  loadConfig();
+})();
+</script>
+
+</body>
+</html>
