@@ -8,6 +8,7 @@ COPY pyproject.toml uv.lock* ./
 RUN uv sync --frozen --no-dev || uv sync --no-dev
 
 COPY app ./app
+COPY ui ./ui
 COPY migrations ./migrations
 COPY alembic.ini ./alembic.ini
 COPY scripts/render_start.sh ./scripts/render_start.sh

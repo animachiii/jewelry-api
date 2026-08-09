@@ -9,14 +9,25 @@ locally, sends it to Gemini for background synthesis, relighting, and shadow gen
 and returns per-angle image URLs. Jobs succeed partially by design — three good angles
 and one failure is a normal, fully-supported outcome.
 
-There is **no UI in this repository.** The only consumer is the client's Flutter ERP,
-which POSTs a job and polls for status.
+**Correction, 2026-08-09:** the "no UI in this repository" decision above no
+longer holds literally. `ui/index.html` is a single-file demo/test client —
+presign → upload → generate → poll, plus a browser for the 8 seeded demo
+jobs — added after the first live Render deploy specifically to verify the
+real pipeline end-to-end without waiting on the Flutter team. It mirrors V1
+(`jewellery-gen-backend`)'s own `ui/index.html` precedent and the same
+framing: **not the ERP integration**, shown in the page's own header. Served
+same-origin via a `StaticFiles` mount at `/ui` in `app/main.py` — required
+because, unlike V1, this API has no CORS setup at all (no `docs/business-
+rules.md` §R21 equivalent), so a browser page can only reach it from the
+API's own origin. The Flutter ERP remains the only real consumer; nothing
+about its contract changed.
 
 **Actors:**
 
 | Actor | Can do |
 | :--- | :--- |
 | Flutter ERP (API client) | Fetch config, request presigned uploads, submit jobs, poll status, retry a single failed angle |
+| Showcase UI (`ui/index.html`) | Same API, same `client`-scope key. Demo/test only — see correction above |
 | Ops / prompt author | Edit prompts and reference images in Google Sheets; trigger a config sync |
 | Ops / engineer | Read job history, cost reports, QA review queue |
 
@@ -126,6 +137,11 @@ docs/                      Reference files imported below, plus:
   openapi.json              Committed OpenAPI 3.1 spec, diff-checked in CI
   integration-guide.md      Flutter ERP integration guide (Phase 1 deliverable)
 phases/                    Phase specification files
+ui/
+  index.html                Single-file demo/test client, mirrors V1's own —
+                            see the "no UI in this repository" correction
+                            above. Served at /ui via a StaticFiles mount
+                            (app/main.py). Never imported by app/ code.
 ```
 
 ## Key Architectural Decisions
