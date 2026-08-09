@@ -73,7 +73,7 @@ useful in production.
 | `LOG_LEVEL` | Default `INFO` is fine |
 | `API_BASE_PATH` | Default `/api/v2` is fine |
 | `MOCK_MODE` | Set via `[env]`, must be `false` — both `fly.toml` files already set this |
-| `DATABASE_URL` | **(required)** — Supabase session pooler URL, port 5432, not the transaction pooler |
+| `DATABASE_URL` | **(required)** — Supabase session pooler URL, port 5432, not the transaction pooler. **URL-encode any special character in the password** (`@` → `%40`, `#` → `%23`, `/` → `%2F`, `:` → `%3A`). A raw `@` makes SQLAlchemy split the URL at the wrong `@`, so the host parses as `<tail-of-password>@aws-0-….pooler.supabase.com` and the deploy dies at `alembic upgrade head` with `socket.gaierror: [Errno -2] Name or service not known` — which reads like a DNS/network outage but is purely a parsing bug. Copy this value from a known-good `.env`; never retype it by hand. |
 | `SUPABASE_URL` | (has a default, but production needs a real value) |
 | `SUPABASE_SERVICE_KEY` | (has a default, but production needs a real value) — never log this, `docs/conventions.md` |
 | `BUCKET_INPUTS` | Default `jewelry-inputs` is fine unless bucket names differ per environment |
@@ -81,8 +81,8 @@ useful in production.
 | `SIGNED_URL_TTL_SECONDS` | Default `3600` is fine |
 | `RETENTION_SWEEP_CRON` | Default is fine |
 | `REDIS_URL` | (has a default, but production needs the real Upstash `rediss://` URL) |
-| `CELERY_BROKER_URL` | Same — Upstash `rediss://` URL |
-| `CELERY_RESULT_BACKEND` | Same — Upstash `rediss://` URL |
+| `CELERY_BROKER_URL` | Same — Upstash `rediss://` URL. Celery refuses a `rediss://` URL with no `ssl_cert_reqs` (`ValueError: E_REDIS_SSL_CERT_REQS_MISSING_INVALID`, killing `celery beat` at startup); `app/workers/celery_app.py` now sets `CERT_REQUIRED` automatically for any `rediss://` URL, so no query param is needed. An explicit `?ssl_cert_reqs=required` is equivalent and harmless. |
+| `CELERY_RESULT_BACKEND` | Same — Upstash `rediss://` URL, same TLS note as the broker |
 | `IO_QUEUE_CONCURRENCY` | Default `20` is fine to start |
 | `QA_MODEL_ID` | Default empty is fine — not read by any code path yet (unused since Phase 9 decided the QA judge is Gemini, not a separate embedding model) |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | (has a default, but Sheets sync needs a real value — see roadmap open decision #2, still open) |
