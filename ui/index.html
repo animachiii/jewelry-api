@@ -249,9 +249,28 @@
   async function apiFetch(path, options) {
     options = options || {};
     const headers = Object.assign({}, options.headers || {}, { "X-API-Key": apiKey() });
-    const resp = await fetch(apiBase() + path, Object.assign({}, options, { headers }));
+    let resp;
+    try {
+      resp = await fetch(apiBase() + path, Object.assign({}, options, { headers }));
+    } catch (networkErr) {
+      // fetch() itself throws for a dropped/reset connection -- e.g. the
+      // free-tier instance crashing mid-request. No HTTP response exists at
+      // all here, so there's no status/body to report -- say so plainly
+      // instead of leaving the caller with an empty message.
+      const err = new Error(
+        "No response from the server (connection dropped or timed out). " +
+        "The free-tier instance may have crashed under load -- check Render's dashboard."
+      );
+      err.status = null;
+      throw err;
+    }
     if (!resp.ok) {
-      let detail = resp.statusText;
+      // Prefer the API's own error envelope; fall back to statusText; fall
+      // back again to the raw status code, since statusText can itself be
+      // empty for some proxied 5xx responses (observed live via Render's
+      // edge during an instance crash -- this used to render as a blank
+      // "Request failed: " with nothing after the colon).
+      let detail = resp.statusText || ("HTTP " + resp.status);
       try {
         const body = await resp.json();
         if (body && body.error) detail = body.error.code + ": " + body.error.message;
