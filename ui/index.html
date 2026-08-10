@@ -162,6 +162,21 @@
   </section>
 
   <section>
+    <h2>Look up a job</h2>
+    <p class="muted">Already have a <code>job_id</code> — from a script, a previous submission, or a teammate? Track it here.</p>
+    <div class="row">
+      <div class="field">
+        <label for="lookup-job-id">Job ID</label>
+        <input type="text" id="lookup-job-id" placeholder="e.g. f754e856-f61d-4a50-ba7b-c904b6c21e2d" />
+      </div>
+      <div class="field" style="align-self: end">
+        <button type="button" id="lookup-btn">Track this job</button>
+      </div>
+    </div>
+    <div class="call-error" id="lookup-error"></div>
+  </section>
+
+  <section>
     <h2>Submit a new job</h2>
     <p class="muted" style="color: var(--err)">
       This calls the real pipeline. If <code>GEMINI_API_KEY</code> is set, angles you
@@ -274,6 +289,37 @@
       row.addEventListener("click", () => startTrackingJob(job.id));
       container.appendChild(row);
     });
+  }
+
+  // --- Look up an arbitrary job by ID ------------------------------------
+  // Anything not in SEEDED_JOBS (e.g. a job created via curl/a script, or
+  // one you just submitted in a different tab) is otherwise invisible in
+  // this page — there is no client-scope "list my jobs" route in v2
+  // (docs/api-routes.md: GET /jobs is ops-only), so pasting the ID back in
+  // here is the only way to look one up.
+
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  $("lookup-btn").addEventListener("click", function () {
+    const errorEl = $("lookup-error");
+    hideCallError(errorEl);
+    const jobId = $("lookup-job-id").value.trim();
+    if (!UUID_RE.test(jobId)) {
+      showCallError(errorEl, new Error("Doesn't look like a job_id (expected a UUID)."));
+      return;
+    }
+    startTrackingJob(jobId);
+  });
+  $("lookup-job-id").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("lookup-btn").click();
+  });
+
+  // Deep link: /ui/?job=<id> auto-tracks on load, and every tracked job
+  // updates the URL the same way, so the address bar is always a
+  // shareable/bookmarkable/refreshable link to what's on screen.
+  function jobIdFromUrl() {
+    const id = new URLSearchParams(window.location.search).get("job");
+    return id && UUID_RE.test(id) ? id : null;
   }
 
   // --- Config -> category/angle form ------------------------------------
@@ -463,6 +509,10 @@
     $("job-id-label").textContent = jobId;
     $("job-panel").scrollIntoView({ behavior: "smooth", block: "start" });
 
+    const url = new URL(window.location.href);
+    url.searchParams.set("job", jobId);
+    history.replaceState(null, "", url);
+
     pollJob(jobId);
     pollTimer = setInterval(() => pollJob(jobId), POLL_INTERVAL_MS);
   }
@@ -558,6 +608,12 @@
 
   renderSeedList();
   loadConfig();
+
+  const deepLinkedJobId = jobIdFromUrl();
+  if (deepLinkedJobId) {
+    $("lookup-job-id").value = deepLinkedJobId;
+    startTrackingJob(deepLinkedJobId);
+  }
 })();
 </script>
 
