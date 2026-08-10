@@ -9,6 +9,8 @@ from typing import Any
 from fastapi import APIRouter, FastAPI
 from fastapi.openapi.utils import get_openapi
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import Response
+from starlette.types import Scope
 
 from app.api.v2 import config as config_routes
 from app.api.v2 import generate as generate_routes
@@ -51,12 +53,35 @@ api_v2.include_router(jobs_routes.router)
 api_v2.include_router(qa_routes.router)
 app.include_router(api_v2)
 
+
+class NoCacheStaticFiles(StaticFiles):
+    """StaticFiles that forces revalidation on every request.
+
+    Starlette's StaticFiles sets `etag` and `last-modified` but no
+    `Cache-Control` at all, which leaves the freshness decision entirely to
+    the browser's heuristics. Safari in particular then serves a cached
+    `index.html` indefinitely — observed live: a UI bug fix was deployed and
+    verified present in the served bytes, while the browser kept running the
+    previous build and reproducing the fixed bug.
+
+    `no-cache` means "revalidate before use", not "don't store": the existing
+    `etag` still turns each check into a cheap conditional request that
+    answers 304 when nothing changed. That is the right trade for a
+    single-file demo page we iterate on constantly.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
+
 # Demo/test client only — see ui/index.html's own header and CLAUDE.md's
 # "Showcase UI" note. Not the ERP integration; the Flutter team never hits
 # this. Mounted same-origin because the API has no CORS setup (see
 # docs/business-rules.md — v1's R21 has no v2 equivalent), so this is the
 # only way a browser page can call the API at all.
-app.mount("/ui", StaticFiles(directory="ui", html=True), name="ui")
+app.mount("/ui", NoCacheStaticFiles(directory="ui", html=True), name="ui")
 
 _HEALTH_PATH = f"{settings.API_BASE_PATH}/health"
 
