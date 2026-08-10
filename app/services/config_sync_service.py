@@ -37,12 +37,23 @@ class ConfigValidationError(ValueError):
     """Raised by `normalize_sheet_rows` when the fetched payload is malformed."""
 
 
-def normalize_sheet_rows(rows: SheetRows) -> dict[str, Any]:
+def normalize_sheet_rows(
+    rows: SheetRows, inherited_global: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Pure transform: raw Sheets rows -> the `config_versions.payload` shape
     (docs/schema.md). Deterministic ordering (sorted by category code, then
     angle) so `compute_source_hash` is stable regardless of row order in the
     sheet — an ops author reordering rows without changing content must not
     create a spurious new version.
+
+    `inherited_global` is the currently-active version's `global` block, used as
+    the base that any global rows in the sheet override. The client's real sheet
+    has no Global tab at all (see `app/providers/sheets.py`), so without this
+    every real sync would emit a `global` containing only the three keys this
+    function knows how to build — silently dropping `unit_cost_usd`, which
+    `generation_service` reads on every call and whose absence previously
+    crashed every real `/generate` (fixed by hand in Phase 13; this keeps that
+    fix from being undone by the first real sync).
 
     Raises `ConfigValidationError` on any structurally invalid row.
     """
@@ -100,23 +111,38 @@ def normalize_sheet_rows(rows: SheetRows) -> dict[str, Any]:
                 "reference_image_urls": [],
             }
 
+    base_global: dict[str, Any] = dict(inherited_global or {})
     global_kv = {key: value for key, value in rows.global_rows if key}
-    if "model_version" not in global_kv or not global_kv["model_version"]:
-        raise ConfigValidationError("Global sheet missing model_version")
-    try:
-        qa_threshold = float(global_kv.get("qa_similarity_threshold", "0.82"))
-    except ValueError as exc:
-        raise ConfigValidationError("qa_similarity_threshold is not a number") from exc
+
+    model_version = global_kv.get("model_version") or base_global.get("model_version")
+    if not model_version:
+        raise ConfigValidationError(
+            "No model_version: absent from both the sheet and the active config version"
+        )
+
+    raw_threshold = global_kv.get("qa_similarity_threshold")
+    if raw_threshold is not None:
+        try:
+            qa_threshold = float(raw_threshold)
+        except ValueError as exc:
+            raise ConfigValidationError("qa_similarity_threshold is not a number") from exc
+    else:
+        qa_threshold = float(base_global.get("qa_similarity_threshold", 0.82))
     if not 0.0 <= qa_threshold <= 1.0:
         raise ConfigValidationError("qa_similarity_threshold must be between 0 and 1")
 
+    # Start from the inherited block so keys this function doesn't model
+    # (notably unit_cost_usd) survive a sync, then apply what the sheet says.
+    merged_global = base_global
+    merged_global["model_version"] = model_version
+    merged_global["qa_similarity_threshold"] = qa_threshold
+    merged_global["default_negative_prompt"] = global_kv.get(
+        "default_negative_prompt", base_global.get("default_negative_prompt", "")
+    )
+
     return {
         "categories": [categories[code] for code in sorted(categories)],
-        "global": {
-            "model_version": global_kv["model_version"],
-            "qa_similarity_threshold": qa_threshold,
-            "default_negative_prompt": global_kv.get("default_negative_prompt", ""),
-        },
+        "global": merged_global,
     }
 
 
@@ -155,7 +181,8 @@ async def sync_config(
     active = await config_versions_repo.get_active(session)
 
     try:
-        payload = normalize_sheet_rows(rows)
+        inherited_global = dict(active.payload.get("global", {})) if active is not None else None
+        payload = normalize_sheet_rows(rows, inherited_global)
     except ConfigValidationError as exc:
         logger.warning("config_sync_validation_failed", error=str(exc))
         version_number = await config_versions_repo.get_next_version_number(session)
