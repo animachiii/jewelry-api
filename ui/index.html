@@ -427,7 +427,15 @@
       return;
     }
 
-    const cards = Array.from(document.querySelectorAll(".angle-card:not(.disabled)"));
+    // Scoped to #angle-grid specifically -- #job-angles (the results panel
+    // below, visible as soon as any job has been tracked) also renders
+    // .angle-card elements, and those have no dataset.angle at all. An
+    // unscoped query picked those up too, producing a literal "undefined"
+    // key in the /generate body -- observed live as
+    // VALIDATION_ERROR: angles.undefined.[key].
+    const cards = Array.from(
+      document.querySelectorAll("#angle-grid .angle-card:not(.disabled)")
+    );
     const plan = {}; // angle -> {mode: 'upload'|'synthetic'|'skip', file?}
     let anyNonSkip = false;
 
