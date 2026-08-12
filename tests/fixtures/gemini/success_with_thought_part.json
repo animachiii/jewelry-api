@@ -1,0 +1,22 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I will generate a front-view product shot on a neutral background.",
+            "inline_data": null
+          },
+          {
+            "inline_data": {
+              "mime_type": "image/png",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGPkEpFjYGBgYgADAALmAEAUQs4PAAAAAElFTkSuQmCC"
+            }
+          }
+        ]
+      },
+      "finish_reason": "STOP"
+    }
+  ],
+  "model_version": "gemini-3.1-flash-image"
+}

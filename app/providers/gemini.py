@@ -50,7 +50,12 @@ class GeminiProvider(GenerationProvider):
             response = client.models.generate_content(
                 model=self.model_version,
                 contents=types.Content(role="user", parts=parts),
-                config=types.GenerateContentConfig(seed=seed),
+                config=types.GenerateContentConfig(
+                    seed=seed,
+                    http_options=types.HttpOptions(
+                        timeout=settings.GEMINI_REQUEST_TIMEOUT_SECONDS * 1000
+                    ),
+                ),
             )
         except TimeoutError:
             raise
@@ -117,17 +122,59 @@ class GeminiProvider(GenerationProvider):
 
         try:
             parts = candidate["content"]["parts"]
-            inline_data = parts[0]["inline_data"]
-            mime_type = inline_data["mime_type"]
-            image_bytes = base64.b64decode(inline_data["data"])
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError) as exc:
             raise ProviderError(
                 "Malformed Gemini response: missing or invalid inline image data.",
                 failure_class=FailureClass.INTERNAL,
                 details={"raw": raw},
             ) from exc
 
+        image_bytes, mime_type = self._extract_final_image(parts)
+        if image_bytes is None or mime_type is None:
+            raise ProviderError(
+                "Malformed Gemini response: missing or invalid inline image data.",
+                failure_class=FailureClass.INTERNAL,
+                details={"raw": raw},
+            )
+
         model_version = raw.get("model_version", self.model_version)
         return GenerationResult(
             image_bytes=image_bytes, mime_type=mime_type, model_version=model_version
         )
+
+    @staticmethod
+    def _extract_final_image(parts: Any) -> tuple[bytes | None, str | None]:
+        """Gemini 3.x image models are "thinking" models: `parts[0]` is
+        virtually always the model's text narration, not the image
+        (docs/ai-integration.md Call Site 1), and the response can carry up
+        to two interim draft images before the real one. Google's own
+        example code loops every part and keeps the last one with real
+        `inline_data` -- "the last image within Thinking is also the final
+        rendered image" (ai.google.dev/gemini-api/docs/image-generation).
+        Never assume position; never accept an empty/undecodable payload as
+        real image data.
+        """
+        if not isinstance(parts, list):
+            return None, None
+
+        image_bytes: bytes | None = None
+        mime_type: str | None = None
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            inline_data = part.get("inline_data")
+            if not isinstance(inline_data, dict):
+                continue
+            raw_data = inline_data.get("data")
+            if not raw_data:
+                continue
+            try:
+                decoded = base64.b64decode(raw_data)
+            except (TypeError, ValueError):
+                continue
+            if not decoded:
+                continue
+            image_bytes = decoded
+            mime_type = inline_data.get("mime_type")
+
+        return image_bytes, mime_type

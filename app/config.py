@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     # --- Gemini ---
     GEMINI_API_KEY: str = ""
     GEMINI_RATE_LIMIT_PER_MINUTE: int = 60
+    # Gemini 3.x image models are "thinking" models with no SDK default
+    # timeout -- a hung call previously blocked the entire single-worker
+    # queue indefinitely (IO_QUEUE_CONCURRENCY=1). Generous enough for real
+    # multi-step image generation, still bounded.
+    GEMINI_REQUEST_TIMEOUT_SECONDS: int = 120
 
     # --- Observability ---
     SENTRY_DSN: str = ""

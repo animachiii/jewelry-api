@@ -69,6 +69,49 @@ def test_safety_refusal_maps_to_safety_refusal(monkeypatch: pytest.MonkeyPatch) 
     assert exc_info.value.failure_class == FailureClass.SAFETY_REFUSAL
 
 
+def test_thought_part_before_image_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real production incident (2026-08-12): Gemini 3.x image models are
+    "thinking" models whose first part is the model's text narration, not
+    the image (docs/ai-integration.md Call Site 1) -- the old code assumed
+    `parts[0]` was always the image and silently wrote an empty/garbage
+    output to storage instead of raising."""
+    provider = GeminiProvider(model_version="gemini-3.1-flash-image")
+    fixture = _load("success_with_thought_part.json")
+    monkeypatch.setattr(provider, "_call_api", lambda *a, **k: fixture)
+
+    result = provider.generate("a ring, front view", [], seed=42)
+
+    assert result.mime_type == "image/png"
+    assert len(result.image_bytes) > 0
+
+
+def test_takes_last_inline_image_when_multiple_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Google's own docs: Gemini 3 image models generate up to two interim
+    draft images before the final one, and "the last image within Thinking
+    is also the final rendered image" -- must never take the first
+    inline_data part found."""
+    provider = GeminiProvider(model_version="gemini-3.1-flash-image")
+    fixture = _load("success_with_interim_images.json")
+    monkeypatch.setattr(provider, "_call_api", lambda *a, **k: fixture)
+
+    result = provider.generate("a ring, front view", [], seed=42)
+
+    assert result.image_bytes == b"FINAL_RENDERED_IMAGE_BYTES"
+
+
+def test_no_inline_image_data_maps_to_internal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A response with only text parts (e.g. a refusal-shaped reply that
+    still finishes with STOP) must fail loud, not silently succeed with an
+    empty image."""
+    provider = GeminiProvider(model_version="gemini-3.1-flash-image")
+    fixture = _load("no_inline_image_data.json")
+    monkeypatch.setattr(provider, "_call_api", lambda *a, **k: fixture)
+
+    with pytest.raises(ProviderError) as exc_info:
+        provider.generate("prompt", [], seed=1)
+    assert exc_info.value.failure_class == FailureClass.INTERNAL
+
+
 def test_malformed_response_maps_to_internal(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = GeminiProvider(model_version="gemini-2.5-flash-image-preview")
     fixture = _load("malformed_response.json")
