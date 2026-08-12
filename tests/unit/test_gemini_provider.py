@@ -135,6 +135,41 @@ def test_timeout_maps_to_transient_network(monkeypatch: pytest.MonkeyPatch) -> N
     assert exc_info.value.failure_class == FailureClass.TRANSIENT_NETWORK
 
 
+def test_decodes_urlsafe_base64_from_the_real_sdk_serializer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fixtures above are hand-written with *standard* base64, which is
+    exactly why this bug reached production undetected. `model_dump(mode=
+    "json")` emits **URL-safe** base64, and `base64.b64decode` silently
+    mis-decodes `-`/`_` rather than erroring -- yielding a right-sized,
+    entirely corrupt image. This builds the payload with the real SDK
+    serializer so the alphabet is whatever google-genai/pydantic actually
+    produce, not what we assumed.
+    """
+    from google.genai import types
+
+    original = bytes.fromhex("ffd8ffe000104a46494600 01") + b"jewelry-bytes" * 40
+    serialized = types.Blob(data=original, mime_type="image/jpeg").model_dump(mode="json")
+
+    raw = {
+        "candidates": [
+            {
+                "content": {"parts": [{"text": "Generating..."}, {"inline_data": serialized}]},
+                "finish_reason": "STOP",
+            }
+        ],
+        "model_version": "gemini-3.1-flash-image",
+    }
+
+    provider = GeminiProvider(model_version="gemini-3.1-flash-image")
+    monkeypatch.setattr(provider, "_call_api", lambda *a, **k: raw)
+
+    result = provider.generate("a ring", [], seed=1)
+
+    assert result.image_bytes == original, "decoded bytes must round-trip exactly"
+    assert result.image_bytes[:3] == b"\xff\xd8\xff", "must remain a valid JPEG header"
+
+
 def test_provider_never_imports_genai_at_module_level() -> None:
     """docs/conventions.md: only app/providers/ imports a model SDK, and even
     there the import is deferred into _call_api so unit tests never touch it.

@@ -26,7 +26,7 @@ import uuid
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
-from app.core.redis_client import get_redis_client
+from app.core.redis_client import new_redis_client
 from app.db.models.enums import SubJobStatus
 from app.services.generation_service import transform_photo
 from app.workers._async_utils import run_async
@@ -35,13 +35,17 @@ from app.workers.celery_app import celery_app
 
 async def _run(sub_job_id: str) -> str:
     engine = create_async_engine(settings.DATABASE_URL)
+    # Fresh, owned Redis client per call for the same cross-loop reason the
+    # engine is built per call — see app/core/redis_client.py::new_redis_client.
+    redis_client = new_redis_client()
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
-            sub_job = await transform_photo(session, get_redis_client(), uuid.UUID(sub_job_id))
+            sub_job = await transform_photo(session, redis_client, uuid.UUID(sub_job_id))
             await session.commit()
             return sub_job.status.value
     finally:
+        await redis_client.aclose()
         await engine.dispose()
 
 

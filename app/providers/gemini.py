@@ -18,6 +18,27 @@ from app.db.models.enums import FailureClass
 from app.providers.base import GenerationProvider, GenerationResult
 
 
+def _decode_b64_any_alphabet(raw: str | bytes) -> bytes:
+    """Decode base64 that may use either the standard (`+/`) or URL-safe
+    (`-_`) alphabet.
+
+    `response.model_dump(mode="json")` serializes the SDK's `Blob.data` bytes
+    with pydantic's **URL-safe** base64 (`_9j_4AAQ...`, where standard base64
+    would be `/9j/4AAQ...`). `base64.b64decode` defaults to `validate=False`,
+    so instead of rejecting `-`/`_` it silently mis-decodes them -- producing
+    a byte string of exactly the right *length* but entirely wrong content.
+    Live on 2026-08-12 that wrote a full-size 776KB "image/jpeg" to storage
+    whose first bytes were `f63e0001` instead of JPEG's `ffd8ff`: the sub-job
+    reported COMPLETED, the file downloaded fine, and it simply would not
+    open. Normalizing the alphabet before decoding handles both forms, so
+    this keeps working if the SDK or pydantic ever switches back.
+    """
+    data = raw.encode("ascii") if isinstance(raw, str) else raw
+    data = data.translate(bytes.maketrans(b"-_", b"+/"))
+    data += b"=" * (-len(data) % 4)  # tolerate stripped padding
+    return base64.b64decode(data)
+
+
 class GeminiAPIError(Exception):
     """A non-2xx response from the Gemini API — shaped like
     `tests/fixtures/gemini/rate_limited_429.json` / `server_error_5xx.json`.
@@ -169,7 +190,7 @@ class GeminiProvider(GenerationProvider):
             if not raw_data:
                 continue
             try:
-                decoded = base64.b64decode(raw_data)
+                decoded = _decode_b64_any_alphabet(raw_data)
             except (TypeError, ValueError):
                 continue
             if not decoded:

@@ -19,7 +19,7 @@ import structlog
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
-from app.core.redis_client import get_redis_client
+from app.core.redis_client import new_redis_client
 from app.services.config_sync_service import sync_config
 from app.workers._async_utils import run_async
 from app.workers.celery_app import celery_app
@@ -29,12 +29,16 @@ logger = structlog.get_logger()
 
 async def _run_sync() -> str:
     engine = create_async_engine(settings.DATABASE_URL)
+    # Fresh, owned Redis client per call — same cross-loop reason as the
+    # engine; see app/core/redis_client.py::new_redis_client.
+    redis_client = new_redis_client()
     try:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
-            version = await sync_config(session, get_redis_client())
+            version = await sync_config(session, redis_client)
             return f"version={version.version_number} status={version.sync_status.value}"
     finally:
+        await redis_client.aclose()
         await engine.dispose()
 
 
