@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models.enums import Angle, JobStatus, QAStatus, SourceType, SubJobStatus
+from app.db.models.enums import Angle, JobStatus, Operation, QAStatus, SourceType, SubJobStatus
 from app.db.models.jobs import Job, SubJob
 
 
@@ -92,23 +92,31 @@ def create_job(
     client_id: uuid.UUID,
     idempotency_key: str,
     payload_hash: str,
-    category_code: str,
     config_version_id: uuid.UUID,
     requested_angles: int,
     sku_reference: str | None,
     metadata: dict[str, Any],
+    category_code: str | None = None,
+    preset_code: str | None = None,
+    operation: Operation = Operation.ANGLE_GENERATION,
 ) -> Job:
     """Adds and returns a new Job row (status defaults to PENDING — nothing
     executes here, see phases/phase-2-data-model.md). Does not commit; the
     caller controls the transaction boundary.
+
+    `operation` defaults to ANGLE_GENERATION so every existing `/generate`
+    call site is unaffected — see migration 0006 and
+    phases/phase-15-background-operations.md Step 2.
     """
     job = Job(
         client_id=client_id,
         idempotency_key=idempotency_key,
         payload_hash=payload_hash,
         category_code=category_code,
+        preset_code=preset_code,
         config_version_id=config_version_id,
         status=JobStatus.PENDING,
+        operation=operation,
         requested_angles=requested_angles,
         sku_reference=sku_reference,
         job_metadata=metadata,
@@ -121,11 +129,15 @@ def create_sub_job(
     session: AsyncSession,
     *,
     job_id: uuid.UUID,
-    angle: Angle,
     status: SubJobStatus,
     source_type: SourceType,
+    angle: Angle | None = None,
     input_asset_id: uuid.UUID | None = None,
 ) -> SubJob:
+    """`angle` is None for a background-operation sub-job. Callers must have
+    already validated operation/angle consistency — see
+    app/services/job_service.py::validate_operation_angle_consistency.
+    """
     sub_job = SubJob(
         job_id=job_id,
         angle=angle,

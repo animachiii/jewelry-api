@@ -99,10 +99,17 @@ async def transform_photo(
     if config_version is None:
         raise SubJobNotFoundError(f"Pinned config version {job.config_version_id} not found.")
 
+    # transform_photo only ever runs for ANGLE_GENERATION sub-jobs, which
+    # always have a category — Phase 15 background operations get their own
+    # worker/service (app/workers/background.py,
+    # app/services/background_service.py), not this one. See
+    # phases/phase-15-background-operations.md Step 5.
+    assert job.category_code is not None
+    assert sub_job.angle is not None
+
     category = find_category(config_version, job.category_code)
     if category is None:
         raise SubJobNotFoundError(f"Category {job.category_code} not found in pinned config.")
-
     angle_config = category["angles"][sub_job.angle.value]
     prompt = (
         f"{angle_config['prompt']} {config_version.payload['global']['default_negative_prompt']}"
@@ -223,6 +230,7 @@ async def _complete_success(
     seed: int,
 ) -> None:
     ext = "png" if result.mime_type == "image/png" else "jpg"
+    assert sub_job.angle is not None  # see the same assertion in transform_photo above
     storage_path = storage_service.build_storage_path(
         job_id, sub_job.angle.value, AssetKind.OUTPUT, ext
     )

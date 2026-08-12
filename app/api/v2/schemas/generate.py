@@ -50,7 +50,10 @@ class GenerateJobRequest(BaseModel):
 
 
 class ResolvedAnglePlan(BaseModel):
-    angle: Angle
+    # None for a background-operation job (Phase 15) — reuses this same
+    # JobAcceptedResponse shape per phases/phase-15-background-operations.md
+    # Step 4 rather than inventing a parallel accepted-response type.
+    angle: Angle | None = None
     source_type: SourceType
     status: SubJobStatus
     storage_path: str | None = None

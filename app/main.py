@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 from starlette.types import Scope
 
+from app.api.v2 import background as background_routes
 from app.api.v2 import config as config_routes
 from app.api.v2 import generate as generate_routes
 from app.api.v2 import health as health_routes
@@ -47,6 +48,7 @@ api_v2.include_router(health_routes.router)
 api_v2.include_router(config_routes.router)
 api_v2.include_router(uploads_routes.router)
 api_v2.include_router(generate_routes.router)
+api_v2.include_router(background_routes.router)
 api_v2.include_router(status_routes.router)
 api_v2.include_router(retry_routes.router)
 api_v2.include_router(jobs_routes.router)

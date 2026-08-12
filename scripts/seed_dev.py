@@ -143,6 +143,43 @@ CATEGORY_PAYLOAD = {
         # Placeholder — Gemini image-generation pricing, to be confirmed against
         # real billing before launch. See docs/schema.md and phases/phase-6-generation-worker.md.
         "unit_cost_usd": 0.02,
+        # Placeholder, same status as unit_cost_usd above — see migration
+        # 0007 and docs/decisions/0002-background-removal-approach.md.
+        # A production DB gets these via migration 0007, not this script;
+        # seeded here too so a fresh dev/test DB has real, usable
+        # background_presets data for Phase 15 Steps 4/5.
+        "operations": {
+            "BACKGROUND_REMOVAL": {
+                "enabled": True,
+                "prompt": (
+                    "Replace the background with a clean, seamless white studio "
+                    "backdrop. Keep the product subject — its proportions, "
+                    "materials, textures, and every detail — exactly unchanged."
+                ),
+                "unit_cost_usd": 0.02,
+            },
+            "BACKGROUND_REPLACEMENT": {
+                "enabled": True,
+                "unit_cost_usd": 0.02,
+            },
+        },
+        "background_presets": [
+            {
+                "code": "STUDIO_WHITE",
+                "name": "Studio White",
+                "prompt": (
+                    "Place the product on a clean, seamless white studio backdrop "
+                    "with soft, even lighting and a subtle natural drop shadow."
+                ),
+                "reference_image_urls": [],
+                "is_active": True,
+            }
+        ],
+        # Placeholder, same status as qa_similarity_threshold — see
+        # migration 0010. Deliberately higher: "same object, new
+        # background" should score closer to 1.0 than a synthetic angle's
+        # "novel view of the same object."
+        "background_qa_similarity_threshold": 0.92,
     },
 }
 

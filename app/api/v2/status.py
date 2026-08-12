@@ -10,6 +10,7 @@ from app.api.v2.schemas.status import JobStatusResponse
 from app.core.auth import require_client_scope
 from app.core.errors import NotFoundError
 from app.db.models.api_clients import ApiClient
+from app.db.models.enums import Operation
 from app.db.repositories import assets as assets_repo
 from app.db.repositories import jobs as jobs_repo
 from app.db.session import get_db
@@ -43,16 +44,30 @@ async def get_status(
 
     sub_jobs = await jobs_repo.get_sub_jobs(session, job.id)
 
-    angle_statuses = []
+    if status_service.is_non_terminal(job):
+        response.headers["Retry-After"] = "3"
+
+    bucket_and_paths: dict[uuid.UUID, tuple[str, str] | None] = {}
     for sub_job in sub_jobs:
         bucket_and_path = None
         if sub_job.output_asset_id is not None:
             asset = await assets_repo.get_by_id(session, sub_job.output_asset_id)
             if asset is not None:
                 bucket_and_path = (asset.bucket, asset.storage_path)
-        angle_statuses.append(status_service.build_angle_status(job, sub_job, bucket_and_path))
+        bucket_and_paths[sub_job.id] = bucket_and_path
 
-    if status_service.is_non_terminal(job):
-        response.headers["Retry-After"] = "3"
+    # Additive per phases/phase-15-background-operations.md Step 4: `angles`
+    # stays exactly as it was before this phase for ANGLE_GENERATION jobs;
+    # a background job populates `results` instead, never both.
+    if job.operation == Operation.ANGLE_GENERATION:
+        angle_statuses = [
+            status_service.build_angle_status(job, sub_job, bucket_and_paths[sub_job.id])
+            for sub_job in sub_jobs
+        ]
+        return status_service.build_job_status_response(job, angle_statuses)
 
-    return status_service.build_job_status_response(job, angle_statuses)
+    result_statuses = [
+        status_service.build_background_result_status(job, sub_job, bucket_and_paths[sub_job.id])
+        for sub_job in sub_jobs
+    ]
+    return status_service.build_job_status_response(job, [], result_statuses)

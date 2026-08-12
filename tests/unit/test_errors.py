@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from pydantic import BaseModel, model_validator
 
 from app.core.errors import (
     AppError,
@@ -18,6 +19,17 @@ from app.core.errors import (
     register_exception_handlers,
 )
 from app.core.middleware import RequestIDMiddleware
+
+
+class _MutuallyExclusiveBody(BaseModel):
+    a: str | None = None
+    b: str | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "_MutuallyExclusiveBody":
+        if (self.a is None) == (self.b is None):
+            raise ValueError("exactly one of a or b must be set")
+        return self
 
 
 def _build_test_app() -> FastAPI:
@@ -44,6 +56,10 @@ def _build_test_app() -> FastAPI:
     @app.get("/ok")
     async def ok() -> dict[str, str]:
         return {"hello": "world"}
+
+    @app.post("/mode-check")
+    async def mode_check(body: _MutuallyExclusiveBody) -> dict[str, str]:
+        return {"ok": "true"}
 
     return app
 
@@ -101,6 +117,22 @@ async def test_request_id_present_and_matches_on_failure(client: AsyncClient) ->
     assert resp.headers["X-Request-ID"] == body["error"]["request_id"]
 
 
+async def test_model_validator_value_error_returns_clean_422_not_500(client: AsyncClient) -> None:
+    """A @model_validator raising a bare ValueError (e.g.
+    AngleSpec._exactly_one_mode, PresignUploadRequest._exactly_one_mode) puts
+    the exception object itself in the pydantic error's ctx.error — plain
+    json.dumps can't serialize that. Found while adding Phase 15's presign
+    mode validator, which hit this as a real 500 — see
+    phases/phase-15-background-operations.md Step 4 and
+    app/core/errors.py::_validation_error_handler's jsonable_encoder fix.
+    """
+    resp = await client.post("/mode-check", json={"a": "x", "b": "y"})
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["error"]["code"] == ErrorCode.VALIDATION_ERROR
+    assert "exactly one of a or b" in body["error"]["message"]
+
+
 def test_error_code_enum_contains_every_documented_code() -> None:
     required = {
         "INVALID_API_KEY",
@@ -122,6 +154,10 @@ def test_error_code_enum_contains_every_documented_code() -> None:
         "QUOTA_EXCEEDED",
         "CONFIG_UNAVAILABLE",
         "INTERNAL_ERROR",
+        "OPERATION_DISABLED",
+        "PRESET_NOT_FOUND",
+        "PRESET_INACTIVE",
+        "ANGLE_JOB_RETRY_NOT_ALLOWED",
     }
     actual = {member.value for member in ErrorCode}
     assert required <= actual

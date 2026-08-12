@@ -17,9 +17,20 @@ class CategoryConfig(BaseModel):
     angles: dict[Angle, AngleAvailability]
 
 
+class PresetSummary(BaseModel):
+    """code + name only — prompts and reference_image_urls stay internal,
+    same rule angle prompts already follow. Only active presets are listed;
+    see phases/phase-15-background-operations.md Step 3.
+    """
+
+    code: str
+    name: str
+
+
 class ConfigResponse(BaseModel):
     config_version: int
     categories: list[CategoryConfig]
+    background_presets: list[PresetSummary] = []
 
 
 class ConfigSyncResponse(BaseModel):

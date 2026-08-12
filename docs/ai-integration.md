@@ -7,6 +7,15 @@ see `docs/decisions/0001-drop-local-matting.md`. Real-photo angles now go
 straight to Gemini, same shape as synthetic angles. There is no `gpu`
 queue anymore.
 
+**2026-08-12 (Phase 15):** background operations (`BACKGROUND_REMOVAL` /
+`BACKGROUND_REPLACEMENT`) reuse both call sites below exactly as they
+stand — same provider abstractions, same queue, no new provider code — via
+a separate worker/service module (`app/workers/background.py`,
+`app/services/background_service.py`). See Mode C under Call site 1, the
+background note under Call site 2, and
+`docs/decisions/0002-background-removal-approach.md` for why no
+alpha-channel path exists.
+
 ---
 
 ## Call site 1 — Image generation
@@ -46,6 +55,25 @@ invented facet geometry — and it does so silently, returning a 200 with a
 beautiful wrong image. This is why Mode B is gated behind
 `synthetic_allowed`, flagged in the response, and mandatorily QA-checked.
 Never chain Mode B off another generated image; hallucination compounds.
+
+### Mode C — Background operations (Phase 15)
+
+| | |
+| :--- | :--- |
+| **Trigger** | Same as Mode A/B — sub-job enters `GENERATING` |
+| **Where** | Celery `io` queue, `app/workers/background.py` via `app/providers/gemini.py` — **the same `GeminiProvider` class**, unmodified |
+| **Input** | One uploaded photo. For `BACKGROUND_REPLACEMENT`, the pinned preset's own prompt is appended to the operation prompt (`app/services/background_service.py::_resolve_prompt`) |
+| **Output** | Product on a flat/solid background — no alpha channel, same `image/jpeg`/`image/png` shape Mode A already produces. "Removal" means standardisation, not a transparent cutout — see `docs/decisions/0002-background-removal-approach.md` for why the Gemini API path can't produce one |
+
+Decided directly rather than spiked over real client pieces (no real `GEMINI_API_KEY`
+or client photos existed to run the spike this phase's own Step 1 called for) — the
+client accepted the no-transparency tradeoff up front. Reuses `rate_limiter`
+unmodified: these calls compete with Mode A/B for the same global
+`GEMINI_RATE_LIMIT_PER_MINUTE` window.
+
+**Unlike Mode A, always QA-gated** (see Call site 2's background note below) — a
+drifted or partly-altered product is unacceptable when the cutout/composite *is* the
+product being sold.
 
 **Recorded on every call** (to `sub_jobs`): `prompt_snapshot`, `model_version`, `seed`.
 Without all three, a bad output cannot be reproduced or debugged.
@@ -95,18 +123,21 @@ still billed.
 
 | | |
 | :--- | :--- |
-| **Trigger** | A `SYNTHETIC` sub-job completes generation. Real-photo angles have no QA gate (see above). |
-| **Where** | Celery `io` queue, `app/workers/qa.py::score_similarity`, dispatched by `app/workers/generation.py` right after a `QA_REVIEW`-landing `transform_photo` commits (Phase 9). |
-| **Model** | LLM-judged similarity via Gemini (`app/providers/gemini_qa.py::GeminiQaProvider`) — decided in Phase 9, per this doc's own prior note that it was the likely default. No dedicated embedding model was added; revisit only if the judge proves unreliable in practice. |
-| **Input** | Reference image(s) for the category + the generated output |
+| **Trigger** | A `SYNTHETIC` sub-job completes generation, **or** any background-operation sub-job completes generation (Phase 15 — unconditional, not gated on source type). Real-photo *angle* sub-jobs still have no QA gate (see above). |
+| **Where** | Celery `io` queue, `app/workers/qa.py::score_similarity` (angles) / `score_background` (Phase 15), dispatched by `app/workers/generation.py` / `app/workers/background.py` respectively, right after a `QA_REVIEW`-landing commit (same placement rule, Phase 9). |
+| **Model** | LLM-judged similarity via Gemini (`app/providers/gemini_qa.py::GeminiQaProvider`) — decided in Phase 9, per this doc's own prior note that it was the likely default. No dedicated embedding model was added; revisit only if the judge proves unreliable in practice. **Same class, unmodified, for both angles and background operations.** |
+| **Input** | Angles: reference image(s) for the category + the generated output. **Background operations (Phase 15):** the **input photo itself** as the sole reference + the generated output — `app/services/qa_service.py::score_background_operation`. The subject is meant to be identical; "same object, new background" is what's judged, not "novel view of the same object." |
 | **Output** | `qa_score` ∈ [0, 1] written to `sub_jobs`, plus `qa_status` |
 
-Threshold from `config.global.qa_similarity_threshold`, default `0.82` — **a
+Threshold from `config.global.qa_similarity_threshold` for angles, default `0.82` — **a
 placeholder until calibrated against real client pieces.** Calibrate by
 scoring known-good and known-bad outputs and picking the threshold that
 separates them, not by intuition. **Still not calibrated as of Phase 9** —
 no real client pieces exist in this environment (same situation Phase 6 hit
-with `GEMINI_API_KEY`), same as roadmap open decision #8.
+with `GEMINI_API_KEY`), same as roadmap open decision #8. Background operations use
+a **separate, independently-tunable** `config.global.background_qa_similarity_threshold`
+(migration 0010, Phase 15), placeholder `0.92` — deliberately higher, also
+uncalibrated, same gap.
 
 Below threshold → `QA_REVIEW` and the human queue (`qa_status: FLAGGED`).
 Above → `COMPLETED` (`qa_status: PASSED`). A QA provider failure (timeout,
@@ -114,12 +145,16 @@ malformed response) is treated the same as below-threshold — `QA_REVIEW`
 + `FLAGGED`, `qa_score: NULL` — never auto-`COMPLETED` and never
 auto-`REJECTED`. Fail open to a human, never to an unscored pass — see
 `phases/phase-9-qa-gate.md`'s reality-check section; this exact case wasn't
-specified anywhere before this phase.
+specified anywhere before this phase. Both `score_similarity` and
+`score_background` (Phase 15) share this exact branching logic via a
+private `qa_service._score_and_apply` helper — only how threshold/
+reference images are resolved differs between them.
 
 This is the **only** mechanism in the system that catches a silent failure
-on synthetic angles. Fail-fast, partial success, and retry all handle loud
-failures — exceptions, non-200s, timeouts. A hallucinated angle throws
-nothing. If this gate is weak, nothing else catches it for Mode B.
+on synthetic angles — and, since Phase 15, on background operations too. A
+drifted or partly-eaten product from a background operation would
+otherwise return a 200 with a beautiful wrong result, the same failure
+shape Mode B's hallucination risk has always had.
 
 **Not billed.** No `cost_events` row is written for a QA call — neither
 `docs/business-rules.md` §10 nor this doc ever described QA scoring as a

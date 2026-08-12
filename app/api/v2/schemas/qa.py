@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from app.db.models.enums import Angle
+from app.db.models.enums import Angle, Operation
 
 
 class QaDecisionRequest(BaseModel):
@@ -19,8 +19,12 @@ class QaDecisionRequest(BaseModel):
 class QaReviewItem(BaseModel):
     sub_job_id: str
     job_id: str
-    angle: Angle
-    category_code: str
+    # angle/category_code are None for a Phase 15 background-operation item
+    # — the QA gate is shared across both, see
+    # phases/phase-15-background-operations.md Step 5.
+    operation: Operation
+    angle: Angle | None
+    category_code: str | None
     qa_score: float | None
     image_url: str
     reference_image_urls: list[str]

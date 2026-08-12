@@ -38,6 +38,12 @@ class SourceType(enum.StrEnum):
     SYNTHETIC = "SYNTHETIC"
 
 
+class Operation(enum.StrEnum):
+    ANGLE_GENERATION = "ANGLE_GENERATION"
+    BACKGROUND_REMOVAL = "BACKGROUND_REMOVAL"
+    BACKGROUND_REPLACEMENT = "BACKGROUND_REPLACEMENT"
+
+
 class AssetKind(enum.StrEnum):
     INPUT = "INPUT"
     MATTE = "MATTE"

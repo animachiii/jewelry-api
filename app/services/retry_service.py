@@ -49,7 +49,7 @@ def execute_retry(session: AsyncSession, job: Job, sub_job: SubJob) -> None:
         from_status=from_sub_status.value,
         to_status=SubJobStatus.PENDING.value,
         detail={
-            "angle": sub_job.angle.value,
+            "angle": sub_job.angle.value if sub_job.angle is not None else None,
             "attempt_count": sub_job.attempt_count,
             "job_from_status": from_job_status.value,
         },

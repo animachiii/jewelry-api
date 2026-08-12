@@ -10,6 +10,7 @@ from typing import Any
 
 import structlog
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -34,6 +35,10 @@ class ErrorCode(StrEnum):
     INPUT_ASSET_EXPIRED = "INPUT_ASSET_EXPIRED"
     SUB_JOB_NOT_FOUND = "SUB_JOB_NOT_FOUND"
     QA_NOT_PENDING = "QA_NOT_PENDING"
+    OPERATION_DISABLED = "OPERATION_DISABLED"
+    PRESET_NOT_FOUND = "PRESET_NOT_FOUND"
+    PRESET_INACTIVE = "PRESET_INACTIVE"
+    ANGLE_JOB_RETRY_NOT_ALLOWED = "ANGLE_JOB_RETRY_NOT_ALLOWED"
     RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED"
     QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
     CONFIG_UNAVAILABLE = "CONFIG_UNAVAILABLE"
@@ -177,9 +182,20 @@ def register_exception_handlers(app: FastAPI) -> None:
         message = (
             f"{field}: {first.get('msg')}" if field else str(first.get("msg", "Invalid request"))
         )
+        # A @model_validator that raises a bare ValueError (e.g.
+        # AngleSpec._exactly_one_mode, PresignUploadRequest._exactly_one_mode)
+        # puts the exception object itself in ctx.error — plain json.dumps
+        # (what JSONResponse uses) can't serialize that. jsonable_encoder
+        # converts it to its str repr, same as everything else here already
+        # gets converted to JSON-safe types. A real, pre-existing bug: found
+        # while adding Phase 15's presign mode validator, not introduced by it
+        # — see phases/phase-15-background-operations.md Step 4.
+        safe_errors = jsonable_encoder(errors)
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content=_envelope(ErrorCode.VALIDATION_ERROR, message, request_id, {"errors": errors}),
+            content=_envelope(
+                ErrorCode.VALIDATION_ERROR, message, request_id, {"errors": safe_errors}
+            ),
             headers={"X-Request-ID": request_id},
         )
 

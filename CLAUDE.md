@@ -22,6 +22,20 @@ rules.md` §R21 equivalent), so a browser page can only reach it from the
 API's own origin. The Flutter ERP remains the only real consumer; nothing
 about its contract changed.
 
+**Correction, 2026-08-12 (Phase 15):** the overview above describes only the
+four-angle flow — that's no longer the whole API. `POST /background/remove`
+and `POST /background/replace` are a second, independent request shape: one
+uploaded photo in, one image out, no category or angles, reusing the same
+job/sub-job state machine, status polling, retry, cost recording, and audit
+trail rather than a parallel pipeline. Both go through the same Gemini call
+Mode A angle generation already uses — **no alpha channel**; "background
+removal" means the product on a flat/solid backdrop, not a transparent
+cutout (a decision made directly with the client rather than through the
+planned spike — no real Gemini key or client photos existed locally to run
+one; see `docs/decisions/0002-background-removal-approach.md`). See
+`docs/business-rules.md` §13 and `docs/api-routes.md`'s "Background
+Operations" section for the full contract.
+
 **Actors:**
 
 | Actor | Can do |
@@ -47,7 +61,12 @@ app/
     jobs.py  qa.py         Ops routes (Phase 1 Step 2 — not in the original folder
                             sketch; api-routes.md always specified them, they just
                             hadn't been split into their own modules yet)
+    background.py           POST /background/remove, /replace (Phase 15 — not in the
+                            original sketch). retry.py also gained a second route in
+                            the same file, POST /jobs/{job_id}/retry, rather than a
+                            new module — same "retry" concern, same router.
     schemas/               Pydantic request/response models, one file per route family
+      background.py         BackgroundRemoveRequest/BackgroundReplaceRequest (Phase 15)
   core/
     auth.py                X-API-Key -> Argon2 verify -> ApiClient, scope enforcement
     errors.py              Exception classes + handlers, error envelope, ErrorCode enum
@@ -95,7 +114,26 @@ app/
                             original sketch; app/workers/qa.py is a thin wrapper).
                             Reuses generation_service.recompute_parent_status
                             (renamed from _recompute_parent_status, Phase 9) rather
-                            than duplicating the rollup-and-persist logic.
+                            than duplicating the rollup-and-persist logic. Phase 15
+                            adds score_background_operation (input photo as
+                            reference, not the category matrix) sharing a private
+                            _score_and_apply helper with score_synthetic_angle —
+                            same provider call + pass/fail branching, only
+                            threshold/reference-image resolution differs.
+    background_service.py   process — single background-operation sub-job end to
+                            end, mirrors generation_service.py::transform_photo's
+                            shape (Phase 15 — not in the original sketch;
+                            app/workers/background.py is a thin wrapper). Reuses
+                            GeminiProvider unmodified — both operations are
+                            already Gemini calls with a flat/solid background, no
+                            new provider code needed
+                            (docs/decisions/0002-background-removal-approach.md).
+                            Unlike transform_photo, success always enters
+                            QA_REVIEW, never straight COMPLETED. Also marks the
+                            parent job PROCESSING at the start — a background job
+                            has no orchestration.fan_out_job equivalent to do
+                            that eagerly, since there's only ever one sub-job to
+                            dispatch.
   workers/
     celery_app.py          Celery config, queue routing, beat schedule
     health.py              ping_io verification task (added Step 4, not in original plan)
@@ -114,20 +152,41 @@ app/
                             in services/qa_service.py (Phase 9). Dispatched by
                             generation.py right after a QA_REVIEW-landing
                             transform_photo commits, not from inside the service.
+                            Phase 15 adds `qa.score_background`, dispatched by
+                            background.py the same way, real logic in
+                            qa_service.py::score_background_operation.
     orchestration.py       `orchestration.fan_out_job` — a loop of independent
                             generation.transform_photo dispatches, not a Celery
                             group/chord (Phase 7 — see phases/phase-7-orchestration.md's
                             reality-check section for why)
+    background.py           `background.process` — session lifecycle only, real
+                            logic in services/background_service.py (Phase 15).
+                            Same per-call engine + per-call owned Redis client
+                            pattern as generation.py, pinned by
+                            tests/integration/test_background_worker_event_loop_lifecycle.py.
   providers/
     base.py                GenerationProvider ABC + GenerationResult (Phase 6)
     gemini.py               GeminiProvider — the only module that imports google.genai,
-                            and only inside a deferred _call_api seam (Phase 6)
+                            and only inside a deferred _call_api seam (Phase 6).
+                            Reused unmodified by background_service.py (Phase 15) —
+                            same one-photo-in/one-photo-out call shape.
     qa_base.py              QaProvider ABC + QaResult, mirrors base.py (Phase 9)
     gemini_qa.py             GeminiQaProvider — LLM-judged similarity scoring, same
-                            deferred-import isolation as gemini.py (Phase 9)
-migrations/                Alembic
+                            deferred-import isolation as gemini.py (Phase 9). Reused
+                            unmodified for the Phase 15 subject-preservation gate.
+migrations/                Alembic. 0006-0010 are Phase 15: operation_t +
+                            jobs.operation + nullable sub_jobs.angle (0006),
+                            operations/background_presets config seed (0007),
+                            nullable jobs.category_code (0008), jobs.preset_code
+                            (0009), background_qa_similarity_threshold config
+                            seed (0010).
 scripts/
-  seed_dev.py              Idempotent dev seed data — all 8 job-state scenarios
+  seed_dev.py              Idempotent dev seed data — all 8 job-state scenarios.
+                            CATEGORY_PAYLOAD's `global` block also seeds Phase 15's
+                            operations/background_presets/
+                            background_qa_similarity_threshold — real production
+                            gets these via migrations 0007/0010, this script mirrors
+                            them so a fresh dev/test DB has usable data too.
   export_openapi.py        Writes docs/openapi.json from the live FastAPI app
   upload_seed_assets.py    Backfills real placeholder bytes for seeded COMPLETED
                             output assets (Supabase's sign endpoint 404s otherwise)
@@ -170,6 +229,11 @@ ui/
   mechanism that catches it.
 - **The Gemini client sits behind a `GenerationProvider` interface.** We are not building
   a second provider now, but no task body may import the Gemini SDK directly.
+- **A job's operation is explicit, not inferred from its shape.** `jobs.operation`
+  (Phase 15) makes `ANGLE_GENERATION` vs `BACKGROUND_REMOVAL` vs
+  `BACKGROUND_REPLACEMENT` a first-class column rather than something derived from
+  `category_code` being null or `sub_jobs.angle` being null — those nullability facts
+  are consequences of `operation`, not the source of truth for it.
 
 ## Hard Rules — Never Break These
 
@@ -182,7 +246,10 @@ ui/
 4. **Never query the database from a route or a task directly.** Go through
    `db/repositories/`.
 5. **Never call the live Gemini or Sheets API in tests.** Use recorded fixtures.
-6. **Never return a synthetic angle as `COMPLETED` without a QA score.**
+6. **Never return a synthetic angle as `COMPLETED` without a QA score.** Same rule for
+   every background-operation output (Phase 15) — unlike real-photo angles, a
+   background operation has no unchecked path at all; success always enters
+   `QA_REVIEW` first.
 7. **Never accept a `/generate` request without checking the `Idempotency-Key`.**
    Duplicate submissions bill the client twice.
 8. **Never fail a job because Google Sheets was unreachable.** Fall back to the last
@@ -566,3 +633,87 @@ since decision 0001. **Unrelated cleanup, same session:** a stray
 deactivated rather than deleted (its `jobs` rows are FK-referenced, and
 this schema never deletes job history anyway) — it'll show up in any
 future `GET /jobs` query once Phase 11 builds that route for real.
+
+Phase 15 — Standalone Background Operations is **complete, verified against
+testcontainers Postgres + real local Redis + real Supabase Storage,
+fixture-driven Gemini** (same stack as every prior phase — no real
+`GEMINI_API_KEY` exists in this environment, so real-world output quality
+is unverified; see the Step 1 note below). `BACKGROUND_REMOVAL` and
+`BACKGROUND_REPLACEMENT` are real: `POST /background/remove`,
+`POST /background/replace`, operation-aware `POST /uploads/presign`,
+`GET /status/{job_id}`'s additive `operation`/`results` fields, and
+`POST /jobs/{job_id}/retry` (409 on an angle job) are all live and tested
+end-to-end, including the real Celery dispatch chain
+(`background.process` → `qa.score_background`) running under
+`task_always_eager` exactly the way `/generate`'s already does.
+
+**Step 1's spike never ran.** The phase file required a timeboxed
+comparison over ≥12 real client pieces before any code was written — this
+environment has no real `GEMINI_API_KEY`, no Vertex-capable service
+account, no hosted-matting-API credentials, and (unlike every prior phase,
+which at least had fixture image bytes) zero image files anywhere in the
+repo. Surfaced to the user directly rather than silently skipped; the user
+decided directly, without the spike, that both operations go through
+Gemini with a flat/solid background — no alpha channel, no transparent
+cutout. See `docs/decisions/0002-background-removal-approach.md` for the
+full accounting of what evidence Checkpoint 1 asks for and wasn't
+gathered.
+
+**Two real bugs found and fixed while wiring the worker up, not caught by
+code review alone** (same self-audit discipline this file's own template
+asks every phase to follow):
+
+1. `background_service.process` never marked the parent job `PROCESSING`
+   when work started. Angle jobs get this for free from
+   `orchestration_service.dispatch_job` (a separate task that runs before
+   any `generation.transform_photo` dispatch); a background job has no
+   fan-out step — it's always exactly one sub-job, dispatched directly by
+   `create_background_job_for_request` or the retry route. Without the
+   fix, a job that landed in `QA_REVIEW` below threshold would stay at
+   `PENDING` forever instead of `PROCESSING`. Revert-checked: removing the
+   fix made `test_below_threshold_qa_score_lands_in_qa_review_and_review_queue`
+   fail exactly as expected.
+2. `QaReviewItem` (`GET /qa/review-queue`) required non-null `angle` and
+   `category_code` — the route crashed with a real `500` the first time a
+   background item reached it. Fixed by making both nullable, adding
+   `operation`, and populating `reference_image_urls` with the input
+   photo's signed URL for a background item (its "reference" is the
+   original photo, not a category matrix — without this a human reviewer
+   would see a subject-preservation item with nothing to compare the
+   output against).
+
+**Also found and fixed, unrelated to the two bugs above:** `app/core/errors.py`'s
+`RequestValidationError` handler crashed with a `500` on *any*
+`@model_validator` raising a bare `ValueError` — including the
+already-shipped `AngleSpec` mode validator on `/generate`, just never
+exercised through a real HTTP request before Phase 15 added
+`PresignUploadRequest`'s own mode validator. Pydantic puts the raised
+exception object itself in the error's `ctx.error`, which plain
+`json.dumps` (what `JSONResponse` uses) can't serialize. Fixed with
+`fastapi.encoders.jsonable_encoder`, revert-checked, regression test
+added (`tests/unit/test_errors.py`).
+
+**Schema gaps found and closed, not anticipated by the phase file:**
+`jobs.category_code` had to become nullable (migration 0008) — a
+background job has no category at all, and the phase file only ever
+addressed `sub_jobs.angle`. `jobs.preset_code` (migration 0009) had to be
+added — nothing durable recorded which backdrop preset a
+`BACKGROUND_REPLACEMENT` job requested (the phase file's own
+`create_background_job_for_request` sketch only put it in the
+`JOB_CREATED` audit-log detail, not a queryable column), so the worker had
+no way to resolve the right prompt at execution time.
+
+**Two placeholder config values seeded, both explicitly uncalibrated,**
+same status `qa_similarity_threshold` has always carried: per-operation
+prompts/costs and the single `STUDIO_WHITE` preset (migration 0007), and
+`background_qa_similarity_threshold` (migration 0010, `0.92` — deliberately
+higher than the synthetic-angle gate's `0.82`, on the phase file's own
+reasoning that "same object, new background" should score closer to 1.0
+than a novel view). Real preset list and real threshold calibration are
+still open (roadmap open decisions #8 and #11).
+
+**Not done, and can't be from this session:** Step 5's "measured end-to-end
+latency on the live free instance" — no reachable Render deployment;
+Step 6's Flutter-lead written confirmation of the `operation`/`results`
+split — needs an actual human session, same category of gap Phase 1's own
+sign-off had.

@@ -16,7 +16,12 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from app.api.v2.schemas.uploads import PresignedAngle, PresignUploadRequest, PresignUploadResponse
+from app.api.v2.schemas.uploads import (
+    PresignedAngle,
+    PresignedOperationUpload,
+    PresignUploadRequest,
+    PresignUploadResponse,
+)
 from app.config import settings
 from app.core.auth import require_client_scope
 from app.db.models.api_clients import ApiClient
@@ -42,6 +47,23 @@ async def presign_uploads(
     group_id = uuid.uuid4()
     expires_at = datetime.now(UTC) + timedelta(seconds=_UPLOAD_URL_TTL_SECONDS)
 
+    if body.operation is not None:
+        storage_path = (
+            f"pending/{client.id}/{group_id}/{body.operation.value}/"
+            f"input_{uuid.uuid4().hex[:8]}.jpg"
+        )
+        result = storage_service.generate_upload_url(settings.BUCKET_INPUTS, storage_path)
+        return PresignUploadResponse(
+            angles=[],
+            operation_upload=PresignedOperationUpload(
+                operation=body.operation,
+                upload_url=result["signedUrl"],
+                storage_path=storage_path,
+                expires_at=expires_at,
+            ),
+        )
+
+    assert body.angles is not None  # enforced by the request schema's mode validator
     angles = []
     for angle in body.angles:
         storage_path = (

@@ -30,6 +30,10 @@ row in Postgres on cache miss. Never calls Google Sheets inline.
 Response includes `config_version` — the client should send this back on `/generate` so
 mismatches can be detected.
 
+Also returns `background_presets`: active backdrop presets for
+`POST /background/replace`, `code` + `name` only (Phase 15 — see
+`phases/phase-15-background-operations.md` Step 3). Inactive presets are not listed.
+
 Prompts and reference image URLs are **not** exposed to the client. Internal only.
 
 ### `POST /api/v2/internal/config/sync`
@@ -65,11 +69,19 @@ error path unless both Redis and Postgres are down — see docs/business-rules.m
 Returns short-lived signed upload URLs for the Supabase `jewelry-inputs` bucket, one per
 angle the client intends to submit. **Auth required.**
 
-Request names the category and the angles. Response gives, per angle, an `upload_url`,
-the `storage_path` to quote back on `/generate`, and an expiry.
+Two mutually exclusive request modes:
+
+- `{ "category_code": "...", "angles": [...] }` — the original angle-generation form.
+  Response gives, per angle, an `upload_url`, the `storage_path` to quote back on
+  `/generate`, and an expiry, under `angles`.
+- `{ "operation": "BACKGROUND_REMOVAL" | "BACKGROUND_REPLACEMENT" }` — Phase 15. One
+  upload, no angle. Response's `operation_upload` gives the same `upload_url` /
+  `storage_path` / expiry shape, to quote back on `POST /background/remove` or
+  `POST /background/replace`. See `phases/phase-15-background-operations.md` Step 4.
 
 The client uploads directly to Supabase Storage — image bytes never pass through the API.
-This is what keeps `/generate` fast and avoids request-size limits.
+This is what keeps `/generate` and the background routes fast and avoids request-size
+limits.
 
 ---
 
@@ -107,13 +119,20 @@ Poll for job state. **Auth required. Scoped to the owning client — another cli
 `job_id` returns `404`, never `403`.**
 
 Returns the parent `status` (`PENDING` | `PROCESSING` | `COMPLETED` | `PARTIAL_SUCCESS` |
-`FAILED`), counts, and an `angles` array. Each angle carries:
+`FAILED`), counts, and two additive fields (Phase 15 — both fields are new, `angles`
+is otherwise byte-identical to before that phase):
 
-- `status`, `source_type`, `synthetic` flag
-- `image_url` — a **freshly signed URL, 1-hour TTL**, present only when `COMPLETED`
-- `qa_status` and `qa_score` when applicable
-- `failure_class`, `error_message`, and `retryable` when failed
-- `retry_url` when `retryable` is true
+- `operation` — `ANGLE_GENERATION` | `BACKGROUND_REMOVAL` | `BACKGROUND_REPLACEMENT`.
+  **Read this first** to know which array to read next.
+- `angles` — populated for `ANGLE_GENERATION` jobs, empty `[]` otherwise. Each item
+  carries `angle`, `status`, `source_type`, `synthetic` flag,
+  `image_url` (a **freshly signed URL, 1-hour TTL**, present only when `COMPLETED`),
+  `qa_status`/`qa_score` when applicable, `failure_class`/`error_message`/`retryable`
+  when failed, and `retry_url` (`/jobs/{job_id}/angles/{angle}/retry`) when retryable.
+- `results` — populated for background-operation jobs (one element, since a background
+  job has exactly one sub-job), empty `[]` otherwise. Same per-item fields as `angles`
+  minus `angle` itself; `retry_url` points at the job-level
+  `/jobs/{job_id}/retry` instead.
 
 `retryable` is `false` for `REJECTED` — a safety refusal or QA rejection will not resolve
 by retrying, and the ERP must not offer the button.
@@ -152,6 +171,67 @@ fresh retry rather than a no-op. Given the 3-attempt ceiling this can cost
 at most one extra generation call on one angle, not the whole-job
 double-billing risk `/generate`'s durable dedup exists to prevent.
 
+### `POST /api/v2/jobs/{job_id}/retry`
+Re-runs a background-operation job's single sub-job. Phase 15 — see
+`phases/phase-15-background-operations.md` Step 4. **Auth required.
+`Idempotency-Key` header required.**
+
+Same preconditions, same `retryidem:` idempotency caveat, and reuses the same
+`app/services/retry_service.py::execute_retry` primitive as the per-angle route above —
+this route just looks up the job's one sub-job instead of one named by an `{angle}`
+path segment.
+
+Returns `409` (`ANGLE_JOB_RETRY_NOT_ALLOWED`) if called on an `ANGLE_GENERATION` job —
+that job type must keep naming its angle via the route above.
+
+---
+
+## Background Operations
+
+`BACKGROUND_REMOVAL` and `BACKGROUND_REPLACEMENT` — one photo in, one photo out,
+independent of the four-angle flow. Phase 15 — see
+`phases/phase-15-background-operations.md`. Both operations go through Gemini with a
+flat/solid background; **there is no alpha channel** — "background removal" means a
+clean standardised backdrop, not a transparent cutout (see
+`docs/decisions/0002-background-removal-approach.md`).
+
+Both routes reuse the existing job/sub-job state machine, `GET /status/{job_id}`,
+`POST /jobs/{job_id}/retry`, cost recording, and audit trail — there is no parallel
+pipeline.
+
+### `POST /api/v2/background/remove`
+**Auth required. `client` scope. `Idempotency-Key` header required.**
+
+Request: `{ "storage_path": "...", "sku_reference"?: "...", "metadata"?: {} }`.
+`storage_path` comes from `POST /uploads/presign`'s `operation`-mode response.
+
+Returns `202` with the same `JobAcceptedResponse` shape as `/generate` — `job_id`,
+`status: PENDING`, a one-element `angles` array with `angle: null`, `poll_after_ms`.
+
+**Validation, in order — all failures are `4xx` before any job row is created:**
+
+1. `operations.BACKGROUND_REMOVAL.enabled` is `true` in the active config version
+   (`422 OPERATION_DISABLED` otherwise)
+2. `storage_path` exists in `jewelry-inputs` and belongs to this client
+   (`422 ASSET_NOT_FOUND` / `422 ASSET_NOT_OWNED`)
+3. The uploaded image passes `image_validation.inspect_and_validate`
+   (`422 VALIDATION_ERROR`)
+
+### `POST /api/v2/background/replace`
+**Auth required. `client` scope. `Idempotency-Key` header required.**
+
+Request: `{ "storage_path": "...", "preset_code": "...", "sku_reference"?: "...",
+"metadata"?: {} }`. `preset_code` must be one of `GET /config`'s `background_presets`.
+
+Same response shape and validation order as `/background/remove`, with one extra step
+between 1 and 2: the preset must exist and be active
+(`422 PRESET_NOT_FOUND` / `422 PRESET_INACTIVE`).
+
+### Status and retry
+`GET /api/v2/status/{job_id}` and `POST /api/v2/jobs/{job_id}/retry` (above) both work
+unchanged for background jobs — read `operation` first, then `results` instead of
+`angles`.
+
 ---
 
 ## Ops
@@ -163,8 +243,14 @@ Paginated job list, filterable by status, category, and date range. **Ops-only s
 Aggregated `cost_events` for a job, broken down per angle and attempt. **Ops-only scope.**
 
 ### `GET /api/v2/qa/review-queue`
-Sub-jobs in `QA_REVIEW` — synthetic outputs that fell below the similarity threshold and
-need a human decision. **Ops-only scope.**
+Sub-jobs in `QA_REVIEW` — synthetic angle outputs or background-operation outputs that
+fell below their similarity threshold and need a human decision. **Ops-only scope.**
+
+Each item carries `operation`; `angle`/`category_code` are `null` for a background
+item. `reference_image_urls` is the category reference matrix for a synthetic angle,
+or a single-element array pointing at the original input photo for a background item
+(Phase 15 — the subject-preservation gate's reference *is* the input, see
+`phases/phase-15-background-operations.md` Step 5).
 
 ### `POST /api/v2/qa/{sub_job_id}/decision`
 Approve or reject a flagged output. Approval moves the sub-job to `COMPLETED`; rejection
@@ -177,7 +263,7 @@ moves it to `REJECTED` with `failure_class: QA_REJECTED`. Both recompute parent 
 
 | Scope | Routes |
 | :--- | :--- |
-| `client` | config, uploads, generate, status, retry |
+| `client` | config, uploads, generate, status, retry, `/background/*` |
 | `ops` | everything in `client` plus `/internal/*`, `/jobs`, `/qa/*` |
 
 Scope lives on the `api_clients` row. There are exactly two scopes — resist adding more
