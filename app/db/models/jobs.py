@@ -23,7 +23,15 @@ from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.models.base import Base
-from app.db.models.enums import Angle, FailureClass, JobStatus, QAStatus, SourceType, SubJobStatus
+from app.db.models.enums import (
+    Angle,
+    FailureClass,
+    JobStatus,
+    Operation,
+    QAStatus,
+    SourceType,
+    SubJobStatus,
+)
 
 
 class Job(Base):
@@ -46,12 +54,25 @@ class Job(Base):
     )
     idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
     payload_hash: Mapped[str] = mapped_column(String, nullable=False)
-    category_code: Mapped[str] = mapped_column(String, nullable=False)
+    # NULL for a background-operation job (operation != ANGLE_GENERATION) —
+    # there is no jewelry category to pin. See migration 0008 and
+    # phases/phase-15-background-operations.md Step 4.
+    category_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    # NULL unless operation == BACKGROUND_REPLACEMENT — the worker needs a
+    # durable, queryable record of which preset was requested to resolve
+    # its prompt. See migration 0009 and
+    # phases/phase-15-background-operations.md Step 5.
+    preset_code: Mapped[str | None] = mapped_column(String, nullable=True)
     config_version_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("config_versions.id"), nullable=False
     )
     status: Mapped[JobStatus] = mapped_column(
         Enum(JobStatus, name="job_status_t"), nullable=False, server_default=JobStatus.PENDING.value
+    )
+    operation: Mapped[Operation] = mapped_column(
+        Enum(Operation, name="operation_t"),
+        nullable=False,
+        server_default=Operation.ANGLE_GENERATION.value,
     )
     requested_angles: Mapped[int] = mapped_column(Integer, nullable=False)
     succeeded_angles: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
@@ -70,7 +91,27 @@ class Job(Base):
 class SubJob(Base):
     __tablename__ = "sub_jobs"
     __table_args__ = (
-        UniqueConstraint("job_id", "angle", name="uq_sub_jobs_job_angle"),
+        # No plain UniqueConstraint("job_id", "angle") — a background job's
+        # sub-job has angle IS NULL, and Postgres unique constraints treat
+        # NULLs as distinct, so it wouldn't stop a job accumulating more than
+        # one angle-less sub-job. These two partial indexes replace it: one
+        # enforces "no duplicate angle within a job" (angle jobs only), the
+        # other "at most one angle-less sub-job per job" (background jobs
+        # only). See docs/schema.md and phases/phase-15-background-operations.md
+        # Step 2.
+        Index(
+            "ux_sub_jobs_job_angle",
+            "job_id",
+            "angle",
+            unique=True,
+            postgresql_where=text("angle IS NOT NULL"),
+        ),
+        Index(
+            "ux_sub_jobs_job_single",
+            "job_id",
+            unique=True,
+            postgresql_where=text("angle IS NULL"),
+        ),
         Index("ix_sub_jobs_job_id", "job_id"),
         Index(
             "ix_sub_jobs_qa_review",
@@ -85,7 +126,12 @@ class SubJob(Base):
     job_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False
     )
-    angle: Mapped[Angle] = mapped_column(Enum(Angle, name="angle_t"), nullable=False)
+    # NULL for a background-operation sub-job (operation != ANGLE_GENERATION)
+    # — see the operation/angle cross-table invariant enforced in
+    # app/services/job_service.py::validate_operation_angle_consistency,
+    # which is the Postgres-CHECK-that-can't-be-expressed this schema
+    # otherwise relies on.
+    angle: Mapped[Angle | None] = mapped_column(Enum(Angle, name="angle_t"), nullable=True)
     status: Mapped[SubJobStatus] = mapped_column(
         Enum(SubJobStatus, name="sub_job_status_t"),
         nullable=False,

@@ -15,7 +15,12 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v2.schemas.config import AngleAvailability, CategoryConfig, ConfigResponse
+from app.api.v2.schemas.config import (
+    AngleAvailability,
+    CategoryConfig,
+    ConfigResponse,
+    PresetSummary,
+)
 from app.core.errors import AppError, ErrorCode
 from app.db.models.config_versions import ConfigVersion
 from app.db.repositories import config_versions as config_versions_repo
@@ -45,9 +50,18 @@ def build_config_response(config_version: ConfigVersion) -> ConfigResponse:
                 code=cat["code"], name=cat["name"], is_active=cat["is_active"], angles=angles
             )
         )
+    # code + name only, active presets only — prompts stay internal, same
+    # rule angle prompts already follow. See
+    # phases/phase-15-background-operations.md Step 3.
+    presets = [
+        PresetSummary(code=preset["code"], name=preset["name"])
+        for preset in config_version.payload.get("global", {}).get("background_presets", [])
+        if preset.get("is_active", False)
+    ]
     return ConfigResponse(
         config_version=config_version.version_number,
         categories=categories,
+        background_presets=presets,
     )
 
 

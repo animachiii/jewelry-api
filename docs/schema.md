@@ -34,6 +34,8 @@ failure_class_t  TRANSIENT_PROVIDER | TRANSIENT_NETWORK | RATE_LIMITED
 qa_status_t      NOT_APPLICABLE | PASSED | FLAGGED | FAILED
 
 sync_status_t    SUCCESS | FAILED
+
+operation_t      ANGLE_GENERATION | BACKGROUND_REMOVAL | BACKGROUND_REPLACEMENT
 ```
 
 `REJECTED` is distinct from `FAILED`: it means the provider deterministically declined
@@ -47,6 +49,11 @@ does not count toward partial-success math.
 this schema landed; removing an enum value requires recreating the Postgres
 type, which wasn't worth it for values nothing referenced yet. No code path
 sets either value. Do not use them in new code.
+
+`operation_t` (Phase 15, migration 0006) — `jobs.operation` defaults to
+`ANGLE_GENERATION`, so every pre-Phase-15 row is unaffected. See
+`phases/phase-15-background-operations.md` and `docs/business-rules.md`'s
+operations section.
 
 ---
 
@@ -111,7 +118,16 @@ Partial unique index: `CREATE UNIQUE INDEX ON config_versions (is_active) WHERE 
     "model_version": "gemini-<pinned-version>",
     "qa_similarity_threshold": 0.82,
     "default_negative_prompt": "...",
-    "unit_cost_usd": 0.02
+    "unit_cost_usd": 0.02,
+    "background_qa_similarity_threshold": 0.92,
+    "operations": {
+      "BACKGROUND_REMOVAL": { "enabled": true, "prompt": "...", "unit_cost_usd": 0.02 },
+      "BACKGROUND_REPLACEMENT": { "enabled": true, "unit_cost_usd": 0.02 }
+    },
+    "background_presets": [
+      { "code": "STUDIO_WHITE", "name": "Studio White", "prompt": "...",
+        "reference_image_urls": [], "is_active": true }
+    ]
   }
 }
 ```
@@ -131,22 +147,35 @@ The original payload shape had no cost field at all; this is a placeholder
 Gemini image-generation price, to be confirmed against real billing before
 launch, same status as `qa_similarity_threshold`.
 
+**`global.operations`, `global.background_presets`, `global.background_qa_similarity_threshold`
+(Phase 15, migrations 0007/0010):** live inside `global`, not as top-level `payload`
+keys, deliberately — `config_sync_service.normalize_sheet_rows` rebuilds `categories`
+from Sheets rows on every sync but only ever carries the `global` block forward
+untouched (the same mechanism that already protects `unit_cost_usd`). The real Sheet
+has no Global tab, so these can only ever be seeded by migration and inherited
+forward. All three are placeholders pending real business decisions — see
+`docs/decisions/0002-background-removal-approach.md` and roadmap open decision #11
+(preset list).
+
 ---
 
 ## `jobs`
 
-One row per `POST /api/v2/generate`.
+One row per `POST /api/v2/generate`, `POST /api/v2/background/remove`, or
+`POST /api/v2/background/replace`.
 
 | Column | Type | Notes |
 | :--- | :--- | :--- |
 | `id` | UUID PK | This is the `job_id` returned to the client |
 | `client_id` | UUID NOT NULL FK → `api_clients.id` | |
 | `idempotency_key` | TEXT NOT NULL | Client-supplied |
-| `payload_hash` | TEXT NOT NULL | SHA-256 of the normalized `/generate` request body. Added in migration 0003 — durable version of the same-key/different-payload 409 check in docs/business-rules.md §8; a Redis-only hash doesn't survive the 24h TTL. |
-| `category_code` | TEXT NOT NULL | Must exist in the active config version |
+| `payload_hash` | TEXT NOT NULL | SHA-256 of the normalized request body. Added in migration 0003 — durable version of the same-key/different-payload 409 check in docs/business-rules.md §8; a Redis-only hash doesn't survive the 24h TTL. |
+| `category_code` | TEXT NULL | Must exist in the active config version for an `ANGLE_GENERATION` job. **NULL for a background-operation job** — there is no category (migration 0008, Phase 15). |
+| `operation` | `operation_t` NOT NULL DEFAULT `ANGLE_GENERATION` | Added in migration 0006 (Phase 15). |
+| `preset_code` | TEXT NULL | Set only for `BACKGROUND_REPLACEMENT` — the pinned backdrop preset the worker resolves its prompt from. Added in migration 0009 (Phase 15). |
 | `config_version_id` | UUID NOT NULL FK → `config_versions.id` | Pinned at creation. Never changes. |
 | `status` | `job_status_t` NOT NULL DEFAULT `PENDING` | |
-| `requested_angles` | INT NOT NULL | Count of angles not skipped |
+| `requested_angles` | INT NOT NULL | Count of angles not skipped for an angle job; always `1` for a background job. Keeps its name across both — see docs/business-rules.md. |
 | `succeeded_angles` | INT NOT NULL DEFAULT 0 | |
 | `failed_angles` | INT NOT NULL DEFAULT 0 | |
 | `sku_reference` | TEXT NULL | Client's own product reference, passed through |
@@ -163,13 +192,14 @@ Indexes: `(client_id, created_at DESC)`, `(status)` partial where status in
 
 ## `sub_jobs`
 
-One row per angle, including skipped angles.
+One row per angle (including skipped angles) for an `ANGLE_GENERATION` job; exactly
+one row, `angle IS NULL`, for a background-operation job.
 
 | Column | Type | Notes |
 | :--- | :--- | :--- |
 | `id` | UUID PK | |
 | `job_id` | UUID NOT NULL FK → `jobs.id` ON DELETE CASCADE | |
-| `angle` | `angle_t` NOT NULL | |
+| `angle` | `angle_t` NULL | **NULL for a background-operation job** (migration 0006, Phase 15) — see the two partial indexes below and the operation/angle invariant in `app/services/job_service.py::validate_operation_angle_consistency` (the cross-table CHECK Postgres can't express). |
 | `status` | `sub_job_status_t` NOT NULL DEFAULT `PENDING` | |
 | `source_type` | `source_type_t` NOT NULL | `SYNTHETIC` when no input image was supplied |
 | `celery_task_id` | TEXT NULL | |
@@ -187,7 +217,13 @@ One row per angle, including skipped angles.
 | `started_at` | TIMESTAMPTZ NULL | |
 | `completed_at` | TIMESTAMPTZ NULL | |
 
-Unique: `(job_id, angle)`.
+Two partial unique indexes (migration 0006, replacing the old plain
+`UNIQUE(job_id, angle)` — Postgres treats `NULL` as distinct from every other `NULL`,
+so a plain unique constraint would not stop a job accumulating more than one
+angle-less sub-job):
+- `ux_sub_jobs_job_angle` — `(job_id, angle)` unique where `angle IS NOT NULL`
+- `ux_sub_jobs_job_single` — `(job_id)` unique where `angle IS NULL`
+
 Index: `(job_id)`, `(status)` partial where status = `QA_REVIEW`.
 
 ---
@@ -225,7 +261,9 @@ Index: `(job_id, kind)`, `(expires_at)` where not null.
 
 `jewelry-mattes` was deleted 2026-08-07 — see `docs/decisions/0001-drop-local-matting.md`.
 
-Path convention: `{job_id}/{angle}/{kind}_{short_uuid}.{ext}`
+Path convention: `{job_id}/{angle}/{kind}_{short_uuid}.{ext}`. A background-operation
+output uses the literal segment `background` in place of `{angle}` (Phase 15,
+`app/services/background_service.py`).
 
 All client-facing URLs are **signed URLs with a 1-hour TTL**, generated at status-read
 time. Never store a signed URL in the database — store the path and sign on read.
@@ -240,7 +278,7 @@ time. Never store a signed URL in the database — store the path and sign on re
 | `job_id` | UUID NOT NULL FK → `jobs.id` | Denormalized for reporting |
 | `sub_job_id` | UUID NULL FK → `sub_jobs.id` | |
 | `provider` | TEXT NOT NULL | e.g. `gemini` |
-| `operation` | TEXT NOT NULL | e.g. `image_generation` |
+| `operation` | TEXT NOT NULL | `image_generation` for angle jobs; `background_removal` / `background_replacement` for Phase 15 background jobs |
 | `model_version` | TEXT NOT NULL | |
 | `units` | INT NOT NULL DEFAULT 1 | Images generated |
 | `unit_cost_usd` | NUMERIC(10,6) NOT NULL | From config, not hardcoded |

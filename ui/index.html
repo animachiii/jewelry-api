@@ -199,6 +199,47 @@
     <div class="call-error" id="submit-error"></div>
   </section>
 
+  <section>
+    <h2>Background removal / replacement</h2>
+    <p class="muted">
+      Independent of the four-angle flow above — one photo in, one photo out. See
+      <code>docs/api-routes.md</code>'s "Background Operations" section.
+    </p>
+    <p class="muted" style="color: var(--err)">
+      Also calls the real pipeline — a real, billed Gemini call plus a QA scoring
+      call. Output has <strong>no alpha channel</strong>: "remove" means a flat/solid
+      backdrop, not a transparent cutout (see
+      <code>docs/decisions/0002-background-removal-approach.md</code>).
+    </p>
+    <div class="row">
+      <div class="field">
+        <label for="bg-operation">Operation</label>
+        <select id="bg-operation">
+          <option value="BACKGROUND_REMOVAL">Remove background</option>
+          <option value="BACKGROUND_REPLACEMENT">Replace background</option>
+        </select>
+      </div>
+      <div class="field" id="bg-preset-field">
+        <label for="bg-preset">Backdrop preset</label>
+        <select id="bg-preset"></select>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="bg-file">Photo</label>
+        <input type="file" id="bg-file" accept="image/jpeg,image/png,image/webp" />
+      </div>
+      <div class="field">
+        <label for="bg-sku">SKU reference (optional)</label>
+        <input type="text" id="bg-sku" placeholder="e.g. RING-0142" />
+      </div>
+    </div>
+    <div style="margin-top: 14px">
+      <button type="button" id="bg-submit-btn">Presign, upload &amp; submit</button>
+    </div>
+    <div class="call-error" id="bg-submit-error"></div>
+  </section>
+
   <section class="job-panel" id="job-panel">
     <h2>Job <span id="job-id-label" class="muted"></span></h2>
     <p>
@@ -366,7 +407,29 @@
       select.appendChild(opt);
     });
     renderAngleInputs();
+    renderPresetOptions();
   }
+
+  // --- Background operations: preset list + operation toggle -----------
+
+  function renderPresetOptions() {
+    const select = $("bg-preset");
+    select.innerHTML = "";
+    ((activeConfig && activeConfig.background_presets) || []).forEach((preset) => {
+      const opt = document.createElement("option");
+      opt.value = preset.code;
+      opt.textContent = preset.name + " (" + preset.code + ")";
+      select.appendChild(opt);
+    });
+    updatePresetVisibility();
+  }
+
+  function updatePresetVisibility() {
+    const isReplace = $("bg-operation").value === "BACKGROUND_REPLACEMENT";
+    $("bg-preset-field").style.display = isReplace ? "" : "none";
+  }
+
+  $("bg-operation").addEventListener("change", updatePresetVisibility);
 
   $("category").addEventListener("change", renderAngleInputs);
 
@@ -526,6 +589,70 @@
     }
   });
 
+  // --- Background operations: presign -> upload -> submit ---------------
+
+  $("bg-submit-btn").addEventListener("click", async function () {
+    const errorEl = $("bg-submit-error");
+    hideCallError(errorEl);
+    const btn = $("bg-submit-btn");
+
+    const operation = $("bg-operation").value;
+    const file = $("bg-file").files[0];
+    if (!file) {
+      showCallError(errorEl, new Error("Choose a photo first."));
+      return;
+    }
+    const presetCode = $("bg-preset").value;
+    if (operation === "BACKGROUND_REPLACEMENT" && !presetCode) {
+      showCallError(errorEl, new Error("No preset available — check the connection/config above."));
+      return;
+    }
+
+    btn.disabled = true;
+    try {
+      btn.textContent = "Requesting upload URL…";
+      const presignResp = await apiFetch("/api/v2/uploads/presign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operation: operation }),
+      });
+      const upload = presignResp.operation_upload;
+
+      btn.textContent = "Uploading photo…";
+      const putResp = await fetch(upload.upload_url, {
+        method: "PUT",
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+        body: file,
+      });
+      if (!putResp.ok) {
+        throw new Error("Upload failed: HTTP " + putResp.status);
+      }
+
+      const body = { storage_path: upload.storage_path };
+      const sku = $("bg-sku").value.trim();
+      if (sku) body.sku_reference = sku;
+      if (operation === "BACKGROUND_REPLACEMENT") body.preset_code = presetCode;
+
+      const route = operation === "BACKGROUND_REMOVAL" ? "/background/remove" : "/background/replace";
+      btn.textContent = "Creating job…";
+      const result = await apiFetch("/api/v2" + route, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": uuid4(),
+        },
+        body: JSON.stringify(body),
+      });
+
+      startTrackingJob(result.job_id);
+    } catch (err) {
+      showCallError(errorEl, err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Presign, upload & submit";
+    }
+  });
+
   // --- Job tracking / polling -------------------------------------------
 
   let pollTimer = null;
@@ -570,18 +697,24 @@
     badge.textContent = job.status;
     badge.className = "status-badge status-" + job.status;
     $("job-counts").textContent =
+      (job.operation || "ANGLE_GENERATION") + " · " +
       job.succeeded_angles + " succeeded / " + job.failed_angles + " failed / " +
       job.requested_angles + " requested" + (job.sku_reference ? " · " + job.sku_reference : "");
 
+    // Read `operation` first — an ANGLE_GENERATION job populates `angles`,
+    // a background job populates `results` instead (one element, no
+    // `angle` field of its own). See docs/api-routes.md.
     const grid = $("job-angles");
     grid.innerHTML = "";
-    job.angles.forEach((a) => grid.appendChild(renderAngleResult(job.job_id, a)));
+    const items = job.operation && job.operation !== "ANGLE_GENERATION" ? (job.results || []) : (job.angles || []);
+    items.forEach((item) => grid.appendChild(renderResultCard(job.job_id, item)));
   }
 
-  function renderAngleResult(jobId, a) {
+  function renderResultCard(jobId, a) {
     const card = document.createElement("div");
     card.className = "angle-card";
-    let html = "<h3>" + a.angle +
+    const label = a.angle || "output";
+    let html = "<h3>" + label +
       (a.synthetic ? ' <span class="hint">(synthetic)</span>' : "") + "</h3>";
     html += '<span class="status-badge status-' + a.status + '">' + a.status + "</span>";
 
@@ -600,7 +733,7 @@
     if (a.status === "COMPLETED" && a.image_url) {
       const img = document.createElement("img");
       img.src = a.image_url;
-      img.alt = a.angle + " output";
+      img.alt = label + " output";
       card.appendChild(img);
     }
 
@@ -608,19 +741,19 @@
       const retryBtn = document.createElement("button");
       retryBtn.className = "small secondary";
       retryBtn.style.marginTop = "8px";
-      retryBtn.textContent = "Retry " + a.angle;
-      retryBtn.addEventListener("click", () => retryAngle(jobId, a.angle, retryBtn));
+      retryBtn.textContent = "Retry " + label;
+      retryBtn.addEventListener("click", () => retryItem(jobId, a.retry_url, retryBtn));
       card.appendChild(retryBtn);
     }
 
     return card;
   }
 
-  async function retryAngle(jobId, angle, btn) {
+  async function retryItem(jobId, retryUrl, btn) {
     btn.disabled = true;
     btn.textContent = "Retrying…";
     try {
-      await apiFetch("/api/v2/jobs/" + jobId + "/angles/" + angle + "/retry", {
+      await apiFetch(retryUrl, {
         method: "POST",
         headers: { "Idempotency-Key": uuid4() },
       });
@@ -634,6 +767,7 @@
   // --- Init ---------------------------------------------------------
 
   renderSeedList();
+  updatePresetVisibility(); // independent of config load succeeding
   loadConfig();
 
   const deepLinkedJobId = jobIdFromUrl();

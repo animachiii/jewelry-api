@@ -46,6 +46,49 @@ Image bytes never pass through the API — you PUT directly to the signed
 `upload_url` from `/uploads/presign`, then quote the returned `storage_path`
 back on `/generate`.
 
+## 2b. Background operations (Phase 15)
+
+`BACKGROUND_REMOVAL` and `BACKGROUND_REPLACEMENT` are a separate, simpler
+lifecycle — one photo in, one photo out, no category or angles involved:
+
+```
+POST /uploads/presign  { "operation": "BACKGROUND_REMOVAL" }  → operation_upload
+PUT  <upload_url>       → same direct-to-Storage upload as the angle flow
+POST /background/remove  { storage_path, sku_reference?, metadata? }
+  -- or --
+POST /background/replace { storage_path, preset_code, sku_reference?, metadata? }
+GET  /status/{job_id}   → poll until terminal, same as the angle flow
+POST /jobs/{job_id}/retry → only for a FAILED (not REJECTED) job — no {angle} segment
+```
+
+`preset_code` for `/background/replace` must be one of `GET /config`'s
+`background_presets` (`code` + `name` only — render it as a picker).
+
+**Read `operation` first.** `GET /status/{job_id}` now returns an `operation`
+field on every job (`ANGLE_GENERATION` | `BACKGROUND_REMOVAL` |
+`BACKGROUND_REPLACEMENT`) — check it before deciding whether to read `angles`
+or `results`:
+
+- `operation: "ANGLE_GENERATION"` → read `angles` exactly as before. This is
+  unchanged from what you already integrated against — `results` will be `[]`.
+- `operation: "BACKGROUND_REMOVAL"` or `"BACKGROUND_REPLACEMENT"` → read
+  `results` instead (one element — a background job has exactly one output).
+  `angles` will be `[]`. Each item in `results` carries the same fields an
+  angle status does (`status`, `source_type`, `image_url`, `qa_status`,
+  `qa_score`, `failure_class`, `error_message`, `retryable`, `retry_url`)
+  **except `angle` itself** — there isn't one.
+- A `QA_REVIEW` result (or angle) means the job is still processing from your
+  point of view — **do not render it as an error.** It means a human is
+  reviewing it; keep polling. Background operations pass through `QA_REVIEW`
+  on every successful generation, not just occasionally.
+- `retryable`/`retry_url` on a `results` item point at
+  `POST /jobs/{job_id}/retry` (no `{angle}` segment), not the angle retry
+  route.
+
+Everything else — polling strategy, `PARTIAL_SUCCESS` handling (structurally
+unreachable for a background job, since it only ever has one sub-job),
+signed URL expiry, error-code table — is identical to the angle flow below.
+
 ## 3. Polling strategy
 
 - Honor the `Retry-After` header (seconds) on non-terminal `GET /status`
@@ -113,6 +156,10 @@ your own tests, though normally you'll just re-poll before this happens).
 | `SUBJOB_NOT_RETRYABLE` | 409 | Angle isn't `FAILED` | Hide/disable the retry button; refresh status |
 | `RETRY_LIMIT_EXCEEDED` | 409 | 3 retries already used | Show a permanent failure state, no more retries |
 | `INPUT_ASSET_EXPIRED` | 409 | Source photo past the 90-day retention window | Prompt to submit a brand-new job |
+| `OPERATION_DISABLED` | 422 | Background operation not enabled in config | Form validation error — hide that operation option |
+| `PRESET_NOT_FOUND` | 422 | Unknown `preset_code` | Form validation error — refresh `GET /config`'s preset list |
+| `PRESET_INACTIVE` | 422 | `preset_code` exists but is no longer active | Form validation error — refresh the preset list |
+| `ANGLE_JOB_RETRY_NOT_ALLOWED` | 409 | Called `/jobs/{job_id}/retry` on an angle job | Client bug — use `/jobs/{job_id}/angles/{angle}/retry` instead |
 | `RATE_LIMIT_EXCEEDED` | 429 | Too many requests | Back off and retry after the `Retry-After` header |
 | `QUOTA_EXCEEDED` | 429 | Daily job quota hit | Show a quota-exhausted message, don't auto-retry |
 | `CONFIG_UNAVAILABLE` | 503 | No active config version | Transient — retry with backoff |

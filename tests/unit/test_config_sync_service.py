@@ -103,3 +103,40 @@ def test_normalize_sheet_rows_is_stable_under_row_reordering() -> None:
     payload_a = normalize_sheet_rows(SheetRows(_VALID_ANGLE_ROWS, _VALID_GLOBAL_ROWS))
     payload_b = normalize_sheet_rows(SheetRows(reordered, _VALID_GLOBAL_ROWS))
     assert compute_source_hash(payload_a) == compute_source_hash(payload_b)
+
+
+def test_normalize_sheet_rows_carries_operations_and_presets_through_untouched() -> None:
+    """Phase 15 Step 3 — the real Sheet has no Global tab, so `operations`
+    and `background_presets` (migration 0007) can only ever survive a sync
+    via the same `inherited_global` carry-forward that already protects
+    `unit_cost_usd` (Phase 6/13). Neither key is modeled by this function at
+    all — this pins that they ride along unchanged rather than getting
+    silently dropped, the exact regression risk the phase file calls out.
+    """
+    inherited_global = {
+        "model_version": "gemini-3.1-flash-image",
+        "qa_similarity_threshold": 0.82,
+        "unit_cost_usd": 0.02,
+        "operations": {
+            "BACKGROUND_REMOVAL": {"enabled": True, "prompt": "remove it", "unit_cost_usd": 0.02},
+            "BACKGROUND_REPLACEMENT": {"enabled": True, "unit_cost_usd": 0.02},
+        },
+        "background_presets": [
+            {
+                "code": "STUDIO_WHITE",
+                "name": "Studio White",
+                "prompt": "white backdrop",
+                "reference_image_urls": [],
+                "is_active": True,
+            }
+        ],
+    }
+
+    payload = normalize_sheet_rows(
+        SheetRows(_VALID_ANGLE_ROWS, _VALID_GLOBAL_ROWS), inherited_global
+    )
+
+    assert payload["global"]["operations"] == inherited_global["operations"]
+    assert payload["global"]["background_presets"] == inherited_global["background_presets"]
+    # Sheet-driven keys still apply on top of the inherited block.
+    assert payload["global"]["model_version"] == "gemini-2.5-flash-image-preview"

@@ -44,6 +44,11 @@ PENDING ──► SKIPPED  (set at creation, never transitions)
   score falls below threshold. Above threshold, go straight to `COMPLETED`.
   Real-photo (`UPLOADED`) sub-jobs have no QA gate at all — see
   `docs/ai-integration.md`.
+- **Exception — background operations (§13, Phase 15):** a `BACKGROUND_REMOVAL` /
+  `BACKGROUND_REPLACEMENT` sub-job is always `UPLOADED`, but unlike Mode A angle
+  generation it **always** enters `QA_REVIEW` on success, never straight
+  `COMPLETED` — the subject-preservation gate applies unconditionally, not only to
+  `SYNTHETIC` sub-jobs.
 
 ---
 
@@ -55,6 +60,9 @@ Recomputed after every sub-job terminal transition, inside the same transaction.
 `app/services/generation_service.py::transform_photo` (Phase 7) — per-transition,
 not via a Celery chord; see `phases/phase-7-orchestration.md`'s reality-check
 section for why a chord doesn't match "the same transaction" above.
+`compute_parent_status` itself is operation-agnostic (pure function over
+requested/succeeded/failed counts) — `app/services/background_service.py::process`
+(Phase 15) calls the same function, unmodified.
 
 Let `R` = requested (non-skipped) sub-jobs, `S` = succeeded (`COMPLETED`),
 `F` = failed (`FAILED` + `REJECTED`).
@@ -70,7 +78,9 @@ Let `R` = requested (non-skipped) sub-jobs, `S` = succeeded (`COMPLETED`),
 job back to `PROCESSING`.
 
 A single-angle job that fails is `FAILED`, not `PARTIAL_SUCCESS`. Partial success requires
-at least one success and at least one failure.
+at least one success and at least one failure. A background-operation job (§13) always
+has `R = 1` for the same reason — `PARTIAL_SUCCESS` is unreachable for it, by
+construction, not by a special case.
 
 ---
 
@@ -101,7 +111,10 @@ and `retryable: false`. The ERP must not render a retry button for these.
 
 ## 5. Retry rules
 
-- Retry operates on a **single angle**, never a whole job.
+- Retry operates on a **single angle** (`POST /jobs/{job_id}/angles/{angle}/retry`) or,
+  for a background-operation job, its one sub-job
+  (`POST /jobs/{job_id}/retry` — Phase 15, §13). Never a whole angle job.
+  `POST /jobs/{job_id}/retry` returns `409` if called on an `ANGLE_GENERATION` job.
 - Maximum **3 client-initiated retries** per sub-job (`attempt_count` ceiling). The fourth
   request returns `409`.
 - Retry requires the sub-job to be in `FAILED`. `REJECTED`, `COMPLETED`, and in-flight
@@ -215,3 +228,51 @@ row whose bytes are gone still answers "what did we produce for this SKU."
 - All image URLs are **signed, 1-hour TTL**, generated fresh on every status read.
 - Signed URLs are never persisted to the database and never written to logs.
 - Buckets are private. There is no public read path.
+
+---
+
+## 13. Background operations (Phase 15)
+
+`BACKGROUND_REMOVAL` and `BACKGROUND_REPLACEMENT` are one-image-in/one-image-out
+operations independent of the four-angle flow — `POST /background/remove`,
+`POST /background/replace`. See `phases/phase-15-background-operations.md` and
+`docs/decisions/0002-background-removal-approach.md`.
+
+**Operation matrix** — both go through the same `GeminiProvider` seam Mode A angle
+generation uses, unmodified:
+
+| Operation | Input | Prompt source | Output |
+| :--- | :--- | :--- | :--- |
+| `BACKGROUND_REMOVAL` | One uploaded photo | `config.global.operations.BACKGROUND_REMOVAL.prompt` | Product on a flat/solid background — **no alpha channel**. "Removal" means standardisation, not a transparent cutout. |
+| `BACKGROUND_REPLACEMENT` | One uploaded photo + `preset_code` | operation prompt + the pinned preset's own prompt (`config.global.background_presets`), concatenated | Product on the requested backdrop |
+
+- Category rules (§1) do not apply — a background job has `category_code: NULL`
+  (migration 0008) and no angle (`sub_jobs.angle IS NULL`, migration 0006).
+- `requested_angles` is always `1` for a background job — see §3's note. This is why
+  `PARTIAL_SUCCESS` is structurally unreachable for one, not a gap in the rollup logic.
+- `POST /background/replace` requires `preset_code` to name an **active** preset in the
+  pinned config version (`GET /config`'s `background_presets`) — `422 PRESET_NOT_FOUND`
+  / `422 PRESET_INACTIVE` otherwise.
+- `operations.<OP>.enabled` gates both routes — `422 OPERATION_DISABLED` if `false` or
+  absent.
+- `unit_cost_usd` resolves per-operation
+  (`config.global.operations.<OP>.unit_cost_usd`), falling back to
+  `config.global.unit_cost_usd` when the operation doesn't set its own — same rule
+  §10 states for angle generation, never a hardcoded rate.
+
+**Subject-preservation QA gate.** Unlike Mode A angle generation (§6/§7: no QA gate on
+real-photo angles, an accepted risk), a background operation's success **always**
+enters `QA_REVIEW` — the cutout/composite *is* the product, so an unchecked drift is
+unacceptable here in a way it wasn't for Mode A. Reuses Phase 9's QA machinery
+(`app/services/qa_service.py::score_background_operation`), but the reference is the
+**input photo itself**, not a category reference matrix — "same object, new
+background" is what's being judged, not "novel view of the same object." Threshold is
+`config.global.background_qa_similarity_threshold` (migration 0010), a separate,
+independently-tunable value from `qa_similarity_threshold` and expected higher
+(placeholder `0.92`, uncalibrated — same status as `qa_similarity_threshold` itself).
+Flagged items appear in `GET /qa/review-queue` with `operation` set and
+`angle`/`category_code` `null`.
+
+**Retry.** `POST /jobs/{job_id}/retry` — see §5. Reuses `retry_service.execute_retry`
+and `job_service.check_retry_preconditions` unmodified; `409 ANGLE_JOB_RETRY_NOT_ALLOWED`
+on an `ANGLE_GENERATION` job.

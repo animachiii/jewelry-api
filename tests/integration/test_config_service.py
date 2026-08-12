@@ -163,12 +163,26 @@ async def test_cache_hit_serves_cached_payload_without_matching_postgres(
 
 
 async def test_config_never_exposes_prompts_or_reference_urls(
-    client: AsyncClient, client_key: str
+    client: AsyncClient, client_key: str, active_config: ConfigVersion
 ) -> None:
+    """Phase 15 Step 3 — CATEGORY_PAYLOAD (scripts/seed_dev.py) now includes
+    a STUDIO_WHITE background preset with a real `prompt` field, so this
+    extends the existing angle-prompt leak check to cover preset prompts
+    too, the exact case the phase file's Checkpoint 3 asks for.
+    """
     resp = await client.get("/api/v2/config", headers={"X-API-Key": client_key})
     body = resp.text
     assert "prompt" not in body
     assert "reference_image_urls" not in body
+
+
+async def test_config_exposes_active_preset_code_and_name_only(
+    client: AsyncClient, client_key: str, active_config: ConfigVersion
+) -> None:
+    resp = await client.get("/api/v2/config", headers={"X-API-Key": client_key})
+    assert resp.status_code == 200, resp.text
+    presets = resp.json()["background_presets"]
+    assert presets == [{"code": "STUDIO_WHITE", "name": "Studio White"}]
 
 
 # --- POST /internal/config/sync ---------------------------------------------

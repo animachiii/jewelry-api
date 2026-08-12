@@ -7,7 +7,7 @@ read is exactly what production does; settings.MOCK_MODE no longer gates
 either route.
 """
 
-from app.api.v2.schemas.status import AngleStatus, JobStatusResponse
+from app.api.v2.schemas.status import AngleStatus, BackgroundResultStatus, JobStatusResponse
 from app.db.models.enums import FailureClass, JobStatus, SourceType, SubJobStatus
 from app.db.models.jobs import Job, SubJob
 from app.services import storage_service
@@ -26,6 +26,11 @@ _NON_TERMINAL_STATUSES = {JobStatus.PENDING, JobStatus.PROCESSING}
 def build_angle_status(
     job: Job, sub_job: SubJob, output_bucket_and_path: tuple[str, str] | None
 ) -> AngleStatus:
+    # Angle-jobs only — Phase 15 background jobs get their own `results`
+    # builder, `angles` stays exactly as it was before that phase (an
+    # additive-only status change, see
+    # phases/phase-15-background-operations.md Step 4).
+    assert sub_job.angle is not None
     # docs/business-rules.md §5: a sub-job at the retry ceiling must not be
     # offered a retry_url even if its failure_class is otherwise retryable —
     # see phases/phase-8-failure-retry.md Step 1 (a gap found in this
@@ -58,13 +63,49 @@ def build_angle_status(
     )
 
 
+def build_background_result_status(
+    job: Job, sub_job: SubJob, output_bucket_and_path: tuple[str, str] | None
+) -> BackgroundResultStatus:
+    """Mirrors build_angle_status exactly, minus the angle field and its
+    `/angles/{angle}/retry` URL — a background job's retry route is the
+    job-level `POST /jobs/{job_id}/retry` (Step 4), not an angle route.
+    """
+    assert sub_job.angle is None
+
+    retryable = (
+        sub_job.status == SubJobStatus.FAILED
+        and sub_job.failure_class in _RETRYABLE_FAILURE_CLASSES
+        and sub_job.attempt_count < MAX_RETRY_ATTEMPTS
+    )
+
+    image_url: str | None = None
+    if sub_job.status == SubJobStatus.COMPLETED and output_bucket_and_path is not None:
+        bucket, path = output_bucket_and_path
+        image_url = storage_service.generate_signed_url(bucket, path)
+
+    return BackgroundResultStatus(
+        status=sub_job.status,
+        source_type=sub_job.source_type,
+        synthetic=sub_job.source_type == SourceType.SYNTHETIC,
+        image_url=image_url,
+        qa_status=sub_job.qa_status,
+        qa_score=float(sub_job.qa_score) if sub_job.qa_score is not None else None,
+        failure_class=sub_job.failure_class,
+        error_message=sub_job.error_message,
+        retryable=retryable,
+        retry_url=(f"/api/v2/jobs/{job.id}/retry" if retryable else None),
+    )
+
+
 def build_job_status_response(
     job: Job,
     angle_statuses: list[AngleStatus],
+    result_statuses: list[BackgroundResultStatus] | None = None,
 ) -> JobStatusResponse:
     return JobStatusResponse(
         job_id=str(job.id),
         status=job.status,
+        operation=job.operation,
         category_code=job.category_code,
         requested_angles=job.requested_angles,
         succeeded_angles=job.succeeded_angles,
@@ -73,6 +114,7 @@ def build_job_status_response(
         created_at=job.created_at,
         completed_at=job.completed_at,
         angles=angle_statuses,
+        results=result_statuses or [],
     )
 
 
