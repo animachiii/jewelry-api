@@ -27,7 +27,13 @@ services:
       - key: MOCK_MODE
         value: "false"
       - key: IO_QUEUE_CONCURRENCY
-        value: "4"
+        value: "1"
+      # Dropped from 4 (2026-08-12): the free instance's 512MB total is
+      # shared by every process render_start.sh starts (beat + worker
+      # MainProcess + N forked prefork children + uvicorn) -- 4 children was
+      # enough on its own, before any lazy-imported SDK weight, to OOM-kill
+      # the whole container roughly every 15-30 min. See render_start.sh's
+      # --max-tasks-per-child comment for the other half of this fix.
       # DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY, REDIS_URL,
       # CELERY_BROKER_URL, CELERY_RESULT_BACKEND, GEMINI_API_KEY,
       # GOOGLE_SERVICE_ACCOUNT_JSON, SENTRY_DSN are secrets — set them in
