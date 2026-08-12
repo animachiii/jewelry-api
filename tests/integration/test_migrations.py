@@ -13,6 +13,7 @@ internally, which raises if called from inside an already-running event loop
 """
 
 import asyncio
+import json
 
 import pytest
 from alembic import command
@@ -99,3 +100,104 @@ def test_0004_adds_and_removes_assets_purged_at(
     assert "purged_at" not in asyncio.run(_columns(async_url, "assets"))
 
     command.upgrade(cfg, "head")
+
+
+async def _seed_active_config_version(async_url: str, model_version: str) -> None:
+    engine = create_async_engine(async_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO config_versions
+                        (id, version_number, source_hash, payload, sync_status,
+                         is_active, synced_at, activated_at)
+                    VALUES (gen_random_uuid(), 1, 'seed-hash',
+                            CAST(:payload AS jsonb), 'SUCCESS', true, now(), now())
+                    """
+                ),
+                {
+                    "payload": json.dumps(
+                        {"categories": [], "global": {"model_version": model_version}}
+                    )
+                },
+            )
+    finally:
+        await engine.dispose()
+
+
+async def _active_config_version(async_url: str) -> dict[str, object]:
+    engine = create_async_engine(async_url)
+    try:
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                text(
+                    "SELECT version_number, payload::text AS payload_text "
+                    "FROM config_versions WHERE is_active = true"
+                )
+            )
+            row = result.mappings().first()
+            assert row is not None
+            return dict(row)
+    finally:
+        await engine.dispose()
+
+
+def test_0005_fixes_gemini_model_version(
+    postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Corrects the 404-ing `gemini-2.5-flash-image-preview` model string
+    without mutating the existing row (CLAUDE.md Hard Rule 11) — see the
+    migration's own docstring for the live incident this fixes."""
+    async_url = postgres_container.get_connection_url()
+    monkeypatch.setattr("app.config.settings.DATABASE_URL", async_url)
+
+    async def _reset_schema() -> None:
+        engine = create_async_engine(async_url)
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+        await engine.dispose()
+
+    asyncio.run(_reset_schema())
+
+    cfg = Config("alembic.ini")
+
+    command.upgrade(cfg, "0004")
+    asyncio.run(_seed_active_config_version(async_url, "gemini-2.5-flash-image-preview"))
+
+    command.upgrade(cfg, "0005")
+    active = asyncio.run(_active_config_version(async_url))
+    assert active["version_number"] == 2
+    payload = json.loads(active["payload_text"])  # type: ignore[arg-type]
+    assert payload["global"]["model_version"] == "gemini-3.1-flash-image"
+
+    command.downgrade(cfg, "0004")
+    reverted = asyncio.run(_active_config_version(async_url))
+    assert reverted["version_number"] == 1
+    reverted_payload = json.loads(reverted["payload_text"])  # type: ignore[arg-type]
+    assert reverted_payload["global"]["model_version"] == "gemini-2.5-flash-image-preview"
+
+    command.upgrade(cfg, "head")
+
+
+def test_0005_is_a_noop_with_no_active_config_version(
+    postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fresh/CI databases have no seeded config_versions row at all — the
+    migration must not error just because production has data and CI
+    doesn't."""
+    async_url = postgres_container.get_connection_url()
+    monkeypatch.setattr("app.config.settings.DATABASE_URL", async_url)
+
+    async def _reset_schema() -> None:
+        engine = create_async_engine(async_url)
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+        await engine.dispose()
+
+    asyncio.run(_reset_schema())
+
+    cfg = Config("alembic.ini")
+    command.upgrade(cfg, "head")  # must not raise
