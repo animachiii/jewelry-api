@@ -22,7 +22,16 @@ celery -A app.workers.celery_app beat &
 BEAT_PID=$!
 
 echo "Starting celery worker..."
-celery -A app.workers.celery_app worker -Q io -c "${IO_QUEUE_CONCURRENCY:-4}" --hostname=worker@%h &
+# --max-tasks-per-child: gemini.py and sheets.py both defer their SDK imports
+# (google-genai, googleapiclient/google-auth) to first real call rather than
+# module load, so whichever forked child first runs a generation or config
+# sync task permanently grows by that import's footprint -- prefork children
+# are never re-exec'd, only forked once at worker startup. On the free
+# tier's 512MB total, that accumulation across repeated config.sync ticks is
+# what was OOM-killing the whole container (beat+worker+uvicorn share one
+# process tree, see the `wait -n` below). Recycling the child periodically
+# bounds it the same way a memory leak is bounded by process restarts.
+celery -A app.workers.celery_app worker -Q io -c "${IO_QUEUE_CONCURRENCY:-4}" --max-tasks-per-child=20 --hostname=worker@%h &
 WORKER_PID=$!
 
 cleanup() {
