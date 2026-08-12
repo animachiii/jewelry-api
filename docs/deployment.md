@@ -90,6 +90,7 @@ useful in production.
 | `CONFIG_SYNC_CRON` | Default is fine |
 | `GEMINI_API_KEY` | (has a default, but production needs a real value — no real key has existed in any environment through Phase 9) |
 | `GEMINI_RATE_LIMIT_PER_MINUTE` | Default `60` is fine to start |
+| `GEMINI_REQUEST_TIMEOUT_SECONDS` | Default `120` is fine to start — bounds a hung/slow Gemini call so it can't block the whole worker indefinitely (see `app/providers/gemini.py`) |
 | `SENTRY_DSN` | (has a default; empty means no error reporting — fine to leave empty until Phase 11 is built) |
 
 `rediss://` (TLS) is Upstash's URL scheme — `redis.asyncio.from_url`

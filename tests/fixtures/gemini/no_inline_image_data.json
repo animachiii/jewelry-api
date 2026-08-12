@@ -1,0 +1,16 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I'm not able to generate an image for this request right now.",
+            "inline_data": null
+          }
+        ]
+      },
+      "finish_reason": "STOP"
+    }
+  ],
+  "model_version": "gemini-3.1-flash-image"
+}
