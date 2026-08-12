@@ -22,6 +22,7 @@ tests/unit/test_config_sync_service.py).
 """
 
 import asyncio
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import pytest
@@ -37,13 +38,24 @@ from app.workers import config as config_worker
 pytestmark = pytest.mark.integration
 
 
-def _prepare_database(async_url: str) -> None:
-    async def _setup() -> None:
+def _reset_schema(async_url: str) -> None:
+    async def _run() -> None:
         engine = create_async_engine(async_url)
         try:
             async with engine.begin() as conn:
                 await conn.execute(text("DROP SCHEMA public CASCADE"))
                 await conn.execute(text("CREATE SCHEMA public"))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_run())
+
+
+def _prepare_database(async_url: str) -> None:
+    async def _setup() -> None:
+        engine = create_async_engine(async_url)
+        try:
+            async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
 
             factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -65,23 +77,45 @@ def _prepare_database(async_url: str) -> None:
         finally:
             await engine.dispose()
 
+    _reset_schema(async_url)
     asyncio.run(_setup())
 
 
-def test_sync_task_survives_repeated_ticks_in_one_process(
+@pytest.fixture
+def seeded_database(
     postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Reproduces both the cross-loop RuntimeError from the shared session
-    factory and the `RuntimeError('Event loop is closed')` from the cached
-    process-wide Redis client. The second invocation is the one that used to
-    die -- and because the error escaped the task body rather than going
-    through generation_service's handling, the live sub-job was orphaned at
-    GENERATING rather than landing on FAILED.
+) -> Iterator[str]:
+    """Seeds a clean schema and — crucially — tears it back down.
+
+    `postgres_container` is session-scoped and shared with every other
+    integration test, and this module manages its own schema rather than
+    going through the per-test `db_engine` fixture (it needs a plain `def`
+    test, which cannot use async fixtures). Leaving the seeded
+    `config_versions` row behind made `test_cost_service.py` fail on a
+    duplicate `version_number=1` — so this resets the schema on the way out
+    as well as on the way in.
     """
     async_url = postgres_container.get_connection_url()
     monkeypatch.setattr("app.config.settings.DATABASE_URL", async_url)
     _prepare_database(async_url)
+    try:
+        yield async_url
+    finally:
+        _reset_schema(async_url)
 
+
+def test_sync_task_survives_repeated_ticks_in_one_process(seeded_database: str) -> None:
+    """Guards the shared-import-time-session-factory regression: reverting
+    `_run_sync` to `app.db.session.async_session_factory` fails this test
+    (verified locally). Note that factory ignores the monkeypatched
+    `DATABASE_URL` entirely -- it binds at import — which is exactly why the
+    old code reached the *production* database from a test run.
+
+    Redis's own closed-loop failure is covered separately in
+    test_worker_event_loop_lifecycle.py: with Sheets unconfigured,
+    `sync_config` returns before ever touching Redis, so this test cannot
+    reach it.
+    """
     first = config_worker.sync()
     assert first == "version=1 status=SUCCESS"
 
