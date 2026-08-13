@@ -161,6 +161,7 @@ CATEGORY_PAYLOAD = {
             "BACKGROUND_REPLACEMENT": {
                 "enabled": True,
                 "unit_cost_usd": 0.02,
+                # Placeholder, not calibrated — see migration 0012.
                 "custom_background_prompt": (
                     "Place the product naturally into the supplied background photo, "
                     "as if it were physically photographed in that scene. Match the "
