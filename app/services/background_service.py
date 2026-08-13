@@ -70,11 +70,27 @@ def _resolve_prompt(config_version: ConfigVersion, job: Job) -> str:
     appends its pinned preset's own prompt (docs/schema.md payload shape,
     Step 3). `job.preset_code` is durable (migration 0009) — the worker
     can't re-derive it from anywhere else.
+
+    TEMPORARY, custom-background stopgap: `job.preset_code` is now genuinely
+    `None` for a BACKGROUND_REPLACEMENT job that used an uploaded background
+    photo instead of a preset (see job_service.py's mutual-exclusivity
+    validator and docs/superpowers/specs/2026-08-13-custom-background-compositing-design.md).
+    The old unconditional `assert job.preset_code is not None` here would
+    crash — worse than an HTTP error, since the exception escapes this
+    function before `process()`'s own try/except around the provider call,
+    leaving the sub-job orphaned at GENERATING (same failure shape documented
+    for the Redis-singleton bug elsewhere in this codebase's history). This
+    function doesn't yet know how to build the real custom-background prompt
+    (`operations.BACKGROUND_REPLACEMENT.custom_background_prompt`, seeded by
+    migration 0012) — that wiring, plus sending the background photo itself
+    as a second reference image, is the very next task. Falling back to the
+    bare operation prompt here is a deliberate, minimal placeholder so the
+    worker completes safely (as a single-image job) instead of orphaning the
+    sub-job — not the real compositing behavior.
     """
     op_config = find_operation_config(config_version, job.operation) or {}
     prompt = str(op_config.get("prompt", ""))
-    if job.operation == Operation.BACKGROUND_REPLACEMENT:
-        assert job.preset_code is not None  # enforced at job-creation time (Step 4)
+    if job.operation == Operation.BACKGROUND_REPLACEMENT and job.preset_code is not None:
         preset = find_preset(config_version, job.preset_code)
         assert preset is not None  # validated at job-creation time; config is pinned, immutable
         prompt = f"{prompt} {preset['prompt']}".strip()

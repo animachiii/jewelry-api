@@ -30,9 +30,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.api_clients import ApiClient
+from app.db.models.assets import Asset
 from app.db.models.config_versions import ConfigVersion
 from app.db.models.cost_events import CostEvent
 from app.db.models.enums import (
+    AssetKind,
     FailureClass,
     JobStatus,
     Operation,
@@ -417,6 +419,49 @@ async def test_replace_background_custom_background_owned_by_other_client(
     )
     assert resp.status_code == 422, resp.text
     assert resp.json()["error"]["code"] == "ASSET_NOT_OWNED"
+
+
+async def test_replace_background_custom_background_creates_and_links_asset(
+    client: AsyncClient, api_client_key: str, db_session: AsyncSession
+) -> None:
+    """Service-layer proof, independent of the worker: create_background_job_for_request
+    (Task 6) itself validates, persists, and links the uploaded background photo —
+    this must hold even before the worker (Task 7) does anything with it. Under
+    task_always_eager the job still runs to completion here since
+    background_service.process doesn't look at background_asset_id yet (confirmed
+    separately) — it just ignores it and produces a normal single-image result,
+    which is why this test can assert COMPLETED the same way the preset-based
+    happy path does, without needing Task 7's changes.
+    """
+    storage_path, background_storage_path = (
+        await _presign_and_upload_replacement_with_custom_background(client, api_client_key)
+    )
+
+    resp = await client.post(
+        "/api/v2/background/replace",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "replace-custom-bg-link-1"},
+        json={"storage_path": storage_path, "background_storage_path": background_storage_path},
+    )
+    assert resp.status_code == 202, resp.text
+    job_id = uuid.UUID(resp.json()["job_id"])
+
+    job = (await db_session.execute(select(Job).where(Job.id == job_id))).scalar_one()
+    assert job.operation == Operation.BACKGROUND_REPLACEMENT
+    assert job.preset_code is None
+    assert job.status == JobStatus.COMPLETED
+
+    sub_job = (
+        await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))
+    ).scalar_one()
+    assert sub_job.background_asset_id is not None
+
+    background_asset = (
+        await db_session.execute(select(Asset).where(Asset.id == sub_job.background_asset_id))
+    ).scalar_one()
+    assert background_asset.job_id == job.id
+    assert background_asset.kind == AssetKind.INPUT
+    assert background_asset.storage_path == background_storage_path
+    assert background_asset.expires_at is not None  # retention_policy applied here too
 
 
 async def test_remove_background_disabled_operation_422(
