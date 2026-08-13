@@ -436,6 +436,44 @@ async def test_replace_background_inactive_preset_422(
     assert resp.json()["error"]["code"] == "PRESET_INACTIVE"
 
 
+async def test_replace_background_rejects_both_preset_and_custom_background(
+    client: AsyncClient, api_client_key: str
+) -> None:
+    storage_path = await _presign_and_upload_operation(
+        client, api_client_key, "BACKGROUND_REPLACEMENT"
+    )
+    resp = await client.post(
+        "/api/v2/background/replace",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "replace-both-1"},
+        json={
+            "storage_path": storage_path,
+            "preset_code": "STUDIO_WHITE",
+            "background_storage_path": "pending/x/y/z/background_1.jpg",
+        },
+    )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert "exactly one of preset_code or background_storage_path" in body["error"]["message"]
+
+
+async def test_replace_background_rejects_neither_preset_nor_custom_background(
+    client: AsyncClient, api_client_key: str
+) -> None:
+    storage_path = await _presign_and_upload_operation(
+        client, api_client_key, "BACKGROUND_REPLACEMENT"
+    )
+    resp = await client.post(
+        "/api/v2/background/replace",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "replace-neither-1"},
+        json={"storage_path": storage_path},
+    )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert "exactly one of preset_code or background_storage_path" in body["error"]["message"]
+
+
 # --- GET /status/{job_id} -------------------------------------------------
 
 

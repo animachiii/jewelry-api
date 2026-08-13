@@ -192,14 +192,32 @@
       "BackgroundReplaceRequest": {
         "additionalProperties": false,
         "properties": {
+          "background_storage_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Background Storage Path"
+          },
           "metadata": {
             "additionalProperties": true,
             "title": "Metadata",
             "type": "object"
           },
           "preset_code": {
-            "title": "Preset Code",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset Code"
           },
           "sku_reference": {
             "anyOf": [
@@ -218,8 +236,7 @@
           }
         },
         "required": [
-          "storage_path",
-          "preset_code"
+          "storage_path"
         ],
         "title": "BackgroundReplaceRequest",
         "type": "object"
