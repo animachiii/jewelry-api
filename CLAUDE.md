@@ -725,5 +725,7 @@ with a second reference image appended
 (`app/providers/gemini.py::GeminiProvider.generate` already accepted a
 `reference_images: list[bytes]` — no provider change needed). New nullable
 `sub_jobs.background_asset_id` (migration 0011) and a seeded
-`custom_background_prompt` (migration 0012). Does not reopen decision 0002 —
-still no alpha channel, still one flattened image out.
+`custom_background_prompt` (migration 0012, placeholder/uncalibrated content —
+same status as `qa_similarity_threshold` and the other Phase 15 seed values
+above). Does not reopen decision 0002 — still no alpha channel, still one
+flattened image out.

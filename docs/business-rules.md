@@ -246,11 +246,12 @@ generation uses, unmodified:
 | `BACKGROUND_REMOVAL` | One uploaded photo | `config.global.operations.BACKGROUND_REMOVAL.prompt` | Product on a flat/solid background — **no alpha channel**. "Removal" means standardisation, not a transparent cutout. |
 | `BACKGROUND_REPLACEMENT` | One uploaded photo + (`preset_code` **or** `background_storage_path`) | operation prompt + either the pinned preset's own prompt, or (custom background) `config.global.operations.BACKGROUND_REPLACEMENT.custom_background_prompt` | Product on the requested backdrop |
 
-**Custom-background compositing** (added 2026-08-13): `background_storage_path`
-is a client-uploaded background photo used instead of a preset — mutually
-exclusive with `preset_code` on the same request. The subject-preservation QA
-gate above still applies unconditionally and its reference is still the
-**product** input photo, never the background photo.
+**Custom-background compositing** (added 2026-08-13): the subject-preservation
+QA gate above still applies unconditionally to a custom-background job exactly
+as it does to a preset-based one, and its reference is still the **product**
+input photo, never the background photo. `custom_background_prompt` is
+placeholder/uncalibrated content, same status as `qa_similarity_threshold` and
+`background_qa_similarity_threshold`.
 
 - Category rules (§1) do not apply — a background job has `category_code: NULL`
   (migration 0008) and no angle (`sub_jobs.angle IS NULL`, migration 0006).
