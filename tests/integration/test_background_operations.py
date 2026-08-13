@@ -369,6 +369,56 @@ async def test_remove_background_storage_path_owned_by_other_client(
     assert resp.json()["error"]["code"] == "ASSET_NOT_OWNED"
 
 
+async def _presign_and_upload_replacement_with_custom_background(
+    client: AsyncClient, key: str
+) -> tuple[str, str]:
+    resp = await client.post(
+        "/api/v2/uploads/presign",
+        headers={"X-API-Key": key},
+        json={"operation": "BACKGROUND_REPLACEMENT", "include_background_upload": True},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    product_upload = body["operation_upload"]
+    background_upload = body["background_upload"]
+    assert background_upload is not None
+
+    put_resp = httpx.put(
+        product_upload["upload_url"],
+        content=_real_jpeg_bytes(),
+        headers={"Content-Type": "image/jpeg"},
+    )
+    assert put_resp.status_code == 200
+    bg_put_resp = httpx.put(
+        background_upload["upload_url"],
+        content=_real_jpeg_bytes(size=(48, 32)),
+        headers={"Content-Type": "image/jpeg"},
+    )
+    assert bg_put_resp.status_code == 200
+    return str(product_upload["storage_path"]), str(background_upload["storage_path"])
+
+
+async def test_replace_background_custom_background_owned_by_other_client(
+    client: AsyncClient, api_client_key: str, db_session: AsyncSession
+) -> None:
+    _, other_key = await _make_client(db_session, "other-bg-custom-client")
+    await db_session.commit()
+    storage_path = await _presign_and_upload_operation(
+        client, api_client_key, "BACKGROUND_REPLACEMENT"
+    )
+    _, other_background_path = await _presign_and_upload_replacement_with_custom_background(
+        client, other_key
+    )
+
+    resp = await client.post(
+        "/api/v2/background/replace",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "replace-bg-other-1"},
+        json={"storage_path": storage_path, "background_storage_path": other_background_path},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "ASSET_NOT_OWNED"
+
+
 async def test_remove_background_disabled_operation_422(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
@@ -512,30 +562,6 @@ async def test_replace_background_rejects_neither_preset_nor_custom_background(
     body = resp.json()
     assert body["error"]["code"] == "VALIDATION_ERROR"
     assert "exactly one of preset_code or background_storage_path" in body["error"]["message"]
-
-
-async def test_replace_background_custom_background_not_yet_wired_fails_clean(
-    client: AsyncClient, api_client_key: str
-) -> None:
-    """TEMPORARY, remove/replace in the task that wires background_storage_path
-    end-to-end (docs/superpowers/plans/2026-08-13-custom-background-compositing.md
-    Task 6): the request schema (Task 4) now accepts background_storage_path as
-    a genuinely valid alternative to preset_code, but create_background_job_for_request
-    doesn't yet create/link a background asset from it. Pins that this currently
-    fails clean with a 422 rather than an unhandled 500 from the stale
-    `assert preset_code is not None` a Task 4 code-quality review caught — a real,
-    reachable crash for any client that adopted the new field before Task 6 lands.
-    """
-    storage_path = await _presign_and_upload_operation(
-        client, api_client_key, "BACKGROUND_REPLACEMENT"
-    )
-    resp = await client.post(
-        "/api/v2/background/replace",
-        headers={"X-API-Key": api_client_key, "Idempotency-Key": "replace-custom-not-wired-1"},
-        json={"storage_path": storage_path, "background_storage_path": "pending/x/y/z/bg.jpg"},
-    )
-    assert resp.status_code == 422, resp.text
-    assert resp.json()["error"]["code"] == "OPERATION_DISABLED"
 
 
 # --- GET /status/{job_id} -------------------------------------------------

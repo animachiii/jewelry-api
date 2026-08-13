@@ -522,6 +522,7 @@ async def create_background_job_for_request(
     metadata: dict[str, Any],
     idempotency_key: str,
     payload_hash: str,
+    background_storage_path: str | None = None,
 ) -> JobAcceptedResponse:
     """Implements POST /background/remove and POST /background/replace —
     see phases/phase-15-background-operations.md Steps 4-5. Mirrors
@@ -529,6 +530,10 @@ async def create_background_job_for_request(
     validate -> create -> commit -> dispatch `background.process`
     (Step 5), same "only dispatch a genuinely new job, never a replay"
     rule create_job_for_request follows for fan_out_job.
+
+    `background_storage_path`, when given, is a client-uploaded custom
+    background photo for BACKGROUND_REPLACEMENT — it is validated and
+    linked as an INPUT asset via sub_jobs.background_asset_id.
     """
     assert operation != Operation.ANGLE_GENERATION
 
@@ -544,20 +549,10 @@ async def create_background_job_for_request(
 
     validate_operation_enabled(config_version, operation)
     if operation == Operation.BACKGROUND_REPLACEMENT:
-        if preset_code is None:
-            # `background_storage_path` is now accepted by the request schema
-            # (BackgroundReplaceRequest's mutual-exclusivity validator,
-            # docs/superpowers/specs/2026-08-13-custom-background-compositing-design.md)
-            # but this function isn't wired to create/link a background asset
-            # from it yet — that lands in a follow-up task. Fail clean with a
-            # clear 422 rather than let the client's genuinely valid request
-            # crash with an unhandled 500 in the meantime.
-            raise OperationDisabledError(
-                "Custom background compositing (background_storage_path) is not yet "
-                "available; use preset_code.",
-                details={"operation": operation.value},
-            )
-        validate_preset(config_version, preset_code)
+        # enforced by BackgroundReplaceRequest's mutual-exclusivity validator
+        assert preset_code is not None or background_storage_path is not None
+        if preset_code is not None:
+            validate_preset(config_version, preset_code)
 
     if not storage_service.exists(settings.BUCKET_INPUTS, storage_path):
         raise AssetNotFoundError(
@@ -570,6 +565,22 @@ async def create_background_job_for_request(
             details={"storage_path": storage_path},
         )
     meta = image_validation.inspect_and_validate(settings.BUCKET_INPUTS, storage_path)
+
+    background_meta: ImageMetadata | None = None
+    if background_storage_path is not None:
+        if not storage_service.exists(settings.BUCKET_INPUTS, background_storage_path):
+            raise AssetNotFoundError(
+                f"No uploaded asset found at {background_storage_path}.",
+                details={"storage_path": background_storage_path},
+            )
+        if not background_storage_path.startswith(f"pending/{client.id}/"):
+            raise AssetNotOwnedError(
+                f"storage_path {background_storage_path} does not belong to this client.",
+                details={"storage_path": background_storage_path},
+            )
+        background_meta = image_validation.inspect_and_validate(
+            settings.BUCKET_INPUTS, background_storage_path
+        )
 
     job = jobs_repo.create_job(
         session,
@@ -608,6 +619,26 @@ async def create_background_job_for_request(
         expires_at=retention_policy.compute_expires_at(AssetKind.INPUT),
     )
     await session.flush()  # assigns asset.id
+
+    background_asset_id: uuid.UUID | None = None
+    if background_storage_path is not None:
+        assert background_meta is not None
+        background_asset = assets_repo.create_asset(
+            session,
+            job_id=job.id,
+            kind=AssetKind.INPUT,
+            bucket=settings.BUCKET_INPUTS,
+            storage_path=background_storage_path,
+            mime_type=background_meta.mime_type,
+            width_px=background_meta.width_px,
+            height_px=background_meta.height_px,
+            bytes_=background_meta.bytes,
+            checksum_sha256=background_meta.checksum_sha256,
+            expires_at=retention_policy.compute_expires_at(AssetKind.INPUT),
+        )
+        await session.flush()  # assigns background_asset.id
+        background_asset_id = background_asset.id
+
     sub_job = jobs_repo.create_sub_job(
         session,
         job_id=job.id,
@@ -615,6 +646,7 @@ async def create_background_job_for_request(
         status=SubJobStatus.PENDING,
         source_type=SourceType.UPLOADED,
         input_asset_id=asset.id,
+        background_asset_id=background_asset_id,
     )
     await session.flush()  # assigns sub_job.id
 
@@ -623,7 +655,11 @@ async def create_background_job_for_request(
         job.id,
         "JOB_CREATED",
         to_status=job.status.value,
-        detail={"operation": operation.value, "preset_code": preset_code},
+        detail={
+            "operation": operation.value,
+            "preset_code": preset_code,
+            "background_storage_path": background_storage_path,
+        },
     )
 
     try:
