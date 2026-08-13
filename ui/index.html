@@ -730,9 +730,21 @@
 
     card.innerHTML = html;
 
-    if (a.status === "COMPLETED" && a.image_url) {
+    // preview_image_url (2026-08-13) is populated whenever an output
+    // exists, regardless of status — unlike image_url, which stays
+    // COMPLETED-only (docs/api-routes.md, unchanged). Falls back to
+    // image_url so a COMPLETED item (which only ever sets image_url on
+    // ANGLE_GENERATION's AngleStatus) still renders.
+    const previewUrl = a.preview_image_url || a.image_url;
+    if (previewUrl) {
+      if (a.status !== "COMPLETED") {
+        const notice = document.createElement("div");
+        notice.className = "hint";
+        notice.textContent = "Preview — not yet approved";
+        card.appendChild(notice);
+      }
       const img = document.createElement("img");
-      img.src = a.image_url;
+      img.src = previewUrl;
       img.alt = label + " output";
       card.appendChild(img);
     }
@@ -741,7 +753,10 @@
       const retryBtn = document.createElement("button");
       retryBtn.className = "small secondary";
       retryBtn.style.marginTop = "8px";
-      retryBtn.textContent = "Retry " + label;
+      // QA_REVIEW+FLAGGED retries only the judge call (no regeneration) —
+      // label it distinctly so it's clear this doesn't burn a fresh
+      // generation call. See app/api/v2/retry.py's QA-retry branch.
+      retryBtn.textContent = a.status === "QA_REVIEW" ? "Retry QA" : "Retry " + label;
       retryBtn.addEventListener("click", () => retryItem(jobId, a.retry_url, retryBtn));
       card.appendChild(retryBtn);
     }
