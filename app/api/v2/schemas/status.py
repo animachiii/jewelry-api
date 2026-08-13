@@ -41,6 +41,13 @@ class BackgroundResultStatus(BaseModel):
     source_type: SourceType
     synthetic: bool
     image_url: str | None = None
+    # Additive, 2026-08-13 — see
+    # docs/superpowers/specs/2026-08-13-background-qa-preview-and-retry-design.md.
+    # Present whenever an output exists, regardless of status -- unlike
+    # image_url, which stays exactly as documented (COMPLETED-only, the
+    # real ERP client's existing guarantee). A client that doesn't know
+    # about this field sees no behavior change.
+    preview_image_url: str | None = None
     qa_status: QAStatus
     qa_score: float | None = None
     failure_class: FailureClass | None = None

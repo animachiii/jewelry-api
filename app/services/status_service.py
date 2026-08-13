@@ -8,7 +8,7 @@ either route.
 """
 
 from app.api.v2.schemas.status import AngleStatus, BackgroundResultStatus, JobStatusResponse
-from app.db.models.enums import FailureClass, JobStatus, SourceType, SubJobStatus
+from app.db.models.enums import FailureClass, JobStatus, QAStatus, SourceType, SubJobStatus
 from app.db.models.jobs import Job, SubJob
 from app.services import storage_service
 from app.services.job_service import MAX_RETRY_ATTEMPTS
@@ -72,22 +72,36 @@ def build_background_result_status(
     """
     assert sub_job.angle is None
 
+    # 2026-08-13: retryable now covers two distinct kinds of retry — the
+    # existing regenerate-from-scratch path (FAILED) and the newer
+    # retry-QA-only path (QA_REVIEW+FLAGGED, including qa_score is None,
+    # the real-incident case where the judge call itself failed rather than
+    # scoring low). Both share the same job-level retry_url; the route
+    # (app/api/v2/retry.py) is what branches on which kind actually applies.
     retryable = (
         sub_job.status == SubJobStatus.FAILED
         and sub_job.failure_class in _RETRYABLE_FAILURE_CLASSES
         and sub_job.attempt_count < MAX_RETRY_ATTEMPTS
+    ) or (
+        sub_job.status == SubJobStatus.QA_REVIEW
+        and sub_job.qa_status == QAStatus.FLAGGED
+        and sub_job.attempt_count < MAX_RETRY_ATTEMPTS
     )
 
     image_url: str | None = None
-    if sub_job.status == SubJobStatus.COMPLETED and output_bucket_and_path is not None:
+    preview_image_url: str | None = None
+    if output_bucket_and_path is not None:
         bucket, path = output_bucket_and_path
-        image_url = storage_service.generate_signed_url(bucket, path)
+        preview_image_url = storage_service.generate_signed_url(bucket, path)
+        if sub_job.status == SubJobStatus.COMPLETED:
+            image_url = preview_image_url
 
     return BackgroundResultStatus(
         status=sub_job.status,
         source_type=sub_job.source_type,
         synthetic=sub_job.source_type == SourceType.SYNTHETIC,
         image_url=image_url,
+        preview_image_url=preview_image_url,
         qa_status=sub_job.qa_status,
         qa_score=float(sub_job.qa_score) if sub_job.qa_score is not None else None,
         failure_class=sub_job.failure_class,
