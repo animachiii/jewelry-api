@@ -84,7 +84,19 @@ def _resolve_prompt(config_version: ConfigVersion, job: Job) -> str:
             assert preset is not None  # validated at job-creation time; config is pinned, immutable
             prompt = f"{prompt} {preset['prompt']}".strip()
         else:
-            custom_prompt = str(op_config.get("custom_background_prompt", ""))
+            # Mirrors the preset branch's loud-failure posture above: a
+            # missing custom_background_prompt (e.g. a job pinned to a
+            # config version older than migration 0012) must not silently
+            # degrade to "just the generic replacement prompt, no
+            # compositing/shadow/lighting instructions" — that would still
+            # return a 202/COMPLETED job with a plausible-looking but
+            # not-actually-composited image, with nothing anywhere
+            # signaling the degradation.
+            custom_prompt = op_config.get("custom_background_prompt")
+            assert custom_prompt, (
+                "custom_background_prompt missing from pinned config "
+                f"for job {job.id} — see migration 0012"
+            )
             prompt = f"{prompt} {custom_prompt}".strip()
     return prompt
 
