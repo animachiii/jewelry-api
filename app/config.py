@@ -35,6 +35,17 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
+    # redis-py's async client has NO socket timeout by default
+    # (socket_timeout=None, socket_connect_timeout=None) -- a silently
+    # stalled TCP connection (no RST, no FIN) blocks a call like
+    # rate_limiter.acquire() forever. Live 2026-08-13: exactly this hung a
+    # background-operation sub-job at GENERATING with zero log output,
+    # wedging the entire single-worker queue (IO_QUEUE_CONCURRENCY=1) since
+    # nothing else could run behind it. Same class of gap as
+    # GEMINI_REQUEST_TIMEOUT_SECONDS, for the one blocking call that wasn't
+    # bounded yet. Redis ops here are single-key INCR/GET/SET/EXPIRE --
+    # should complete in milliseconds, so this is generous, not tight.
+    REDIS_SOCKET_TIMEOUT_SECONDS: int = 5
 
     # --- Celery / workers ---
     IO_QUEUE_CONCURRENCY: int = 20
