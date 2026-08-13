@@ -159,6 +159,17 @@ class SubJob(Base):
         ForeignKey("assets.id", name="fk_sub_jobs_output_asset_id", use_alter=True),
         nullable=True,
     )
+    # NULL unless this BACKGROUND_REPLACEMENT sub-job used an uploaded
+    # background photo instead of a preset — see migration 0011 and
+    # docs/superpowers/specs/2026-08-13-custom-background-compositing-design.md.
+    # An ordinary INPUT-kind asset, distinguished from input_asset_id only by
+    # which FK column points at it (same pattern matte_asset_id/output_asset_id
+    # already use).
+    background_asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("assets.id", name="fk_sub_jobs_background_asset_id", use_alter=True),
+        nullable=True,
+    )
     prompt_snapshot: Mapped[str | None] = mapped_column(String, nullable=True)
     model_version: Mapped[str | None] = mapped_column(String, nullable=True)
     seed: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
