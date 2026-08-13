@@ -484,6 +484,7 @@ async def test_replace_background_custom_background_happy_path(
     ) -> dict:
         captured["prompt"] = prompt
         captured["reference_image_count"] = len(reference_images)
+        captured["reference_images"] = list(reference_images)
         return fixture
 
     monkeypatch.setattr(gemini_module.GeminiProvider, "_call_api", _capture_call)
@@ -502,6 +503,15 @@ async def test_replace_background_custom_background_happy_path(
 
     assert captured["reference_image_count"] == 2
     assert "naturally into the supplied background photo" in captured["prompt"]
+    # Not just a count: confirm which image actually landed in which slot.
+    # The product/background fixtures are deliberately different sizes
+    # (32x24 vs 48x32, see _presign_and_upload_replacement_with_custom_background)
+    # so decoding both catches an accidental order swap or a wrong asset
+    # being downloaded, not just "two images arrived."
+    product_image = Image.open(io.BytesIO(captured["reference_images"][0]))
+    background_image = Image.open(io.BytesIO(captured["reference_images"][1]))
+    assert product_image.size == (32, 24)
+    assert background_image.size == (48, 32)
 
     job = (await db_session.execute(select(Job).where(Job.id == job_id))).scalar_one()
     assert job.operation == Operation.BACKGROUND_REPLACEMENT
