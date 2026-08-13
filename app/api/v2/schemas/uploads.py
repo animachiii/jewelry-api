@@ -36,8 +36,7 @@ class PresignUploadRequest(BaseModel):
             raise ValueError("either category_code+angles or operation is required")
         if self.include_background_upload and self.operation != Operation.BACKGROUND_REPLACEMENT:
             raise ValueError(
-                "include_background_upload is only valid with "
-                "operation=BACKGROUND_REPLACEMENT"
+                "include_background_upload is only valid with operation=BACKGROUND_REPLACEMENT"
             )
         return self
 

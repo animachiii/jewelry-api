@@ -433,9 +433,10 @@ async def test_replace_background_custom_background_creates_and_links_asset(
     which is why this test can assert COMPLETED the same way the preset-based
     happy path does, without needing Task 7's changes.
     """
-    storage_path, background_storage_path = (
-        await _presign_and_upload_replacement_with_custom_background(client, api_client_key)
-    )
+    (
+        storage_path,
+        background_storage_path,
+    ) = await _presign_and_upload_replacement_with_custom_background(client, api_client_key)
 
     resp = await client.post(
         "/api/v2/background/replace",
@@ -450,9 +451,7 @@ async def test_replace_background_custom_background_creates_and_links_asset(
     assert job.preset_code is None
     assert job.status == JobStatus.COMPLETED
 
-    sub_job = (
-        await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))
-    ).scalar_one()
+    sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
     assert sub_job.background_asset_id is not None
 
     background_asset = (
@@ -479,9 +478,7 @@ async def test_replace_background_custom_background_happy_path(
     captured: dict = {}
     fixture = _load(_GEMINI_FIXTURES, "success.json")
 
-    def _capture_call(
-        self: object, prompt: str, reference_images: list, seed: int
-    ) -> dict:
+    def _capture_call(self: object, prompt: str, reference_images: list, seed: int) -> dict:
         captured["prompt"] = prompt
         captured["reference_image_count"] = len(reference_images)
         captured["reference_images"] = list(reference_images)
@@ -489,9 +486,10 @@ async def test_replace_background_custom_background_happy_path(
 
     monkeypatch.setattr(gemini_module.GeminiProvider, "_call_api", _capture_call)
 
-    storage_path, background_storage_path = (
-        await _presign_and_upload_replacement_with_custom_background(client, api_client_key)
-    )
+    (
+        storage_path,
+        background_storage_path,
+    ) = await _presign_and_upload_replacement_with_custom_background(client, api_client_key)
 
     resp = await client.post(
         "/api/v2/background/replace",
@@ -518,9 +516,7 @@ async def test_replace_background_custom_background_happy_path(
     assert job.preset_code is None
     assert job.status == JobStatus.COMPLETED
 
-    sub_job = (
-        await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))
-    ).scalar_one()
+    sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
     assert sub_job.background_asset_id is not None
     assert sub_job.status == SubJobStatus.COMPLETED
 

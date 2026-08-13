@@ -40,7 +40,5 @@ class BackgroundReplaceRequest(BaseModel):
     @model_validator(mode="after")
     def _exactly_one_background_source(self) -> "BackgroundReplaceRequest":
         if (self.preset_code is None) == (self.background_storage_path is None):
-            raise ValueError(
-                "exactly one of preset_code or background_storage_path is required"
-            )
+            raise ValueError("exactly one of preset_code or background_storage_path is required")
         return self
