@@ -18,7 +18,7 @@ from app.core.idempotency import IdempotencyKeyConflictError
 from app.db.models.api_clients import ApiClient
 from app.db.models.assets import Asset
 from app.db.models.config_versions import ConfigVersion
-from app.db.models.enums import Angle, AssetKind, Operation, SourceType, SubJobStatus
+from app.db.models.enums import Angle, AssetKind, Operation, QAStatus, SourceType, SubJobStatus
 from app.db.models.jobs import SubJob
 from app.db.repositories import assets as assets_repo
 from app.db.repositories import job_events as job_events_repo
@@ -159,6 +159,31 @@ def check_retry_preconditions(sub_job: SubJob, input_asset: Asset | None) -> Non
                 "Submit a new job — the image cannot be regenerated.",
                 details={"angle": angle_detail},
             )
+
+
+def check_qa_retry_preconditions(sub_job: SubJob) -> None:
+    """Raises the specific 409 for the first violated precondition on a
+    retry-QA-only request — see
+    docs/superpowers/specs/2026-08-13-background-qa-preview-and-retry-design.md.
+    Distinct from check_retry_preconditions: this accepts QA_REVIEW+FLAGGED
+    (the judge call failed or scored too low) rather than FAILED, and never
+    touches input_asset_id -- the existing output image is reused as-is, no
+    input re-download needed. Shares MAX_RETRY_ATTEMPTS with the regenerate
+    path (one counter, same precedent check_retry_preconditions already
+    follows for generation retries).
+    """
+    label = _sub_job_label(sub_job)
+    if sub_job.status != SubJobStatus.QA_REVIEW or sub_job.qa_status != QAStatus.FLAGGED:
+        raise SubJobNotRetryableError(
+            f"Sub-job for {label} is {sub_job.status.value} "
+            f"(qa_status={sub_job.qa_status.value}), not QA_REVIEW+FLAGGED.",
+            details={"status": sub_job.status.value, "qa_status": sub_job.qa_status.value},
+        )
+    if sub_job.attempt_count >= MAX_RETRY_ATTEMPTS:
+        raise RetryLimitExceededError(
+            f"The sub-job has reached the retry ceiling ({MAX_RETRY_ATTEMPTS} attempts).",
+            details={"attempt_count": sub_job.attempt_count},
+        )
 
 
 def resolve_angle_plan(body: GenerateJobRequest) -> list[ResolvedAnglePlan]:

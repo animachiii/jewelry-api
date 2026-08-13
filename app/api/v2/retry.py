@@ -22,12 +22,16 @@ from app.core.auth import require_client_scope
 from app.core.errors import NotFoundError
 from app.core.idempotency import IdempotencyKeyConflictError, require_idempotency_key
 from app.db.models.api_clients import ApiClient
-from app.db.models.enums import Angle, Operation
+from app.db.models.enums import Angle, Operation, QAStatus, SubJobStatus
 from app.db.repositories import assets as assets_repo
 from app.db.repositories import jobs as jobs_repo
 from app.db.session import get_db
-from app.services.job_service import AngleJobRetryNotAllowedError, check_retry_preconditions
-from app.services.retry_service import execute_retry
+from app.services.job_service import (
+    AngleJobRetryNotAllowedError,
+    check_qa_retry_preconditions,
+    check_retry_preconditions,
+)
+from app.services.retry_service import execute_qa_retry, execute_retry
 from app.workers.generation import transform_photo_task
 
 router = APIRouter(tags=["retry"])
@@ -144,6 +148,23 @@ async def retry_job(
             raise IdempotencyKeyConflictError(
                 "This Idempotency-Key was already used for a different job."
             )
+        return
+
+    # 2026-08-13: a QA_REVIEW+FLAGGED sub-job branches into a narrower
+    # retry — only the judge call (qa.score_background) re-runs, not
+    # generation. Checked before check_retry_preconditions, which would
+    # otherwise 409 immediately (it only ever accepts FAILED). See
+    # docs/superpowers/specs/2026-08-13-background-qa-preview-and-retry-design.md.
+    if sub_job.status == SubJobStatus.QA_REVIEW and sub_job.qa_status == QAStatus.FLAGGED:
+        check_qa_retry_preconditions(sub_job)
+
+        execute_qa_retry(session, job, sub_job)
+        await idempotency.store_retry_target(str(client.id), idempotency_key, target)
+        await session.commit()
+
+        from app.workers.qa import score_background
+
+        score_background.delay(str(sub_job.id))
         return
 
     input_asset = (

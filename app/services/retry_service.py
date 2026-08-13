@@ -1,5 +1,7 @@
 """Real retry execution. See docs/business-rules.md §5 and
-phases/phase-8-failure-retry.md.
+phases/phase-8-failure-retry.md. execute_qa_retry (2026-08-13) is a second,
+narrower kind of retry — see
+docs/superpowers/specs/2026-08-13-background-qa-preview-and-retry-design.md.
 """
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,3 +56,31 @@ def execute_retry(session: AsyncSession, job: Job, sub_job: SubJob) -> None:
             "job_from_status": from_job_status.value,
         },
     )
+
+
+def execute_qa_retry(session: AsyncSession, job: Job, sub_job: SubJob) -> None:
+    """Re-dispatches only the QA judge call (qa.score_background) for a
+    QA_REVIEW+FLAGGED sub-job -- the generated image is reused as-is, no
+    regeneration, no second billed Gemini call. Unlike execute_retry:
+    status/qa_status are deliberately left untouched (still QA_REVIEW /
+    FLAGGED) -- the re-dispatched score_background_operation call is what
+    overwrites them with the fresh judge outcome, same as the first score
+    did. job.status also stays untouched: it's already PROCESSING (a
+    QA_REVIEW sub-job never let it reach a terminal state in the first
+    place -- docs/business-rules.md §3), so there is nothing to move back.
+    Does not commit or dispatch -- the caller (app/api/v2/retry.py) controls
+    both, same split execute_retry uses.
+    """
+    job_events_repo.record_event(
+        session,
+        job.id,
+        "QA_RETRY_REQUESTED",
+        sub_job_id=sub_job.id,
+        from_status=sub_job.status.value,
+        to_status=sub_job.status.value,
+        detail={
+            "angle": sub_job.angle.value if sub_job.angle is not None else None,
+            "attempt_count": sub_job.attempt_count,
+        },
+    )
+    sub_job.attempt_count += 1

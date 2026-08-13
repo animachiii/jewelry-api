@@ -96,12 +96,32 @@ def test_render_yaml_is_valid_and_points_at_dockerfile() -> None:
     assert service["plan"] == "free"
 
 
-def test_render_start_script_exists_and_runs_migrations_and_all_three_processes() -> None:
+def test_render_start_script_runs_migrations_then_one_celery_process_and_uvicorn() -> None:
+    """Free tier is 512MB total and every Python process in this container
+    carries its own ~100MB interpreter+deps footprint (measured against the
+    real image 2026-08-13: uvicorn 103MB, beat 47MB, worker MainProcess
+    104MB, forked child 154MB once google-genai loads = ~408MB idle, before
+    a job's own ~156MB peak). Four interpreters do not fit, which is what
+    OOM-killed every BACKGROUND_REMOVAL run. Beat is embedded in the worker
+    (-B) and the worker runs --pool=solo so there is no forked child: two
+    processes total, not four.
+    """
     script = (REPO_ROOT / "scripts" / "render_start.sh").read_text()
     assert "alembic upgrade head" in script
-    assert "celery -A app.workers.celery_app beat" in script
     assert "celery -A app.workers.celery_app worker" in script
     assert "uvicorn app.main:app" in script
+
+    # Beat embedded in the worker, never its own process.
+    assert "-B" in script
+    assert "celery -A app.workers.celery_app beat" not in script
+
+    # Solo pool: the worker MainProcess executes tasks itself.
+    assert "--pool=solo" in script
+
+    # prefork-only flags must not survive the switch to solo — Celery
+    # ignores them there, and leaving them implies a recycling guarantee
+    # that no longer exists.
+    assert "--max-tasks-per-child" not in script
 
 
 def test_dockerfile_default_cmd_is_render_start_script() -> None:

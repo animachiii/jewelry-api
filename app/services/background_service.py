@@ -151,18 +151,20 @@ async def process(session: AsyncSession, redis_client: Redis, sub_job_id: uuid.U
     if input_asset is None:
         raise SubJobNotFoundError(f"No input asset for sub-job {sub_job_id}.")
     reference_images = [
-        storage_service.download_to_temp(input_asset.bucket, input_asset.storage_path).read_bytes()
+        storage_service.download_bytes(input_asset.bucket, input_asset.storage_path)
     ]
     if sub_job.background_asset_id is not None:
         background_asset = await assets_repo.get_by_id(session, sub_job.background_asset_id)
         if background_asset is None:
             raise SubJobNotFoundError(f"No background asset for sub-job {sub_job_id}.")
         # Product photo first, background photo second — matches the order
-        # the prompt (see _resolve_prompt above) narrates them in.
+        # the prompt (see _resolve_prompt above) narrates them in. Uses
+        # download_bytes (not download_to_temp().read_bytes()) for the same
+        # reason the product-photo download above does — see
+        # storage_service.download_bytes's docstring on the 2026-08-13 OOM
+        # this avoids re-introducing.
         reference_images.append(
-            storage_service.download_to_temp(
-                background_asset.bucket, background_asset.storage_path
-            ).read_bytes()
+            storage_service.download_bytes(background_asset.bucket, background_asset.storage_path)
         )
 
     provider = GeminiProvider(model_version=model_version)

@@ -170,6 +170,35 @@ def test_decodes_urlsafe_base64_from_the_real_sdk_serializer(
     assert result.image_bytes[:3] == b"\xff\xd8\xff", "must remain a valid JPEG header"
 
 
+def test_only_decodes_the_last_inline_image_part(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real production OOM (2026-08-13): the old code decoded *every* part
+    with inline_data via _decode_b64_any_alphabet, keeping only the last --
+    wasting a full base64-decode + byte buffer per discarded interim draft
+    image. On a 512MB instance stacked with a second Gemini (QA) call in the
+    same worker, that's a real contributor. Must decode exactly once, for
+    the part that is actually kept.
+    """
+    import app.providers.gemini as gemini_module
+
+    provider = GeminiProvider(model_version="gemini-3.1-flash-image")
+    fixture = _load("success_with_interim_images.json")
+    monkeypatch.setattr(provider, "_call_api", lambda *a, **k: fixture)
+
+    calls: list[str] = []
+    original_decode = gemini_module._decode_b64_any_alphabet
+
+    def _counting_decode(raw: str | bytes) -> bytes:
+        calls.append(raw if isinstance(raw, str) else raw.decode())
+        return original_decode(raw)
+
+    monkeypatch.setattr(gemini_module, "_decode_b64_any_alphabet", _counting_decode)
+
+    result = provider.generate("a ring, front view", [], seed=42)
+
+    assert result.image_bytes == b"FINAL_RENDERED_IMAGE_BYTES"
+    assert len(calls) == 1, f"expected exactly one decode call, got {len(calls)}: {calls}"
+
+
 def test_provider_never_imports_genai_at_module_level() -> None:
     """docs/conventions.md: only app/providers/ imports a model SDK, and even
     there the import is deferred into _call_api so unit tests never touch it.

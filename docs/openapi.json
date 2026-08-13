@@ -276,6 +276,17 @@
             ],
             "title": "Image Url"
           },
+          "preview_image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preview Image Url"
+          },
           "qa_score": {
             "anyOf": [
               {

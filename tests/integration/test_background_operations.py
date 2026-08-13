@@ -935,6 +935,160 @@ async def test_qa_provider_failure_flags_for_review_never_completed(
     assert sub_job.qa_score is None
 
 
+async def test_status_shows_preview_image_and_retry_url_while_flagged(
+    client: AsyncClient,
+    api_client_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """docs/superpowers/specs/2026-08-13-background-qa-preview-and-retry-design.md:
+    a flagged job is no longer a dead end for the client — the generated
+    image is visible via preview_image_url (image_url itself stays exactly
+    as documented, COMPLETED-only) and retry_url is offered.
+    """
+    _fake_qa_score(monkeypatch, "low_similarity.json")
+
+    storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
+    create_resp = await client.post(
+        "/api/v2/background/remove",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "qa-preview-1"},
+        json={"storage_path": storage_path},
+    )
+    job_id = create_resp.json()["job_id"]
+
+    status_resp = await client.get(
+        f"/api/v2/status/{job_id}", headers={"X-API-Key": api_client_key}
+    )
+    assert status_resp.status_code == 200, status_resp.text
+    result = status_resp.json()["results"][0]
+    assert result["status"] == "QA_REVIEW"
+    assert result["qa_status"] == "FLAGGED"
+    assert result["image_url"] is None  # unchanged: never shown before human/retry
+    assert result["preview_image_url"] is not None
+    assert result["retryable"] is True
+    assert result["retry_url"] == f"/api/v2/jobs/{job_id}/retry"
+
+
+async def test_retry_qa_only_completes_without_regenerating(
+    client: AsyncClient,
+    api_client_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real 2026-08-13 incident this feature exists for: generation
+    succeeded, only the judge call failed/scored low. Retrying must re-run
+    just the judge (qa.score_background) against the *same* output image —
+    not app/workers/background.process, which would burn a second billed
+    Gemini call and could even produce a different image.
+    """
+    _fake_qa_score(monkeypatch, "low_similarity.json")
+
+    storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
+    create_resp = await client.post(
+        "/api/v2/background/remove",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "qa-retry-1"},
+        json={"storage_path": storage_path},
+    )
+    job_id = uuid.UUID(create_resp.json()["job_id"])
+
+    sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
+    assert sub_job.status == SubJobStatus.QA_REVIEW
+    assert sub_job.qa_status == QAStatus.FLAGGED
+    output_asset_id_before = sub_job.output_asset_id
+    attempt_count_before = sub_job.attempt_count
+    generation_cost_events_before = (
+        await db_session.execute(select(CostEvent).where(CostEvent.job_id == job_id))
+    ).all()
+
+    _fake_qa_score(monkeypatch, "high_similarity.json")
+
+    retry_resp = await client.post(
+        f"/api/v2/jobs/{job_id}/retry",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "qa-retry-attempt-1"},
+    )
+    assert retry_resp.status_code == 202, retry_resp.text
+
+    await db_session.refresh(sub_job)
+    assert sub_job.status == SubJobStatus.COMPLETED
+    assert sub_job.qa_status == QAStatus.PASSED
+    assert float(sub_job.qa_score) == pytest.approx(0.94)
+    assert sub_job.attempt_count > attempt_count_before
+    # Same image — the judge re-ran, generation did not.
+    assert sub_job.output_asset_id == output_asset_id_before
+
+    generation_cost_events_after = (
+        await db_session.execute(select(CostEvent).where(CostEvent.job_id == job_id))
+    ).all()
+    assert len(generation_cost_events_after) == len(generation_cost_events_before)
+
+    job = (await db_session.execute(select(Job).where(Job.id == job_id))).scalar_one()
+    assert job.status == JobStatus.COMPLETED
+
+    status_resp = await client.get(
+        f"/api/v2/status/{job_id}", headers={"X-API-Key": api_client_key}
+    )
+    result = status_resp.json()["results"][0]
+    assert result["image_url"] is not None  # now COMPLETED, the real field populates too
+
+
+async def test_retry_qa_only_on_provider_error_flag_also_works(
+    client: AsyncClient,
+    api_client_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """qa_score: NULL (the judge call itself failed, not a low score) must
+    be just as retryable — this is the exact shape of the real 2026-08-13
+    incident that motivated this feature."""
+    _fake_qa_score(monkeypatch, "malformed.json")
+
+    storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
+    create_resp = await client.post(
+        "/api/v2/background/remove",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "qa-retry-provider-error-1"},
+        json={"storage_path": storage_path},
+    )
+    job_id = uuid.UUID(create_resp.json()["job_id"])
+
+    sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
+    assert sub_job.qa_score is None
+
+    _fake_qa_score(monkeypatch, "high_similarity.json")
+    retry_resp = await client.post(
+        f"/api/v2/jobs/{job_id}/retry",
+        headers={
+            "X-API-Key": api_client_key,
+            "Idempotency-Key": "qa-retry-provider-error-attempt-1",
+        },
+    )
+    assert retry_resp.status_code == 202, retry_resp.text
+
+    await db_session.refresh(sub_job)
+    assert sub_job.status == SubJobStatus.COMPLETED
+    assert float(sub_job.qa_score) == pytest.approx(0.94)
+
+
+async def test_retry_qa_only_409_when_not_flagged(
+    client: AsyncClient, api_client_key: str, db_session: AsyncSession
+) -> None:
+    """A COMPLETED job (the fixture-default happy path) is not QA-retryable
+    — falls through to the existing FAILED-only check, unchanged."""
+    storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
+    create_resp = await client.post(
+        "/api/v2/background/remove",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "qa-retry-not-flagged-1"},
+        json={"storage_path": storage_path},
+    )
+    job_id = create_resp.json()["job_id"]
+
+    resp = await client.post(
+        f"/api/v2/jobs/{job_id}/retry",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "qa-retry-not-flagged-attempt-1"},
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"]["code"] == "SUBJOB_NOT_RETRYABLE"
+
+
 async def test_safety_refusal_rejected_no_retry(
     client: AsyncClient,
     api_client_key: str,

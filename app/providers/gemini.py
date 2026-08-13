@@ -178,24 +178,30 @@ class GeminiProvider(GenerationProvider):
         if not isinstance(parts, list):
             return None, None
 
-        image_bytes: bytes | None = None
-        mime_type: str | None = None
+        # Find the last part with non-empty inline_data first, decode only
+        # that one -- decoding every candidate (then discarding all but the
+        # last) wastes a full base64-decode + byte buffer per interim draft
+        # image, a real contributor to the 2026-08-13 BACKGROUND_REMOVAL OOM
+        # once stacked with a second Gemini call in the same worker process.
+        last_inline_data: dict[str, Any] | None = None
         for part in parts:
             if not isinstance(part, dict):
                 continue
             inline_data = part.get("inline_data")
             if not isinstance(inline_data, dict):
                 continue
-            raw_data = inline_data.get("data")
-            if not raw_data:
+            if not inline_data.get("data"):
                 continue
-            try:
-                decoded = _decode_b64_any_alphabet(raw_data)
-            except (TypeError, ValueError):
-                continue
-            if not decoded:
-                continue
-            image_bytes = decoded
-            mime_type = inline_data.get("mime_type")
+            last_inline_data = inline_data
 
-        return image_bytes, mime_type
+        if last_inline_data is None:
+            return None, None
+
+        try:
+            decoded = _decode_b64_any_alphabet(last_inline_data["data"])
+        except (TypeError, ValueError):
+            return None, None
+        if not decoded:
+            return None, None
+
+        return decoded, last_inline_data.get("mime_type")
