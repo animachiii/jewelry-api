@@ -83,6 +83,7 @@ useful in production.
 | `REDIS_URL` | (has a default, but production needs the real Upstash `rediss://` URL) |
 | `CELERY_BROKER_URL` | Same — Upstash `rediss://` URL. Celery refuses a `rediss://` URL with no `ssl_cert_reqs` (`ValueError: E_REDIS_SSL_CERT_REQS_MISSING_INVALID`, killing `celery beat` at startup); `app/workers/celery_app.py` now sets `CERT_REQUIRED` automatically for any `rediss://` URL, so no query param is needed. An explicit `?ssl_cert_reqs=required` is equivalent and harmless. |
 | `CELERY_RESULT_BACKEND` | Same — Upstash `rediss://` URL, same TLS note as the broker |
+| `REDIS_SOCKET_TIMEOUT_SECONDS` | Default `5` is fine — bounds a silently stalled Redis connection so it can't hang a worker forever (see `app/core/redis_client.py`) |
 | `IO_QUEUE_CONCURRENCY` | Default `20` is fine to start |
 | `QA_MODEL_ID` | Default empty is fine — not read by any code path yet (unused since Phase 9 decided the QA judge is Gemini, not a separate embedding model) |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | (has a default, but Sheets sync needs a real value — see roadmap open decision #2, still open) |

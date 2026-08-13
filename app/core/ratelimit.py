@@ -4,7 +4,7 @@ import time
 
 import redis.asyncio as redis
 
-from app.config import settings
+from app.core.redis_client import new_redis_client
 
 
 def _client() -> redis.Redis:
@@ -16,9 +16,12 @@ def _client() -> redis.Redis:
     second test reuses it). This module was never actually exercised by any
     test until Phase 10 wired allow() into /generate — same first-real-use
     exposure as idempotency.py's Redis calls were in Phase 8.
+
+    Delegates to `new_redis_client()` (rather than its own `redis.from_url`
+    call, as before 2026-08-13) so this module gets `REDIS_SOCKET_TIMEOUT_
+    SECONDS` for free — see that function's docstring for the incident.
     """
-    client: redis.Redis = redis.from_url(settings.REDIS_URL, decode_responses=True)  # type: ignore[no-untyped-call]
-    return client
+    return new_redis_client()
 
 
 async def allow(client_id: str, limit_per_minute: int) -> bool:

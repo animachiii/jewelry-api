@@ -5,8 +5,8 @@ from typing import Annotated
 import redis.asyncio as redis
 from fastapi import Header
 
-from app.config import settings
 from app.core.errors import AppError, ErrorCode
+from app.core.redis_client import new_redis_client
 
 TTL_SECONDS = 24 * 60 * 60
 
@@ -25,9 +25,12 @@ def _client() -> redis.Redis:
     do (Phase 7) — building fresh per call rather than caching across a
     boundary that isn't guaranteed to share one loop. This endpoint isn't
     hot enough for connection reuse to matter.
+
+    Delegates to `new_redis_client()` (rather than its own `redis.from_url`
+    call, as before 2026-08-13) so this module gets `REDIS_SOCKET_TIMEOUT_
+    SECONDS` for free — see that function's docstring for the incident.
     """
-    client: redis.Redis = redis.from_url(settings.REDIS_URL, decode_responses=True)  # type: ignore[no-untyped-call]
-    return client
+    return new_redis_client()
 
 
 async def get_job_id(client_id: str, idempotency_key: str) -> str | None:
