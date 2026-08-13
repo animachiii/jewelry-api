@@ -244,15 +244,23 @@ generation uses, unmodified:
 | Operation | Input | Prompt source | Output |
 | :--- | :--- | :--- | :--- |
 | `BACKGROUND_REMOVAL` | One uploaded photo | `config.global.operations.BACKGROUND_REMOVAL.prompt` | Product on a flat/solid background — **no alpha channel**. "Removal" means standardisation, not a transparent cutout. |
-| `BACKGROUND_REPLACEMENT` | One uploaded photo + `preset_code` | operation prompt + the pinned preset's own prompt (`config.global.background_presets`), concatenated | Product on the requested backdrop |
+| `BACKGROUND_REPLACEMENT` | One uploaded photo + (`preset_code` **or** `background_storage_path`) | operation prompt + either the pinned preset's own prompt, or (custom background) `config.global.operations.BACKGROUND_REPLACEMENT.custom_background_prompt` | Product on the requested backdrop |
+
+**Custom-background compositing** (added 2026-08-13): `background_storage_path`
+is a client-uploaded background photo used instead of a preset — mutually
+exclusive with `preset_code` on the same request. The subject-preservation QA
+gate above still applies unconditionally and its reference is still the
+**product** input photo, never the background photo.
 
 - Category rules (§1) do not apply — a background job has `category_code: NULL`
   (migration 0008) and no angle (`sub_jobs.angle IS NULL`, migration 0006).
 - `requested_angles` is always `1` for a background job — see §3's note. This is why
   `PARTIAL_SUCCESS` is structurally unreachable for one, not a gap in the rollup logic.
-- `POST /background/replace` requires `preset_code` to name an **active** preset in the
-  pinned config version (`GET /config`'s `background_presets`) — `422 PRESET_NOT_FOUND`
-  / `422 PRESET_INACTIVE` otherwise.
+- `POST /background/replace` requires exactly one of `preset_code` /
+  `background_storage_path` — `422 VALIDATION_ERROR` if both or neither are given. When
+  `preset_code` is given it must name an **active** preset in the pinned config version
+  (`GET /config`'s `background_presets`) — `422 PRESET_NOT_FOUND` / `422 PRESET_INACTIVE`
+  otherwise. This check does not apply when `background_storage_path` is given instead.
 - `operations.<OP>.enabled` gates both routes — `422 OPERATION_DISABLED` if `false` or
   absent.
 - `unit_cost_usd` resolves per-operation

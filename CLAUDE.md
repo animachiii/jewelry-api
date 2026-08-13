@@ -717,3 +717,13 @@ latency on the live free instance" — no reachable Render deployment;
 Step 6's Flutter-lead written confirmation of the `operation`/`results`
 split — needs an actual human session, same category of gap Phase 1's own
 sign-off had.
+
+**Addendum, 2026-08-13 — custom-background compositing:** `BACKGROUND_REPLACEMENT`
+now also accepts an uploaded background photo (`background_storage_path`) as
+an alternative to `preset_code`, composited via the same single Gemini call
+with a second reference image appended
+(`app/providers/gemini.py::GeminiProvider.generate` already accepted a
+`reference_images: list[bytes]` — no provider change needed). New nullable
+`sub_jobs.background_asset_id` (migration 0011) and a seeded
+`custom_background_prompt` (migration 0012). Does not reopen decision 0002 —
+still no alpha channel, still one flattened image out.

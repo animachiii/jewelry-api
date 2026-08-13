@@ -79,6 +79,12 @@ Two mutually exclusive request modes:
   `storage_path` / expiry shape, to quote back on `POST /background/remove` or
   `POST /background/replace`. See `phases/phase-15-background-operations.md` Step 4.
 
+  For `BACKGROUND_REPLACEMENT` specifically, the request may also set
+  `include_background_upload: true` to get a second upload slot,
+  `background_upload` (same `upload_url`/`storage_path`/expiry shape), for a
+  custom background photo. Rejected with `422 VALIDATION_ERROR` if set for
+  any other operation.
+
 The client uploads directly to Supabase Storage — image bytes never pass through the API.
 This is what keeps `/generate` and the background routes fast and avoids request-size
 limits.
@@ -220,12 +226,19 @@ Returns `202` with the same `JobAcceptedResponse` shape as `/generate` — `job_
 ### `POST /api/v2/background/replace`
 **Auth required. `client` scope. `Idempotency-Key` header required.**
 
-Request: `{ "storage_path": "...", "preset_code": "...", "sku_reference"?: "...",
-"metadata"?: {} }`. `preset_code` must be one of `GET /config`'s `background_presets`.
+Request: `{ "storage_path": "...", "preset_code"?: "...",
+"background_storage_path"?: "...", "sku_reference"?: "...", "metadata"?: {} }`.
+Exactly one of `preset_code` / `background_storage_path` is required —
+`422 VALIDATION_ERROR` if both or neither are given. `preset_code` must be
+one of `GET /config`'s `background_presets`; `background_storage_path` comes
+from `POST /uploads/presign`'s `include_background_upload` response and is
+composited in directly (a client-supplied background photo, not a curated
+preset).
 
 Same response shape and validation order as `/background/remove`, with one extra step
 between 1 and 2: the preset must exist and be active
-(`422 PRESET_NOT_FOUND` / `422 PRESET_INACTIVE`).
+(`422 PRESET_NOT_FOUND` / `422 PRESET_INACTIVE`) — this step only applies when
+`preset_code` was given.
 
 ### Status and retry
 `GET /api/v2/status/{job_id}` and `POST /api/v2/jobs/{job_id}/retry` (above) both work
