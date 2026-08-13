@@ -464,6 +464,64 @@ async def test_replace_background_custom_background_creates_and_links_asset(
     assert background_asset.expires_at is not None  # retention_policy applied here too
 
 
+async def test_replace_background_custom_background_happy_path(
+    client: AsyncClient,
+    api_client_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Custom-background compositing: two images (product + background) go
+    into one Gemini call, one cost event, one output. See
+    docs/superpowers/specs/2026-08-13-custom-background-compositing-design.md.
+    """
+    import app.providers.gemini as gemini_module
+
+    captured: dict = {}
+    fixture = _load(_GEMINI_FIXTURES, "success.json")
+
+    def _capture_call(
+        self: object, prompt: str, reference_images: list, seed: int
+    ) -> dict:
+        captured["prompt"] = prompt
+        captured["reference_image_count"] = len(reference_images)
+        return fixture
+
+    monkeypatch.setattr(gemini_module.GeminiProvider, "_call_api", _capture_call)
+
+    storage_path, background_storage_path = (
+        await _presign_and_upload_replacement_with_custom_background(client, api_client_key)
+    )
+
+    resp = await client.post(
+        "/api/v2/background/replace",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "replace-custom-bg-happy-1"},
+        json={"storage_path": storage_path, "background_storage_path": background_storage_path},
+    )
+    assert resp.status_code == 202, resp.text
+    job_id = uuid.UUID(resp.json()["job_id"])
+
+    assert captured["reference_image_count"] == 2
+    assert "naturally into the supplied background photo" in captured["prompt"]
+
+    job = (await db_session.execute(select(Job).where(Job.id == job_id))).scalar_one()
+    assert job.operation == Operation.BACKGROUND_REPLACEMENT
+    assert job.preset_code is None
+    assert job.status == JobStatus.COMPLETED
+
+    sub_job = (
+        await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))
+    ).scalar_one()
+    assert sub_job.background_asset_id is not None
+    assert sub_job.status == SubJobStatus.COMPLETED
+
+    cost_events = (
+        (await db_session.execute(select(CostEvent).where(CostEvent.job_id == job_id)))
+        .scalars()
+        .all()
+    )
+    assert len(cost_events) == 1  # still one Gemini call, regardless of image count
+
+
 async def test_remove_background_disabled_operation_422(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:

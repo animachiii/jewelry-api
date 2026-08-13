@@ -66,34 +66,26 @@ class SubJobNotFoundError(Exception):
 
 
 def _resolve_prompt(config_version: ConfigVersion, job: Job) -> str:
-    """`operations.<OP>.prompt` is the base instruction; a replacement job
-    appends its pinned preset's own prompt (docs/schema.md payload shape,
-    Step 3). `job.preset_code` is durable (migration 0009) — the worker
-    can't re-derive it from anywhere else.
-
-    TEMPORARY, custom-background stopgap: `job.preset_code` is now genuinely
-    `None` for a BACKGROUND_REPLACEMENT job that used an uploaded background
-    photo instead of a preset (see job_service.py's mutual-exclusivity
-    validator and docs/superpowers/specs/2026-08-13-custom-background-compositing-design.md).
-    The old unconditional `assert job.preset_code is not None` here would
-    crash — worse than an HTTP error, since the exception escapes this
-    function before `process()`'s own try/except around the provider call,
-    leaving the sub-job orphaned at GENERATING (same failure shape documented
-    for the Redis-singleton bug elsewhere in this codebase's history). This
-    function doesn't yet know how to build the real custom-background prompt
-    (`operations.BACKGROUND_REPLACEMENT.custom_background_prompt`, seeded by
-    migration 0012) — that wiring, plus sending the background photo itself
-    as a second reference image, is the very next task. Falling back to the
-    bare operation prompt here is a deliberate, minimal placeholder so the
-    worker completes safely (as a single-image job) instead of orphaning the
-    sub-job — not the real compositing behavior.
+    """`operations.<OP>.prompt` is the base instruction. A replacement job
+    appends either its pinned preset's own prompt, or — for custom-background
+    compositing (docs/superpowers/specs/2026-08-13-custom-background-compositing-design.md)
+    — the operation's `custom_background_prompt`. `job.preset_code` is NULL
+    for the custom-background path (BackgroundReplaceRequest's mutual-
+    exclusivity validator guarantees exactly one of preset_code /
+    background_storage_path was given at request time), so checking it here
+    is sufficient to pick the right branch without threading the sub-job
+    through this function.
     """
     op_config = find_operation_config(config_version, job.operation) or {}
     prompt = str(op_config.get("prompt", ""))
-    if job.operation == Operation.BACKGROUND_REPLACEMENT and job.preset_code is not None:
-        preset = find_preset(config_version, job.preset_code)
-        assert preset is not None  # validated at job-creation time; config is pinned, immutable
-        prompt = f"{prompt} {preset['prompt']}".strip()
+    if job.operation == Operation.BACKGROUND_REPLACEMENT:
+        if job.preset_code is not None:
+            preset = find_preset(config_version, job.preset_code)
+            assert preset is not None  # validated at job-creation time; config is pinned, immutable
+            prompt = f"{prompt} {preset['prompt']}".strip()
+        else:
+            custom_prompt = str(op_config.get("custom_background_prompt", ""))
+            prompt = f"{prompt} {custom_prompt}".strip()
     return prompt
 
 
@@ -149,6 +141,17 @@ async def process(session: AsyncSession, redis_client: Redis, sub_job_id: uuid.U
     reference_images = [
         storage_service.download_to_temp(input_asset.bucket, input_asset.storage_path).read_bytes()
     ]
+    if sub_job.background_asset_id is not None:
+        background_asset = await assets_repo.get_by_id(session, sub_job.background_asset_id)
+        if background_asset is None:
+            raise SubJobNotFoundError(f"No background asset for sub-job {sub_job_id}.")
+        # Product photo first, background photo second — matches the order
+        # the prompt (see _resolve_prompt above) narrates them in.
+        reference_images.append(
+            storage_service.download_to_temp(
+                background_asset.bucket, background_asset.storage_path
+            ).read_bytes()
+        )
 
     provider = GeminiProvider(model_version=model_version)
     seed = random.randint(0, 2**31 - 1)
