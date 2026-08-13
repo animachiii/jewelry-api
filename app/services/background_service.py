@@ -131,7 +131,7 @@ async def process(session: AsyncSession, redis_client: Redis, sub_job_id: uuid.U
     if input_asset is None:
         raise SubJobNotFoundError(f"No input asset for sub-job {sub_job_id}.")
     reference_images = [
-        storage_service.download_to_temp(input_asset.bucket, input_asset.storage_path).read_bytes()
+        storage_service.download_bytes(input_asset.bucket, input_asset.storage_path)
     ]
 
     provider = GeminiProvider(model_version=model_version)
