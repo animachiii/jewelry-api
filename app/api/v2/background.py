@@ -111,4 +111,5 @@ async def replace_background(
         body.metadata,
         idempotency_key,
         _payload_hash(body),
+        background_storage_path=body.background_storage_path,
     )

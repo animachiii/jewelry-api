@@ -122,7 +122,11 @@ Partial unique index: `CREATE UNIQUE INDEX ON config_versions (is_active) WHERE 
     "background_qa_similarity_threshold": 0.92,
     "operations": {
       "BACKGROUND_REMOVAL": { "enabled": true, "prompt": "...", "unit_cost_usd": 0.02 },
-      "BACKGROUND_REPLACEMENT": { "enabled": true, "unit_cost_usd": 0.02 }
+      "BACKGROUND_REPLACEMENT": {
+        "enabled": true,
+        "unit_cost_usd": 0.02,
+        "custom_background_prompt": "..."
+      }
     },
     "background_presets": [
       { "code": "STUDIO_WHITE", "name": "Studio White", "prompt": "...",
@@ -206,6 +210,7 @@ one row, `angle IS NULL`, for a background-operation job.
 | `input_asset_id` | UUID NULL FK → `assets.id` | NULL for `SYNTHETIC` and `SKIPPED` |
 | `matte_asset_id` | UUID NULL FK → `assets.id` | |
 | `output_asset_id` | UUID NULL FK → `assets.id` | |
+| `background_asset_id` | UUID NULL FK → `assets.id` | Set only for a BACKGROUND_REPLACEMENT sub-job that used an uploaded background photo instead of a preset (migration 0011). An ordinary INPUT-kind asset, distinguished from `input_asset_id` only by which FK column points at it. |
 | `prompt_snapshot` | TEXT NULL | Exact resolved prompt sent to the provider |
 | `model_version` | TEXT NULL | Pinned provider model string actually used |
 | `seed` | BIGINT NULL | Recorded for reproducibility |

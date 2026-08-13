@@ -133,9 +133,12 @@ def create_sub_job(
     source_type: SourceType,
     angle: Angle | None = None,
     input_asset_id: uuid.UUID | None = None,
+    background_asset_id: uuid.UUID | None = None,
 ) -> SubJob:
-    """`angle` is None for a background-operation sub-job. Callers must have
-    already validated operation/angle consistency — see
+    """`angle` is None for a background-operation sub-job. `background_asset_id`
+    is set only for a BACKGROUND_REPLACEMENT sub-job that used an uploaded
+    background photo instead of a preset. Callers must have already validated
+    operation/angle consistency — see
     app/services/job_service.py::validate_operation_angle_consistency.
     """
     sub_job = SubJob(
@@ -144,6 +147,7 @@ def create_sub_job(
         status=status,
         source_type=source_type,
         input_asset_id=input_asset_id,
+        background_asset_id=background_asset_id,
     )
     session.add(sub_job)
     return sub_job

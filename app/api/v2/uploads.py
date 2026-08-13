@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends
 
 from app.api.v2.schemas.uploads import (
     PresignedAngle,
+    PresignedBackgroundUpload,
     PresignedOperationUpload,
     PresignUploadRequest,
     PresignUploadResponse,
@@ -53,6 +54,27 @@ async def presign_uploads(
             f"input_{uuid.uuid4().hex[:8]}.jpg"
         )
         result = storage_service.generate_upload_url(settings.BUCKET_INPUTS, storage_path)
+
+        background_upload = None
+        if body.include_background_upload:
+            # Deliberately reuses operation_upload's pending/{client_id}/... prefix
+            # (only the filename prefix differs: background_ vs input_) rather than
+            # a separate scheme — job_service.py's ownership check already does
+            # storage_path.startswith(f"pending/{client.id}/"), so this path is
+            # covered by that same check with no new validation needed.
+            background_storage_path = (
+                f"pending/{client.id}/{group_id}/{body.operation.value}/"
+                f"background_{uuid.uuid4().hex[:8]}.jpg"
+            )
+            background_result = storage_service.generate_upload_url(
+                settings.BUCKET_INPUTS, background_storage_path
+            )
+            background_upload = PresignedBackgroundUpload(
+                upload_url=background_result["signedUrl"],
+                storage_path=background_storage_path,
+                expires_at=expires_at,
+            )
+
         return PresignUploadResponse(
             angles=[],
             operation_upload=PresignedOperationUpload(
@@ -61,6 +83,7 @@ async def presign_uploads(
                 storage_path=storage_path,
                 expires_at=expires_at,
             ),
+            background_upload=background_upload,
         )
 
     assert body.angles is not None  # enforced by the request schema's mode validator

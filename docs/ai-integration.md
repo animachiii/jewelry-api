@@ -62,7 +62,7 @@ Never chain Mode B off another generated image; hallucination compounds.
 | :--- | :--- |
 | **Trigger** | Same as Mode A/B — sub-job enters `GENERATING` |
 | **Where** | Celery `io` queue, `app/workers/background.py` via `app/providers/gemini.py` — **the same `GeminiProvider` class**, unmodified |
-| **Input** | One uploaded photo. For `BACKGROUND_REPLACEMENT`, the pinned preset's own prompt is appended to the operation prompt (`app/services/background_service.py::_resolve_prompt`) |
+| **Input** | One uploaded photo. For `BACKGROUND_REPLACEMENT`, either the pinned preset's own prompt is appended to the operation prompt, **or** — if a custom background photo was uploaded instead (`sub_jobs.background_asset_id`) — that photo's bytes are appended as a second reference image and `custom_background_prompt` is appended to the operation prompt instead (`app/services/background_service.py::_resolve_prompt`/`process`) |
 | **Output** | Product on a flat/solid background — no alpha channel, same `image/jpeg`/`image/png` shape Mode A already produces. "Removal" means standardisation, not a transparent cutout — see `docs/decisions/0002-background-removal-approach.md` for why the Gemini API path can't produce one |
 
 Decided directly rather than spiked over real client pieces (no real `GEMINI_API_KEY`

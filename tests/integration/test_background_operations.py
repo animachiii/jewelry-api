@@ -30,9 +30,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.api_clients import ApiClient
+from app.db.models.assets import Asset
 from app.db.models.config_versions import ConfigVersion
 from app.db.models.cost_events import CostEvent
 from app.db.models.enums import (
+    AssetKind,
     FailureClass,
     JobStatus,
     Operation,
@@ -173,6 +175,46 @@ async def test_presign_rejects_angle_generation_as_operation(
         json={"operation": "ANGLE_GENERATION"},
     )
     assert resp.status_code == 422, resp.text
+
+
+async def test_presign_operation_mode_includes_background_upload_when_requested(
+    client: AsyncClient, api_client_key: str
+) -> None:
+    resp = await client.post(
+        "/api/v2/uploads/presign",
+        headers={"X-API-Key": api_client_key},
+        json={"operation": "BACKGROUND_REPLACEMENT", "include_background_upload": True},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["background_upload"] is not None
+    assert body["background_upload"]["storage_path"] != body["operation_upload"]["storage_path"]
+
+
+async def test_presign_omits_background_upload_by_default(
+    client: AsyncClient, api_client_key: str
+) -> None:
+    resp = await client.post(
+        "/api/v2/uploads/presign",
+        headers={"X-API-Key": api_client_key},
+        json={"operation": "BACKGROUND_REPLACEMENT"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["background_upload"] is None
+
+
+async def test_presign_background_upload_rejected_for_removal_operation(
+    client: AsyncClient, api_client_key: str
+) -> None:
+    resp = await client.post(
+        "/api/v2/uploads/presign",
+        headers={"X-API-Key": api_client_key},
+        json={"operation": "BACKGROUND_REMOVAL", "include_background_upload": True},
+    )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert "include_background_upload is only valid with" in body["error"]["message"]
 
 
 # --- POST /background/remove --------------------------------------------
@@ -329,6 +371,163 @@ async def test_remove_background_storage_path_owned_by_other_client(
     assert resp.json()["error"]["code"] == "ASSET_NOT_OWNED"
 
 
+async def _presign_and_upload_replacement_with_custom_background(
+    client: AsyncClient, key: str
+) -> tuple[str, str]:
+    resp = await client.post(
+        "/api/v2/uploads/presign",
+        headers={"X-API-Key": key},
+        json={"operation": "BACKGROUND_REPLACEMENT", "include_background_upload": True},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    product_upload = body["operation_upload"]
+    background_upload = body["background_upload"]
+    assert background_upload is not None
+
+    put_resp = httpx.put(
+        product_upload["upload_url"],
+        content=_real_jpeg_bytes(),
+        headers={"Content-Type": "image/jpeg"},
+    )
+    assert put_resp.status_code == 200
+    bg_put_resp = httpx.put(
+        background_upload["upload_url"],
+        content=_real_jpeg_bytes(size=(48, 32)),
+        headers={"Content-Type": "image/jpeg"},
+    )
+    assert bg_put_resp.status_code == 200
+    return str(product_upload["storage_path"]), str(background_upload["storage_path"])
+
+
+async def test_replace_background_custom_background_owned_by_other_client(
+    client: AsyncClient, api_client_key: str, db_session: AsyncSession
+) -> None:
+    _, other_key = await _make_client(db_session, "other-bg-custom-client")
+    await db_session.commit()
+    storage_path = await _presign_and_upload_operation(
+        client, api_client_key, "BACKGROUND_REPLACEMENT"
+    )
+    _, other_background_path = await _presign_and_upload_replacement_with_custom_background(
+        client, other_key
+    )
+
+    resp = await client.post(
+        "/api/v2/background/replace",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "replace-bg-other-1"},
+        json={"storage_path": storage_path, "background_storage_path": other_background_path},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "ASSET_NOT_OWNED"
+
+
+async def test_replace_background_custom_background_creates_and_links_asset(
+    client: AsyncClient, api_client_key: str, db_session: AsyncSession
+) -> None:
+    """Service-layer proof, independent of the worker: create_background_job_for_request
+    (Task 6) itself validates, persists, and links the uploaded background photo —
+    this must hold even before the worker (Task 7) does anything with it. Under
+    task_always_eager the job still runs to completion here since
+    background_service.process doesn't look at background_asset_id yet (confirmed
+    separately) — it just ignores it and produces a normal single-image result,
+    which is why this test can assert COMPLETED the same way the preset-based
+    happy path does, without needing Task 7's changes.
+    """
+    (
+        storage_path,
+        background_storage_path,
+    ) = await _presign_and_upload_replacement_with_custom_background(client, api_client_key)
+
+    resp = await client.post(
+        "/api/v2/background/replace",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "replace-custom-bg-link-1"},
+        json={"storage_path": storage_path, "background_storage_path": background_storage_path},
+    )
+    assert resp.status_code == 202, resp.text
+    job_id = uuid.UUID(resp.json()["job_id"])
+
+    job = (await db_session.execute(select(Job).where(Job.id == job_id))).scalar_one()
+    assert job.operation == Operation.BACKGROUND_REPLACEMENT
+    assert job.preset_code is None
+    assert job.status == JobStatus.COMPLETED
+
+    sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
+    assert sub_job.background_asset_id is not None
+
+    background_asset = (
+        await db_session.execute(select(Asset).where(Asset.id == sub_job.background_asset_id))
+    ).scalar_one()
+    assert background_asset.job_id == job.id
+    assert background_asset.kind == AssetKind.INPUT
+    assert background_asset.storage_path == background_storage_path
+    assert background_asset.expires_at is not None  # retention_policy applied here too
+
+
+async def test_replace_background_custom_background_happy_path(
+    client: AsyncClient,
+    api_client_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Custom-background compositing: two images (product + background) go
+    into one Gemini call, one cost event, one output. See
+    docs/superpowers/specs/2026-08-13-custom-background-compositing-design.md.
+    """
+    import app.providers.gemini as gemini_module
+
+    captured: dict = {}
+    fixture = _load(_GEMINI_FIXTURES, "success.json")
+
+    def _capture_call(self: object, prompt: str, reference_images: list, seed: int) -> dict:
+        captured["prompt"] = prompt
+        captured["reference_image_count"] = len(reference_images)
+        captured["reference_images"] = list(reference_images)
+        return fixture
+
+    monkeypatch.setattr(gemini_module.GeminiProvider, "_call_api", _capture_call)
+
+    (
+        storage_path,
+        background_storage_path,
+    ) = await _presign_and_upload_replacement_with_custom_background(client, api_client_key)
+
+    resp = await client.post(
+        "/api/v2/background/replace",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "replace-custom-bg-happy-1"},
+        json={"storage_path": storage_path, "background_storage_path": background_storage_path},
+    )
+    assert resp.status_code == 202, resp.text
+    job_id = uuid.UUID(resp.json()["job_id"])
+
+    assert captured["reference_image_count"] == 2
+    assert "naturally into the supplied background photo" in captured["prompt"]
+    # Not just a count: confirm which image actually landed in which slot.
+    # The product/background fixtures are deliberately different sizes
+    # (32x24 vs 48x32, see _presign_and_upload_replacement_with_custom_background)
+    # so decoding both catches an accidental order swap or a wrong asset
+    # being downloaded, not just "two images arrived."
+    product_image = Image.open(io.BytesIO(captured["reference_images"][0]))
+    background_image = Image.open(io.BytesIO(captured["reference_images"][1]))
+    assert product_image.size == (32, 24)
+    assert background_image.size == (48, 32)
+
+    job = (await db_session.execute(select(Job).where(Job.id == job_id))).scalar_one()
+    assert job.operation == Operation.BACKGROUND_REPLACEMENT
+    assert job.preset_code is None
+    assert job.status == JobStatus.COMPLETED
+
+    sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
+    assert sub_job.background_asset_id is not None
+    assert sub_job.status == SubJobStatus.COMPLETED
+
+    cost_events = (
+        (await db_session.execute(select(CostEvent).where(CostEvent.job_id == job_id)))
+        .scalars()
+        .all()
+    )
+    assert len(cost_events) == 1  # still one Gemini call, regardless of image count
+
+
 async def test_remove_background_disabled_operation_422(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
@@ -434,6 +633,44 @@ async def test_replace_background_inactive_preset_422(
     )
     assert resp.status_code == 422, resp.text
     assert resp.json()["error"]["code"] == "PRESET_INACTIVE"
+
+
+async def test_replace_background_rejects_both_preset_and_custom_background(
+    client: AsyncClient, api_client_key: str
+) -> None:
+    storage_path = await _presign_and_upload_operation(
+        client, api_client_key, "BACKGROUND_REPLACEMENT"
+    )
+    resp = await client.post(
+        "/api/v2/background/replace",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "replace-both-1"},
+        json={
+            "storage_path": storage_path,
+            "preset_code": "STUDIO_WHITE",
+            "background_storage_path": "pending/x/y/z/background_1.jpg",
+        },
+    )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert "exactly one of preset_code or background_storage_path" in body["error"]["message"]
+
+
+async def test_replace_background_rejects_neither_preset_nor_custom_background(
+    client: AsyncClient, api_client_key: str
+) -> None:
+    storage_path = await _presign_and_upload_operation(
+        client, api_client_key, "BACKGROUND_REPLACEMENT"
+    )
+    resp = await client.post(
+        "/api/v2/background/replace",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "replace-neither-1"},
+        json={"storage_path": storage_path},
+    )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert "exactly one of preset_code or background_storage_path" in body["error"]["message"]
 
 
 # --- GET /status/{job_id} -------------------------------------------------

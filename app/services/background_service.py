@@ -66,18 +66,38 @@ class SubJobNotFoundError(Exception):
 
 
 def _resolve_prompt(config_version: ConfigVersion, job: Job) -> str:
-    """`operations.<OP>.prompt` is the base instruction; a replacement job
-    appends its pinned preset's own prompt (docs/schema.md payload shape,
-    Step 3). `job.preset_code` is durable (migration 0009) — the worker
-    can't re-derive it from anywhere else.
+    """`operations.<OP>.prompt` is the base instruction. A replacement job
+    appends either its pinned preset's own prompt, or — for custom-background
+    compositing (docs/superpowers/specs/2026-08-13-custom-background-compositing-design.md)
+    — the operation's `custom_background_prompt`. `job.preset_code` is NULL
+    for the custom-background path (BackgroundReplaceRequest's mutual-
+    exclusivity validator guarantees exactly one of preset_code /
+    background_storage_path was given at request time), so checking it here
+    is sufficient to pick the right branch without threading the sub-job
+    through this function.
     """
     op_config = find_operation_config(config_version, job.operation) or {}
     prompt = str(op_config.get("prompt", ""))
     if job.operation == Operation.BACKGROUND_REPLACEMENT:
-        assert job.preset_code is not None  # enforced at job-creation time (Step 4)
-        preset = find_preset(config_version, job.preset_code)
-        assert preset is not None  # validated at job-creation time; config is pinned, immutable
-        prompt = f"{prompt} {preset['prompt']}".strip()
+        if job.preset_code is not None:
+            preset = find_preset(config_version, job.preset_code)
+            assert preset is not None  # validated at job-creation time; config is pinned, immutable
+            prompt = f"{prompt} {preset['prompt']}".strip()
+        else:
+            # Mirrors the preset branch's loud-failure posture above: a
+            # missing custom_background_prompt (e.g. a job pinned to a
+            # config version older than migration 0012) must not silently
+            # degrade to "just the generic replacement prompt, no
+            # compositing/shadow/lighting instructions" — that would still
+            # return a 202/COMPLETED job with a plausible-looking but
+            # not-actually-composited image, with nothing anywhere
+            # signaling the degradation.
+            custom_prompt = op_config.get("custom_background_prompt")
+            assert custom_prompt, (
+                "custom_background_prompt missing from pinned config "
+                f"for job {job.id} — see migration 0012"
+            )
+            prompt = f"{prompt} {custom_prompt}".strip()
     return prompt
 
 
@@ -133,6 +153,19 @@ async def process(session: AsyncSession, redis_client: Redis, sub_job_id: uuid.U
     reference_images = [
         storage_service.download_bytes(input_asset.bucket, input_asset.storage_path)
     ]
+    if sub_job.background_asset_id is not None:
+        background_asset = await assets_repo.get_by_id(session, sub_job.background_asset_id)
+        if background_asset is None:
+            raise SubJobNotFoundError(f"No background asset for sub-job {sub_job_id}.")
+        # Product photo first, background photo second — matches the order
+        # the prompt (see _resolve_prompt above) narrates them in. Uses
+        # download_bytes (not download_to_temp().read_bytes()) for the same
+        # reason the product-photo download above does — see
+        # storage_service.download_bytes's docstring on the 2026-08-13 OOM
+        # this avoids re-introducing.
+        reference_images.append(
+            storage_service.download_bytes(background_asset.bucket, background_asset.storage_path)
+        )
 
     provider = GeminiProvider(model_version=model_version)
     seed = random.randint(0, 2**31 - 1)

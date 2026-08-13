@@ -219,6 +219,13 @@
           <option value="BACKGROUND_REPLACEMENT">Replace background</option>
         </select>
       </div>
+      <div class="field" id="bg-source-field">
+        <label for="bg-source">Background source</label>
+        <select id="bg-source">
+          <option value="preset">Preset</option>
+          <option value="custom">Custom upload</option>
+        </select>
+      </div>
       <div class="field" id="bg-preset-field">
         <label for="bg-preset">Backdrop preset</label>
         <select id="bg-preset"></select>
@@ -228,6 +235,10 @@
       <div class="field">
         <label for="bg-file">Photo</label>
         <input type="file" id="bg-file" accept="image/jpeg,image/png,image/webp" />
+      </div>
+      <div class="field" id="bg-background-file-field">
+        <label for="bg-background-file">Background photo</label>
+        <input type="file" id="bg-background-file" accept="image/jpeg,image/png,image/webp" />
       </div>
       <div class="field">
         <label for="bg-sku">SKU reference (optional)</label>
@@ -426,10 +437,14 @@
 
   function updatePresetVisibility() {
     const isReplace = $("bg-operation").value === "BACKGROUND_REPLACEMENT";
-    $("bg-preset-field").style.display = isReplace ? "" : "none";
+    $("bg-source-field").style.display = isReplace ? "" : "none";
+    const usingCustom = isReplace && $("bg-source").value === "custom";
+    $("bg-preset-field").style.display = isReplace && !usingCustom ? "" : "none";
+    $("bg-background-file-field").style.display = usingCustom ? "" : "none";
   }
 
   $("bg-operation").addEventListener("change", updatePresetVisibility);
+  $("bg-source").addEventListener("change", updatePresetVisibility);
 
   $("category").addEventListener("change", renderAngleInputs);
 
@@ -602,10 +617,22 @@
       showCallError(errorEl, new Error("Choose a photo first."));
       return;
     }
+
+    const usingCustomBackground =
+      operation === "BACKGROUND_REPLACEMENT" && $("bg-source").value === "custom";
     const presetCode = $("bg-preset").value;
-    if (operation === "BACKGROUND_REPLACEMENT" && !presetCode) {
-      showCallError(errorEl, new Error("No preset available — check the connection/config above."));
-      return;
+    let backgroundFile = null;
+    if (operation === "BACKGROUND_REPLACEMENT") {
+      if (usingCustomBackground) {
+        backgroundFile = $("bg-background-file").files[0];
+        if (!backgroundFile) {
+          showCallError(errorEl, new Error("Choose a background photo first."));
+          return;
+        }
+      } else if (!presetCode) {
+        showCallError(errorEl, new Error("No preset available — check the connection/config above."));
+        return;
+      }
     }
 
     btn.disabled = true;
@@ -614,7 +641,10 @@
       const presignResp = await apiFetch("/api/v2/uploads/presign", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ operation: operation }),
+        body: JSON.stringify({
+          operation: operation,
+          include_background_upload: usingCustomBackground,
+        }),
       });
       const upload = presignResp.operation_upload;
 
@@ -631,7 +661,24 @@
       const body = { storage_path: upload.storage_path };
       const sku = $("bg-sku").value.trim();
       if (sku) body.sku_reference = sku;
-      if (operation === "BACKGROUND_REPLACEMENT") body.preset_code = presetCode;
+
+      if (operation === "BACKGROUND_REPLACEMENT") {
+        if (usingCustomBackground) {
+          const backgroundUpload = presignResp.background_upload;
+          btn.textContent = "Uploading background photo…";
+          const bgPutResp = await fetch(backgroundUpload.upload_url, {
+            method: "PUT",
+            headers: { "Content-Type": backgroundFile.type || "application/octet-stream" },
+            body: backgroundFile,
+          });
+          if (!bgPutResp.ok) {
+            throw new Error("Background upload failed: HTTP " + bgPutResp.status);
+          }
+          body.background_storage_path = backgroundUpload.storage_path;
+        } else {
+          body.preset_code = presetCode;
+        }
+      }
 
       const route = operation === "BACKGROUND_REMOVAL" ? "/background/remove" : "/background/replace";
       btn.textContent = "Creating job…";

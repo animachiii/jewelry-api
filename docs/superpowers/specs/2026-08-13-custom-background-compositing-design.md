@@ -1,7 +1,7 @@
 # Custom Background Compositing — Design
 
 **Date:** 2026-08-13
-**Status:** Approved, not yet implemented
+**Status:** Approved, implemented
 
 ## Problem
 
@@ -101,9 +101,9 @@ No new table. No new `operation_t` value.
 asset and the background asset and calls `GeminiProvider` with **both**
 images instead of one.
 
-`app/providers/gemini.py::GeminiProvider` — call signature gains an optional
-`reference_images: list[bytes] | None` param, additive only. Existing Mode
-A/B/C call sites (single image) are unaffected.
+`app/providers/gemini.py::GeminiProvider` — call signature already accepted
+an optional `reference_images: list[bytes]` param, additive only. Existing
+Mode A/B/C call sites (single image) are unaffected.
 
 `_resolve_prompt` branches on which source is active:
 
