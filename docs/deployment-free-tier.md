@@ -21,19 +21,42 @@ tier for one) and no free managed Redis. V2 (`app/workers/celery_app.py`)
 assumes three separate processes: the API, a Celery `worker`, and Celery
 `beat`. Fitting that into one free service needs two things solved:
 
-1. **All three processes in one container.** `scripts/render_start.sh`
-   runs `alembic upgrade head`, then backgrounds `celery beat` and
-   `celery worker -Q io`, then runs `uvicorn` in the foreground — one
-   process tree, one Render service. Render bills per *service*, not per
-   OS process inside a container, so this is a process-supervision fix at
-   the shell level, not an application-code change (unlike V1's
-   `WORKER_IN_PROCESS`, which ran ARQ's worker loop as an asyncio task
-   inside the same Python process — a different mechanism for a different
-   task runner; Celery isn't built to run as an in-process asyncio task the
-   way ARQ is, so this repo doesn't attempt that). If any one of the three
-   processes dies, `render_start.sh` tears the other two down rather than
+1. **All three roles in one container.** `scripts/render_start.sh`
+   runs `alembic upgrade head`, then backgrounds a single
+   `celery worker -Q io -B --pool=solo`, then runs `uvicorn` in the
+   foreground — one process tree, one Render service. Render bills per
+   *service*, not per OS process inside a container, so this is a
+   process-supervision fix at the shell level, not an application-code
+   change (unlike V1's `WORKER_IN_PROCESS`, which ran ARQ's worker loop as
+   an asyncio task inside the same Python process — a different mechanism
+   for a different task runner; Celery isn't built to run as an in-process
+   asyncio task the way ARQ is, so this repo doesn't attempt that). If
+   either process dies, `render_start.sh` tears the other down rather than
    serving traffic with a half-dead stack (e.g. the API up but nothing
    consuming the job queue) — Render then restarts the whole container.
+
+   **Why one Celery process and not three (2026-08-13).** Beat is embedded
+   (`-B`) and the worker uses `--pool=solo` rather than prefork, because
+   512MB does not fit four Python interpreters. Measured against this exact
+   image: uvicorn 103MB, standalone beat 47MB, worker MainProcess 104MB,
+   and a prefork child 154MB once `google-genai` lazy-loads — and one
+   `BACKGROUND_REMOVAL` job peaks at ~156MB inside the child (4MB input
+   photo, through the real SDK serialization path: base64 request, a
+   thinking-model response carrying two interim draft images plus the
+   final, then the QA call re-sending input+output). End to end that is
+   **279MB idle → 186MB idle** measured as container memory under a real
+   `--memory=512m` cap, a 93MB (33%) cut that buys back exactly the
+   headroom the job spike needs. What it gives up: prefork's per-child
+   recycling, so `google-genai`'s import stays resident for the process's
+   life (bounded one-time growth, not a leak), and a hung task blocks the
+   queue — bounded by `GEMINI_REQUEST_TIMEOUT_SECONDS` and
+   `REDIS_SOCKET_TIMEOUT_SECONDS`. Celery warns against embedded beat in
+   production; that warning is about multi-worker deployments where several
+   embedded schedulers double-fire, and there is exactly one worker here by
+   construction. Note `-B` still forks a child in Celery 5.x, so this is
+   three OS processes, not two — but it shares copy-on-write pages with the
+   parent, which is why container memory falls much further than the
+   process count suggests.
 2. **Redis is Upstash's free tier**, not self-hosted — Render's free tier
    has no persistent disk, so a self-hosted Redis container would lose
    Celery's broker/result state on every restart. Upstash's free tier

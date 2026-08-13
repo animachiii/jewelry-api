@@ -26,14 +26,22 @@ services:
         value: production
       - key: MOCK_MODE
         value: "false"
-      - key: IO_QUEUE_CONCURRENCY
-        value: "1"
-      # Dropped from 4 (2026-08-12): the free instance's 512MB total is
-      # shared by every process render_start.sh starts (beat + worker
-      # MainProcess + N forked prefork children + uvicorn) -- 4 children was
-      # enough on its own, before any lazy-imported SDK weight, to OOM-kill
-      # the whole container roughly every 15-30 min. See render_start.sh's
-      # --max-tasks-per-child comment for the other half of this fix.
+      # CONFIG_SYNC_CRON: hourly, not the code default of */15. Beat is
+      # embedded in the worker on this path (render_start.sh's -B), so its
+      # schedule is this instance's only recurring allocation -- every OOM
+      # kill on 2026-08-12 landed on a */15 boundary. Declared here rather
+      # than dashboard-only: it was set by hand during that incident, which
+      # meant the blueprint and the running service disagreed.
+      - key: CONFIG_SYNC_CRON
+        value: "0 * * * *"
+      # IO_QUEUE_CONCURRENCY is deliberately NOT set here. It does nothing
+      # on this path any more -- render_start.sh runs celery with
+      # --pool=solo (2026-08-13), which has no worker children to size, and
+      # so never passes -c. The setting still exists in app/config.py and is
+      # still live on the Fly path (fly.toml), which uses prefork. Setting
+      # it here would look like a working tuning knob and silently be
+      # ignored. See render_start.sh's header for the measured per-process
+      # memory numbers behind the solo-pool switch.
       # DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY, REDIS_URL,
       # CELERY_BROKER_URL, CELERY_RESULT_BACKEND, GEMINI_API_KEY,
       # GOOGLE_SERVICE_ACCOUNT_JSON, SENTRY_DSN are secrets — set them in
