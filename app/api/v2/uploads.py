@@ -57,6 +57,11 @@ async def presign_uploads(
 
         background_upload = None
         if body.include_background_upload:
+            # Deliberately reuses operation_upload's pending/{client_id}/... prefix
+            # (only the filename prefix differs: background_ vs input_) rather than
+            # a separate scheme — job_service.py's ownership check already does
+            # storage_path.startswith(f"pending/{client.id}/"), so this path is
+            # covered by that same check with no new validation needed.
             background_storage_path = (
                 f"pending/{client.id}/{group_id}/{body.operation.value}/"
                 f"background_{uuid.uuid4().hex[:8]}.jpg"
