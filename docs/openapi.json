@@ -925,6 +925,11 @@
             ],
             "title": "Category Code"
           },
+          "include_background_upload": {
+            "default": false,
+            "title": "Include Background Upload",
+            "type": "boolean"
+          },
           "operation": {
             "anyOf": [
               {
@@ -948,6 +953,16 @@
             },
             "title": "Angles",
             "type": "array"
+          },
+          "background_upload": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresignedBackgroundUpload"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "operation_upload": {
             "anyOf": [
@@ -989,6 +1004,30 @@
           "expires_at"
         ],
         "title": "PresignedAngle",
+        "type": "object"
+      },
+      "PresignedBackgroundUpload": {
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "storage_path": {
+            "title": "Storage Path",
+            "type": "string"
+          },
+          "upload_url": {
+            "title": "Upload Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_url",
+          "storage_path",
+          "expires_at"
+        ],
+        "title": "PresignedBackgroundUpload",
         "type": "object"
       },
       "PresignedOperationUpload": {

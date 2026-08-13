@@ -175,6 +175,46 @@ async def test_presign_rejects_angle_generation_as_operation(
     assert resp.status_code == 422, resp.text
 
 
+async def test_presign_operation_mode_includes_background_upload_when_requested(
+    client: AsyncClient, api_client_key: str
+) -> None:
+    resp = await client.post(
+        "/api/v2/uploads/presign",
+        headers={"X-API-Key": api_client_key},
+        json={"operation": "BACKGROUND_REPLACEMENT", "include_background_upload": True},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["background_upload"] is not None
+    assert body["background_upload"]["storage_path"] != body["operation_upload"]["storage_path"]
+
+
+async def test_presign_omits_background_upload_by_default(
+    client: AsyncClient, api_client_key: str
+) -> None:
+    resp = await client.post(
+        "/api/v2/uploads/presign",
+        headers={"X-API-Key": api_client_key},
+        json={"operation": "BACKGROUND_REPLACEMENT"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["background_upload"] is None
+
+
+async def test_presign_background_upload_rejected_for_removal_operation(
+    client: AsyncClient, api_client_key: str
+) -> None:
+    resp = await client.post(
+        "/api/v2/uploads/presign",
+        headers={"X-API-Key": api_client_key},
+        json={"operation": "BACKGROUND_REMOVAL", "include_background_upload": True},
+    )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert "include_background_upload is only valid with" in body["error"]["message"]
+
+
 # --- POST /background/remove --------------------------------------------
 
 

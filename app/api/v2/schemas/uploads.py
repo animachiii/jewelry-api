@@ -20,6 +20,7 @@ class PresignUploadRequest(BaseModel):
     category_code: str | None = None
     angles: list[Angle] | None = None
     operation: Operation | None = None
+    include_background_upload: bool = False
 
     @model_validator(mode="after")
     def _exactly_one_mode(self) -> "PresignUploadRequest":
@@ -33,6 +34,11 @@ class PresignUploadRequest(BaseModel):
             raise ValueError("operation must be BACKGROUND_REMOVAL or BACKGROUND_REPLACEMENT")
         if not angle_mode and not op_mode:
             raise ValueError("either category_code+angles or operation is required")
+        if self.include_background_upload and self.operation != Operation.BACKGROUND_REPLACEMENT:
+            raise ValueError(
+                "include_background_upload is only valid with "
+                "operation=BACKGROUND_REPLACEMENT"
+            )
         return self
 
 
@@ -50,6 +56,13 @@ class PresignedOperationUpload(BaseModel):
     expires_at: datetime
 
 
+class PresignedBackgroundUpload(BaseModel):
+    upload_url: str
+    storage_path: str
+    expires_at: datetime
+
+
 class PresignUploadResponse(BaseModel):
     angles: list[PresignedAngle] = []
     operation_upload: PresignedOperationUpload | None = None
+    background_upload: PresignedBackgroundUpload | None = None
