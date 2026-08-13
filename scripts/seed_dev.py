@@ -161,6 +161,15 @@ CATEGORY_PAYLOAD = {
             "BACKGROUND_REPLACEMENT": {
                 "enabled": True,
                 "unit_cost_usd": 0.02,
+                "custom_background_prompt": (
+                    "Place the product naturally into the supplied background photo, "
+                    "as if it were physically photographed in that scene. Match the "
+                    "background's light direction, color temperature, and perspective. "
+                    "Render realistic contact shadows and any relevant surface "
+                    "reflections. Do not composite a visibly pasted cutout — the "
+                    "result must read as one photograph, not two images layered "
+                    "together."
+                ),
             },
         },
         "background_presets": [
