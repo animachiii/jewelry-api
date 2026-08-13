@@ -544,7 +544,19 @@ async def create_background_job_for_request(
 
     validate_operation_enabled(config_version, operation)
     if operation == Operation.BACKGROUND_REPLACEMENT:
-        assert preset_code is not None  # enforced by the route's request schema
+        if preset_code is None:
+            # `background_storage_path` is now accepted by the request schema
+            # (BackgroundReplaceRequest's mutual-exclusivity validator,
+            # docs/superpowers/specs/2026-08-13-custom-background-compositing-design.md)
+            # but this function isn't wired to create/link a background asset
+            # from it yet — that lands in a follow-up task. Fail clean with a
+            # clear 422 rather than let the client's genuinely valid request
+            # crash with an unhandled 500 in the meantime.
+            raise OperationDisabledError(
+                "Custom background compositing (background_storage_path) is not yet "
+                "available; use preset_code.",
+                details={"operation": operation.value},
+            )
         validate_preset(config_version, preset_code)
 
     if not storage_service.exists(settings.BUCKET_INPUTS, storage_path):

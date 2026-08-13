@@ -474,6 +474,30 @@ async def test_replace_background_rejects_neither_preset_nor_custom_background(
     assert "exactly one of preset_code or background_storage_path" in body["error"]["message"]
 
 
+async def test_replace_background_custom_background_not_yet_wired_fails_clean(
+    client: AsyncClient, api_client_key: str
+) -> None:
+    """TEMPORARY, remove/replace in the task that wires background_storage_path
+    end-to-end (docs/superpowers/plans/2026-08-13-custom-background-compositing.md
+    Task 6): the request schema (Task 4) now accepts background_storage_path as
+    a genuinely valid alternative to preset_code, but create_background_job_for_request
+    doesn't yet create/link a background asset from it. Pins that this currently
+    fails clean with a 422 rather than an unhandled 500 from the stale
+    `assert preset_code is not None` a Task 4 code-quality review caught — a real,
+    reachable crash for any client that adopted the new field before Task 6 lands.
+    """
+    storage_path = await _presign_and_upload_operation(
+        client, api_client_key, "BACKGROUND_REPLACEMENT"
+    )
+    resp = await client.post(
+        "/api/v2/background/replace",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "replace-custom-not-wired-1"},
+        json={"storage_path": storage_path, "background_storage_path": "pending/x/y/z/bg.jpg"},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "OPERATION_DISABLED"
+
+
 # --- GET /status/{job_id} -------------------------------------------------
 
 
