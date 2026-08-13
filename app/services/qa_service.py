@@ -84,9 +84,7 @@ async def score_synthetic_angle(session: AsyncSession, sub_job_id: uuid.UUID) ->
     if output_asset is None:
         raise SubJobNotFoundInternalError(f"No output asset for sub-job {sub_job_id}.")
 
-    output_bytes = storage_service.download_to_temp(
-        output_asset.bucket, output_asset.storage_path
-    ).read_bytes()
+    output_bytes = storage_service.download_bytes(output_asset.bucket, output_asset.storage_path)
     reference_images = fetch_reference_images(angle_config.get("reference_image_urls", []))
 
     return await _score_and_apply(
@@ -148,11 +146,9 @@ async def score_background_operation(session: AsyncSession, sub_job_id: uuid.UUI
         raise SubJobNotFoundInternalError(f"No output asset for sub-job {sub_job_id}.")
 
     reference_images = [
-        storage_service.download_to_temp(input_asset.bucket, input_asset.storage_path).read_bytes()
+        storage_service.download_bytes(input_asset.bucket, input_asset.storage_path)
     ]
-    output_bytes = storage_service.download_to_temp(
-        output_asset.bucket, output_asset.storage_path
-    ).read_bytes()
+    output_bytes = storage_service.download_bytes(output_asset.bucket, output_asset.storage_path)
 
     return await _score_and_apply(
         session,

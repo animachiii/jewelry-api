@@ -61,6 +61,16 @@ def download_to_temp(bucket: str, storage_path: str) -> Path:
         return Path(tmp.name)
 
 
+def download_bytes(bucket: str, storage_path: str) -> bytes:
+    """Same download as download_to_temp, without the write-then-reread
+    round trip through a temp file — for callers that only need the bytes
+    (every caller except image_validation.py, which needs a real path for
+    PIL). Found during the 2026-08-13 BACKGROUND_REMOVAL OOM investigation:
+    download_to_temp().read_bytes() buffers the same object in memory twice.
+    """
+    return bytes(get_client().storage.from_(bucket).download(storage_path))
+
+
 def upload_from_temp(bucket: str, storage_path: str, local_path: Path, content_type: str) -> None:
     with open(local_path, "rb") as f:
         get_client().storage.from_(bucket).upload(
