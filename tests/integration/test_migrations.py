@@ -918,3 +918,169 @@ def test_0013_model_matches_live_schema_no_autogenerate_diff(
     relevant = [d for d in diffs if "sub_jobs" in repr(d) or "operation_t" in repr(d)]
     assert relevant == [], f"unexpected schema diff for Step 1 objects: {relevant}"
     assert diffs == [], f"unexpected schema diff (whole schema): {diffs}"
+
+
+def test_0014_seeds_match_into_operations_alongside_background_ops(
+    postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 18 Step 2 Checkpoint 2 — migration 0014 inserts a new active
+    config_versions row with `MATCH` merged into `payload.global.operations`
+    alongside whatever `0007` already seeded there (BACKGROUND_REMOVAL/
+    BACKGROUND_REPLACEMENT must survive, not be clobbered); the previous row
+    is deactivated, not mutated."""
+    async_url = postgres_container.get_connection_url()
+    monkeypatch.setattr("app.config.settings.DATABASE_URL", async_url)
+
+    async def _reset_schema() -> None:
+        engine = create_async_engine(async_url)
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+        await engine.dispose()
+
+    asyncio.run(_reset_schema())
+
+    cfg = Config("alembic.ini")
+    # Upgrade through 0007 so `operations.BACKGROUND_REMOVAL`/
+    # `BACKGROUND_REPLACEMENT` already exist before 0014 runs — the
+    # realistic case this migration must merge into, not clobber.
+    command.upgrade(cfg, "0006")
+    asyncio.run(_seed_active_config_version(async_url, "gemini-3.1-flash-image"))
+    command.upgrade(cfg, "0013")
+    before = asyncio.run(_active_config_version(async_url))
+    before_payload = json.loads(before["payload_text"])  # type: ignore[arg-type]
+    assert before_payload["global"]["operations"]["BACKGROUND_REMOVAL"]["enabled"] is True
+    assert "MATCH" not in before_payload["global"]["operations"]
+
+    command.upgrade(cfg, "0014")
+    active = asyncio.run(_active_config_version(async_url))
+    assert active["version_number"] == before["version_number"] + 1  # new row, not mutated
+    payload = json.loads(active["payload_text"])  # type: ignore[arg-type]
+    match_config = payload["global"]["operations"]["MATCH"]
+    assert match_config["enabled"] is True
+    assert match_config["unit_cost_usd"] == 0.02
+    assert "{target_category}" in match_config["prompt"]
+    # BACKGROUND_REMOVAL/BACKGROUND_REPLACEMENT must survive the merge,
+    # not be dropped by a naive setdefault("operations", NEW_OPERATIONS).
+    assert payload["global"]["operations"]["BACKGROUND_REMOVAL"]["enabled"] is True
+    assert payload["global"]["operations"]["BACKGROUND_REPLACEMENT"]["enabled"] is True
+    assert payload["global"]["model_version"] == "gemini-3.1-flash-image"
+
+    async def _row_payload(async_url: str, version_number: int) -> dict[str, object]:
+        engine = create_async_engine(async_url)
+        try:
+            async with engine.connect() as conn:
+                result = await conn.execute(
+                    text(
+                        "SELECT payload::text AS payload_text, is_active "
+                        "FROM config_versions WHERE version_number = :v"
+                    ),
+                    {"v": version_number},
+                )
+                row = result.mappings().first()
+                assert row is not None
+                return dict(row)
+        finally:
+            await engine.dispose()
+
+    prev_row = asyncio.run(_row_payload(async_url, before["version_number"]))
+    assert prev_row["is_active"] is False
+    prev_payload = json.loads(prev_row["payload_text"])  # type: ignore[arg-type]
+    assert "MATCH" not in prev_payload["global"]["operations"]  # untouched, not mutated
+
+    command.downgrade(cfg, "0013")
+    reverted = asyncio.run(_active_config_version(async_url))
+    assert reverted["version_number"] == before["version_number"]
+
+    command.upgrade(cfg, "head")
+
+
+def test_0014_is_idempotent_when_match_already_seeded(
+    postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-running 0014 against a database where MATCH is already present in
+    `operations` (not just where `operations` exists at all — that's the
+    part `0007`'s own "already extended" guard doesn't have to distinguish,
+    since it was the first migration to touch the key) must no-op: no new
+    config_versions row, same active version_number."""
+    async_url = postgres_container.get_connection_url()
+    monkeypatch.setattr("app.config.settings.DATABASE_URL", async_url)
+
+    async def _reset_schema() -> None:
+        engine = create_async_engine(async_url)
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+        await engine.dispose()
+
+    asyncio.run(_reset_schema())
+
+    cfg = Config("alembic.ini")
+    command.upgrade(cfg, "0006")
+    asyncio.run(_seed_active_config_version(async_url, "gemini-3.1-flash-image"))
+    command.upgrade(cfg, "head")  # runs 0014 for the first time
+
+    first_active = asyncio.run(_active_config_version(async_url))
+
+    # Re-run 0014's upgrade() directly against the now-already-seeded
+    # database — simulates a second application of the same migration
+    # without going through Alembic's full command/version-tracking
+    # machinery (which would refuse to re-run an already-stamped revision).
+    # The module filename starts with a digit, so it isn't a valid `import`
+    # target; load it the same way Alembic itself loads versioned scripts.
+    # The migration only ever calls `op.get_bind()` (all its actual work is
+    # plain `bind.execute(sa.text(...))`, no schema DDL), so a minimal stub
+    # standing in for `alembic.op` is enough — no need to wire up a real
+    # Alembic Operations/MigrationContext proxy for this.
+    import importlib.util
+    from unittest.mock import patch
+
+    module_path = "migrations/versions/0014_add_match_config.py"
+    spec = importlib.util.spec_from_file_location("match_config_migration_0014", module_path)
+    assert spec is not None and spec.loader is not None
+    match_config_migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(match_config_migration)
+
+    async def _rerun_upgrade() -> None:
+        engine = create_async_engine(async_url)
+        try:
+            async with engine.begin() as conn:
+
+                def _run(sync_conn):  # type: ignore[no-untyped-def]
+                    class _StubOp:
+                        @staticmethod
+                        def get_bind():  # type: ignore[no-untyped-def]
+                            return sync_conn
+
+                    with patch.object(match_config_migration, "op", _StubOp):
+                        match_config_migration.upgrade()
+
+                await conn.run_sync(_run)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_rerun_upgrade())
+
+    second_active = asyncio.run(_active_config_version(async_url))
+    assert second_active["version_number"] == first_active["version_number"]  # no-op, no new row
+
+    command.upgrade(cfg, "head")
+
+
+def test_0014_is_a_noop_with_no_active_config_version(
+    postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async_url = postgres_container.get_connection_url()
+    monkeypatch.setattr("app.config.settings.DATABASE_URL", async_url)
+
+    async def _reset_schema() -> None:
+        engine = create_async_engine(async_url)
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+        await engine.dispose()
+
+    asyncio.run(_reset_schema())
+
+    cfg = Config("alembic.ini")
+    command.upgrade(cfg, "head")  # must not raise

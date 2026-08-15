@@ -234,6 +234,24 @@ def find_operation_config(
     return operations.get(operation.value)
 
 
+def resolve_match_prompt(config_version: ConfigVersion, target_category: str) -> str:
+    """MATCH's `operations.MATCH.prompt` template (phases/phase-18-match.md
+    Step 2, seeded by migration 0014) carries a genuine runtime
+    `{target_category}` placeholder — the first operation prompt in this
+    codebase that isn't a complete, final string at rest. `str.format` is
+    the right tool, not a custom regex/replace: if the seeded template ever
+    references some other unresolved placeholder (a typo, or a field this
+    function doesn't supply), `.format` raises `KeyError` on its own — the
+    fail-loud behavior the checkpoint wants, so a prompt with a literal
+    `{...}` left in it never ships to Gemini. That KeyError is left to
+    propagate uncaught; do not add a fallback that silently returns the
+    unsubstituted template.
+    """
+    op_config = find_operation_config(config_version, Operation.MATCH) or {}
+    template = str(op_config.get("prompt", ""))
+    return template.format(target_category=target_category)
+
+
 def find_preset(config_version: ConfigVersion, preset_code: str) -> dict[str, Any] | None:
     for preset in config_version.payload.get("global", {}).get("background_presets", []):
         if preset["code"] == preset_code:

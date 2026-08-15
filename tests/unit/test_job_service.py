@@ -17,6 +17,7 @@ from app.services.job_service import (
     PresetNotFoundError,
     find_operation_config,
     find_preset,
+    resolve_match_prompt,
     resolve_operation_unit_cost,
     validate_operation_angle_consistency,
     validate_operation_enabled,
@@ -131,3 +132,42 @@ def test_resolve_operation_unit_cost_falls_back_to_global() -> None:
 def test_resolve_operation_unit_cost_falls_back_to_zero_when_nothing_configured() -> None:
     cv = _config_version({})
     assert resolve_operation_unit_cost(cv, Operation.BACKGROUND_REMOVAL) == 0.0
+
+
+def test_find_operation_config_returns_the_seeded_match_dict() -> None:
+    """Phase 18 Step 2 Checkpoint 2 — find_operation_config works for MATCH
+    exactly like it already does for the background operations."""
+    match_config = {
+        "enabled": True,
+        "prompt": "Design a matching {target_category}.",
+        "unit_cost_usd": 0.02,
+    }
+    cv = _config_version({"operations": {"MATCH": match_config}})
+    assert find_operation_config(cv, Operation.MATCH) == match_config
+
+
+def test_resolve_match_prompt_substitutes_target_category() -> None:
+    cv = _config_version(
+        {"operations": {"MATCH": {"enabled": True, "prompt": "Design a matching {target_category}."}}}
+    )
+    resolved = resolve_match_prompt(cv, target_category="EARRING")
+    assert "matching EARRING" in resolved
+    assert "{target_category}" not in resolved
+
+
+def test_resolve_match_prompt_raises_on_unresolvable_placeholder() -> None:
+    """A template referencing a variable resolve_match_prompt doesn't
+    supply must fail loudly (KeyError from str.format), never silently
+    return the original/half-substituted template."""
+    cv = _config_version(
+        {
+            "operations": {
+                "MATCH": {
+                    "enabled": True,
+                    "prompt": "Make a {target_category} but also {something_else}.",
+                }
+            }
+        }
+    )
+    with pytest.raises(KeyError):
+        resolve_match_prompt(cv, target_category="EARRING")
