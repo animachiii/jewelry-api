@@ -15,6 +15,12 @@ resolve it explicitly, never silently.
 - `synthetic_allowed` is also per category per angle. Requesting synthetic generation for
   an angle where it is not allowed is a `422`.
 
+**MATCH's `target_category` (§14, Phase 18)** validates against this exact same
+`payload.categories` list — not a MATCH-specific category list. `operations.MATCH`
+has no category enumeration of its own; category existence/active-ness is a single
+source of truth shared by `/generate` and `/match` alike. The angle-enablement and
+`synthetic_allowed` bullets above don't apply to MATCH (it has no angles).
+
 ---
 
 ## 2. Job state machine
@@ -112,9 +118,11 @@ and `retryable: false`. The ERP must not render a retry button for these.
 ## 5. Retry rules
 
 - Retry operates on a **single angle** (`POST /jobs/{job_id}/angles/{angle}/retry`) or,
-  for a background-operation job, its one sub-job
-  (`POST /jobs/{job_id}/retry` — Phase 15, §13). Never a whole angle job.
-  `POST /jobs/{job_id}/retry` returns `409` if called on an `ANGLE_GENERATION` job.
+  at the job level (`POST /jobs/{job_id}/retry`), every `FAILED` sub-job on a
+  background-operation job (always exactly one, Phase 15, §13) or a MATCH job
+  (0-4 of its 1-4 variants, Phase 18, §14) — all-or-nothing, see §14. Never a whole
+  angle job. `POST /jobs/{job_id}/retry` returns `409` if called on an
+  `ANGLE_GENERATION` job.
 - Maximum **3 client-initiated retries** per sub-job (`attempt_count` ceiling). The fourth
   request returns `409`.
 - Retry requires the sub-job to be in `FAILED`. `REJECTED`, `COMPLETED`, and in-flight
@@ -165,6 +173,20 @@ calibrated against real client pieces in Phase 9 — treat the default as a plac
 
 A sub-job in `QA_REVIEW` counts as neither succeeded nor failed; the parent stays
 `PROCESSING`. Do not return a flagged image to the client before a human decision.
+
+**MATCH (§14, Phase 18) has no QA gate either — a third posture, not a fourth.**
+There are now exactly two kinds of sub-job with no QA gate at all (real-photo
+angles, above, and MATCH) and two kinds that always get one (`SYNTHETIC` angles,
+above, and background operations, §13). MATCH's omission is a **deliberate scope
+decision**, not an oversight: the existing similarity gate (`GeminiQaProvider`)
+answers "did the output stay faithful to the input," which is the right question
+for background operations (the cutout *is* the product) but the wrong one for
+MATCH, whose output is *supposed* to differ from its source — it's a different,
+matching piece, not the same piece restaged. A stylistic-consistency judge would
+be a different tool than what Phase 9 built, and building one speculatively,
+before real output quality shows it's needed, isn't this project's posture (see
+the "Deferred to v3" table in `phases/phase-roadmap.md`). MATCH ships straight to
+`COMPLETED` on a successful provider call — see `app/services/match_service.py`.
 
 ---
 
@@ -285,3 +307,70 @@ Flagged items appear in `GET /qa/review-queue` with `operation` set and
 **Retry.** `POST /jobs/{job_id}/retry` — see §5. Reuses `retry_service.execute_retry`
 and `job_service.check_retry_preconditions` unmodified; `409 ANGLE_JOB_RETRY_NOT_ALLOWED`
 on an `ANGLE_GENERATION` job.
+
+---
+
+## 14. MATCH (Phase 18)
+
+`MATCH` generates 1-4 companion-piece "variants" from one uploaded style-reference
+photo — `POST /api/v2/match`. See `phases/phase-18-match.md` and
+`docs/ai-integration.md`'s Mode D. Unlike background operations (always exactly one
+sub-job) and like angle generation, MATCH genuinely fans out — but its sub-jobs are
+indexed by `variant_index` (0-based), not `angle`, and every one has `angle IS NULL`.
+
+**Operation matrix** — goes through the same `GeminiProvider` seam every other
+operation uses, unmodified:
+
+| Operation | Input | Prompt source | Output |
+| :--- | :--- | :--- | :--- |
+| `MATCH` | One uploaded photo (style reference) + `target_category` | `config.global.operations.MATCH.prompt`, with `{target_category}` substituted at call time (`job_service.resolve_match_prompt`) | A standalone studio photo of a **different** item matching the reference's metal/stone/design language |
+
+- **Category rules (§1) apply, unchanged.** `target_category` is validated against
+  `payload.categories`, the same single source of truth `/generate`'s `category_code`
+  uses — see §1's MATCH note. `job.category_code` is where the resolved
+  `target_category` is stored (MATCH reuses this existing column; it is not `NULL`
+  for MATCH the way it is for background operations).
+- `requested_angles` is reused as `variant_count` (1-4) for a MATCH job — the third
+  reinterpretation of that column name (angle count → always-1 for background → variant
+  count for MATCH). See `docs/schema.md`'s `jobs.requested_angles` note.
+- `operations.MATCH.enabled` gates `POST /match` — `422 OPERATION_DISABLED` if `false`
+  or absent, same code every other operation uses for the same condition.
+- `unit_cost_usd` resolves per-operation
+  (`config.global.operations.MATCH.unit_cost_usd`), falling back to
+  `config.global.unit_cost_usd` when unset — same generic fallback rule §10 states for
+  every other operation, nothing MATCH-specific.
+- **No QA gate.** See §7's MATCH note — a deliberate scope decision, not a gap.
+
+**Retry — the one genuinely new job-level business rule this phase introduces, on a
+route shared with background operations.** Before Phase 18, `POST /jobs/{job_id}/retry`
+always retried `sub_jobs[0]` — correct only because every job-level-retryable operation
+that existed (background operations) has exactly one sub-job. MATCH has 1-4, so the
+route was generalized:
+
+- It now retries **every `FAILED` sub-job on the job**, not just one.
+- It's **all-or-nothing**: every failed sub-job's own retry preconditions (attempt
+  ceiling, expired input) are validated *before* any of them is executed. A job with
+  two failed variants where only one still has an unexpired input returns `409` for
+  the whole request rather than silently retrying the one that's still eligible and
+  skipping the other — this project's "fail loud, don't silently degrade" posture,
+  not a new one invented for this phase.
+- The idempotency target changed from being keyed on a specific sub-job's ID to
+  `f"{job.id}:retry"` — a fixed function of the job alone. This was necessary because
+  MATCH's retryable set varies request-to-request (which variants are `FAILED` at
+  retry time isn't fixed the way "the job's one sub-job" was), and a replay must
+  always compare against the same stored target regardless of what's `FAILED` *now*.
+- **Verified as a strict behavioral no-op for the existing background-operation
+  case**: the idempotency target string is never observable by a client (compared
+  only server-side in Redis), no existing test asserted on its literal value, and a
+  background-job with exactly one `FAILED` sub-job still retries exactly that one
+  sub-job under the all-or-nothing logic above (a set of size 1 is trivially
+  all-or-nothing). A regression test proving background-retry-replay is still a
+  no-op was added alongside this change.
+- On success, dispatches `match.process` per retried variant (or `background.process`
+  for a background job, dispatch chosen by `job.operation`) — same "reset to
+  `PENDING`, record `RETRY_REQUESTED`, dispatch fresh" shape §5 describes for the
+  single-sub-job case, just looped.
+
+See `app/api/v2/retry.py::retry_job` for the implementation and
+`docs/api-routes.md`'s "Status and retry" note under Companion-Piece Generation for
+the client-facing contract.

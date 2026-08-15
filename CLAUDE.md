@@ -36,6 +36,22 @@ one; see `docs/decisions/0002-background-removal-approach.md`). See
 `docs/business-rules.md` §13 and `docs/api-routes.md`'s "Background
 Operations" section for the full contract.
 
+**Correction, 2026-08-16 (Phase 18):** a fourth operation family now exists
+alongside the four-angle flow and the two background operations above:
+`POST /match` (`MATCH`) generates 1-4 companion-piece variants from one
+uploaded photo, used as a *style reference* rather than the subject being
+transformed — the output is a different physical piece, not the same one
+restaged. Reuses the same job/sub-job state machine, status polling, cost
+recording, and audit trail as everything above; ships straight to
+`COMPLETED` with no QA gate (a deliberate scope decision, not an oversight
+— see `docs/business-rules.md` §7/§14). Also generalized
+`POST /jobs/{job_id}/retry` — previously background-operations-only, always
+retrying a single sub-job — to retry every `FAILED` sub-job on a job,
+all-or-nothing; verified a behavioral no-op for the existing background
+case. See `docs/business-rules.md` §14, `docs/api-routes.md`'s
+"Companion-Piece Generation" section, and `docs/ai-integration.md`'s Mode D
+for the full contract.
+
 **Actors:**
 
 | Actor | Can do |

@@ -720,7 +720,11 @@ async def _insert_client_and_config(
                             '{}'::jsonb, 'SUCCESS', true, now(), now())
                     """
                 ),
-                {"config_id": config_id, "version_number": version_number, "hash": f"h{version_number}"},
+                {
+                    "config_id": config_id,
+                    "version_number": version_number,
+                    "hash": f"h{version_number}",
+                },
             )
     finally:
         await engine.dispose()
@@ -897,6 +901,7 @@ def test_0013_model_matches_live_schema_no_autogenerate_diff(
     async def _diff() -> list[object]:
         from alembic.autogenerate import compare_metadata
         from alembic.runtime.migration import MigrationContext
+
         from app.db.models import Base
 
         engine = create_async_engine(async_url)

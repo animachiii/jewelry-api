@@ -148,7 +148,11 @@ def test_find_operation_config_returns_the_seeded_match_dict() -> None:
 
 def test_resolve_match_prompt_substitutes_target_category() -> None:
     cv = _config_version(
-        {"operations": {"MATCH": {"enabled": True, "prompt": "Design a matching {target_category}."}}}
+        {
+            "operations": {
+                "MATCH": {"enabled": True, "prompt": "Design a matching {target_category}."}
+            }
+        }
     )
     resolved = resolve_match_prompt(cv, target_category="EARRING")
     assert "matching EARRING" in resolved

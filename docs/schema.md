@@ -145,7 +145,8 @@ Partial unique index: `CREATE UNIQUE INDEX ON config_versions (is_active) WHERE 
         "enabled": true,
         "unit_cost_usd": 0.02,
         "custom_background_prompt": "..."
-      }
+      },
+      "MATCH": { "enabled": true, "prompt": "...{target_category}...", "unit_cost_usd": 0.02 }
     },
     "background_presets": [
       { "code": "STUDIO_WHITE", "name": "Studio White", "prompt": "...",
@@ -179,6 +180,15 @@ has no Global tab, so these can only ever be seeded by migration and inherited
 forward. All three are placeholders pending real business decisions — see
 `docs/decisions/0002-background-removal-approach.md` and roadmap open decision #11
 (preset list).
+
+**`global.operations.MATCH` (Phase 18, migration 0014):** seeded the same way,
+alongside the two `BACKGROUND_*` keys already there rather than replacing them
+(migration 0014 merges into the existing `operations` object; a naive
+`setdefault` would have silently dropped the background operations' own config
+on a database that already ran `0007`). `prompt` carries a genuine runtime
+`{target_category}` placeholder, substituted per-request — see
+`app/services/job_service.py::resolve_match_prompt` and roadmap open decision
+#12 (prompt wording / pricing not yet reviewed by the client).
 
 ---
 
@@ -216,7 +226,9 @@ Indexes: `(client_id, created_at DESC)`, `(status)` partial where status in
 ## `sub_jobs`
 
 One row per angle (including skipped angles) for an `ANGLE_GENERATION` job; exactly
-one row, `angle IS NULL`, for a background-operation job.
+one row, `angle IS NULL`, for a background-operation job; 1-4 rows, `angle IS NULL`
+and `variant_index` 0-based and distinct, for a `MATCH` job (migration 0013,
+Phase 18).
 
 | Column | Type | Notes |
 | :--- | :--- | :--- |
