@@ -43,3 +43,23 @@ def fan_out_job(job_id: str) -> list[str]:
     for sub_job_id in sub_job_ids:
         transform_photo_task.delay(sub_job_id)
     return sub_job_ids
+
+
+@celery_app.task(name="orchestration.fan_out_match_job")  # type: ignore[untyped-decorator]
+def fan_out_match_job(job_id: str) -> list[str]:
+    """MATCH's own fan-out task (phases/phase-18-match.md Step 4). Reuses
+    `_run` (and the `dispatch_job` it wraps) unmodified — `dispatch_job` was
+    already fully generic (it just marks the job PROCESSING and returns
+    PENDING sub-job IDs, with nothing angle-specific in it), so no
+    generalization was needed there. A separate Celery task rather than
+    branching `fan_out_job` on `job.operation`: keeps each task's dispatch
+    target explicit/typed at the Celery registration level, the same reason
+    `background.process` and `generation.transform_photo` are already
+    separate named tasks rather than one polymorphic task.
+    """
+    sub_job_ids = run_async(_run(job_id))
+    from app.workers.match import process_task as match_process_task
+
+    for sub_job_id in sub_job_ids:
+        match_process_task.delay(sub_job_id)
+    return sub_job_ids

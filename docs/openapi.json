@@ -817,6 +817,14 @@
           "succeeded_angles": {
             "title": "Succeeded Angles",
             "type": "integer"
+          },
+          "variants": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/VariantStatus"
+            },
+            "title": "Variants",
+            "type": "array"
           }
         },
         "required": [
@@ -1361,6 +1369,96 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "VariantStatus": {
+        "description": "Same per-item fields as BackgroundResultStatus, minus `angle` (same\nreason \u2014 a MATCH sub-job has no angle either) plus `variant_index` \u2014\nMATCH's 1-4 companion-piece variants need something to order/identify\nthemselves by, the same role `angle` plays for AngleStatus. No\n`preview_image_url`: that's background's QA-preview-specific addition\n(2026-08-13), not applicable here since MATCH never enters QA_REVIEW \u2014\nsee phases/phase-18-match.md Step 4. `qa_status`/`qa_score` are kept for\nresponse-shape consistency with the other two status types even though\nthey're always NOT_APPLICABLE/None for MATCH (it never enters\nQA_REVIEW) \u2014 a client parsing all three shapes the same way shouldn't\nhave to special-case MATCH's.",
+        "properties": {
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "failure_class": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FailureClass"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
+          },
+          "qa_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qa Score"
+          },
+          "qa_status": {
+            "$ref": "#/components/schemas/QAStatus"
+          },
+          "retry_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry Url"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "source_type": {
+            "$ref": "#/components/schemas/SourceType"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SubJobStatus"
+          },
+          "synthetic": {
+            "title": "Synthetic",
+            "type": "boolean"
+          },
+          "variant_index": {
+            "title": "Variant Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "variant_index",
+          "status",
+          "source_type",
+          "synthetic",
+          "qa_status",
+          "retryable"
+        ],
+        "title": "VariantStatus",
         "type": "object"
       }
     },

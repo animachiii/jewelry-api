@@ -6,9 +6,12 @@ see phases/phase-8-failure-retry.md. check_retry_preconditions
 now actually mutates state and dispatches a fresh
 generation.transform_photo, reusing Phase 7's dispatch primitive.
 
-The job-level route (Phase 15 Step 4) is for single-sub-job (background)
-jobs only — retry.py stays angle-specific for ANGLE_GENERATION jobs, which
-must keep naming their angle (docs/api-routes.md).
+The job-level route (Phase 15 Step 4) covers every job-level-retryable
+operation — background operations (always exactly one sub-job) and, as of
+Phase 18 Step 4, MATCH (1-4 sub-jobs, retries only the FAILED ones,
+all-or-nothing precondition check before any execution). retry.py stays
+angle-specific for ANGLE_GENERATION jobs, which must keep naming their angle
+(docs/api-routes.md).
 """
 
 import uuid
@@ -135,13 +138,14 @@ async def retry_job(
         )
 
     sub_jobs = await jobs_repo.get_sub_jobs(session, job.id)
-    sub_job = sub_jobs[0] if sub_jobs else None
-    if sub_job is None:
+    if not sub_jobs:
         raise NotFoundError("No sub-job found on this job.", details={"job_id": job_id})
 
-    # Same idempotency shape as the angle route above — see that route's
-    # comment for why this check runs before preconditions.
-    target = f"{sub_job.id}"
+    # Keyed off the job, not a specific sub-job ID — see this route's own
+    # 2026-08-16 note below on why. Same "check before preconditions" order
+    # as the angle route above: a replay of an already-accepted retry is
+    # always a no-op 202, even if every sub-job has since moved past FAILED.
+    target = f"{job.id}:retry"
     existing_target = await idempotency.get_retry_target(str(client.id), idempotency_key)
     if existing_target is not None:
         if existing_target != target:
@@ -150,12 +154,31 @@ async def retry_job(
             )
         return
 
-    # 2026-08-13: a QA_REVIEW+FLAGGED sub-job branches into a narrower
-    # retry — only the judge call (qa.score_background) re-runs, not
-    # generation. Checked before check_retry_preconditions, which would
-    # otherwise 409 immediately (it only ever accepts FAILED). See
-    # docs/superpowers/specs/2026-08-13-background-qa-preview-and-retry-design.md.
-    if sub_job.status == SubJobStatus.QA_REVIEW and sub_job.qa_status == QAStatus.FLAGGED:
+    # 2026-08-16 (Phase 18 Step 4): this route used to always retry
+    # `sub_jobs[0]` — correct only because every operation with a job-level
+    # retry route (BACKGROUND_REMOVAL/BACKGROUND_REPLACEMENT) has exactly
+    # one sub-job. MATCH has 1-4 (sub_jobs.variant_index), so this route now
+    # retries every FAILED sub-job on the job, all-or-nothing: every failed
+    # sub-job's own preconditions (ceiling, expired input) are validated
+    # before any of them is executed, rather than silently retrying some and
+    # skipping others — this project's "fail loud, don't silently degrade"
+    # posture (see e.g. background_service.py's own docstring for the same
+    # principle applied elsewhere). The idempotency target above is a fixed
+    # function of job.id alone (not "whichever sub-jobs are FAILED right
+    # now") precisely so a replay can't recompute a different target than
+    # what was stored the first time and incorrectly 409 instead of no-op.
+
+    # QA_REVIEW+FLAGGED is structurally impossible for a MATCH job (MATCH
+    # never enters QA_REVIEW — see phases/phase-18-match.md Step 4), so this
+    # branch still only ever matches a single sub-job in practice
+    # (background operations). Unaffected by the multi-sub-job change below.
+    qa_flagged = [
+        sj
+        for sj in sub_jobs
+        if sj.status == SubJobStatus.QA_REVIEW and sj.qa_status == QAStatus.FLAGGED
+    ]
+    if qa_flagged:
+        sub_job = qa_flagged[0]
         check_qa_retry_preconditions(sub_job)
 
         execute_qa_retry(session, job, sub_job)
@@ -167,17 +190,42 @@ async def retry_job(
         score_background.delay(str(sub_job.id))
         return
 
-    input_asset = (
-        await assets_repo.get_by_id(session, sub_job.input_asset_id)
-        if sub_job.input_asset_id is not None
-        else None
-    )
-    check_retry_preconditions(sub_job, input_asset)
+    failed = [sj for sj in sub_jobs if sj.status == SubJobStatus.FAILED]
+    if not failed:
+        # Preserves the exact existing 409 (code/message/details) for the
+        # single-sub-job background case; for a multi-sub-job MATCH job with
+        # nothing FAILED, this raises against the first sub-job — still a
+        # correct, clear 409 (check_retry_preconditions always raises here,
+        # since every sub_job in `sub_jobs` is, by construction, not in
+        # `failed`).
+        input_asset = (
+            await assets_repo.get_by_id(session, sub_jobs[0].input_asset_id)
+            if sub_jobs[0].input_asset_id is not None
+            else None
+        )
+        check_retry_preconditions(sub_jobs[0], input_asset)
+        raise AssertionError("unreachable: check_retry_preconditions always raises here")
 
-    execute_retry(session, job, sub_job)
+    # Validate every failed sub-job's own retry preconditions before
+    # executing any of them (see the 2026-08-16 note above).
+    for sub_job in failed:
+        input_asset = (
+            await assets_repo.get_by_id(session, sub_job.input_asset_id)
+            if sub_job.input_asset_id is not None
+            else None
+        )
+        check_retry_preconditions(sub_job, input_asset)
+
+    for sub_job in failed:
+        execute_retry(session, job, sub_job)
     await idempotency.store_retry_target(str(client.id), idempotency_key, target)
     await session.commit()
 
-    from app.workers.background import process_task
+    from app.workers.background import process_task as background_process_task
+    from app.workers.match import process_task as match_process_task
 
-    process_task.delay(str(sub_job.id))
+    dispatch_task = (
+        match_process_task if job.operation == Operation.MATCH else background_process_task
+    )
+    for sub_job in failed:
+        dispatch_task.delay(str(sub_job.id))

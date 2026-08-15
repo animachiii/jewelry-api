@@ -788,11 +788,9 @@ async def create_match_job_for_request(
     same "record the same source per output" pattern angle generation uses,
     applied to variants instead of angles.
 
-    Deliberately does not dispatch any Celery task — see this function's own
-    call site below for the exact comment marking where Phase 18 Step 4's
-    fan-out dispatch goes. A MATCH job created by this function sits at
-    PENDING with no worker triggered until Step 4 lands; that gap is
-    intentional and expected mid-implementation, not a bug.
+    Dispatches `orchestration.fan_out_match_job` after commit, for a
+    genuinely new job only (Phase 18 Step 4) — see this function's own call
+    site below.
     """
     existing = await jobs_repo.get_by_idempotency_key(session, client.id, idempotency_key)
     if existing is not None:
@@ -905,10 +903,13 @@ async def create_match_job_for_request(
             session, client, idempotency_key, payload_hash, variant_count
         )
 
-    # Fan-out dispatch wired in Phase 18 Step 4 — see
-    # phases/phase-18-match.md Step 4. No Celery task is imported or called
-    # here on purpose; a MATCH job created before Step 4 lands sits at
-    # PENDING with no worker triggered, a deliberate, temporary gap.
+    # Phase 18 Step 4: dispatch real work only for a genuinely new job — an
+    # idempotency replay (both branches above) must never re-dispatch, same
+    # rule create_job_for_request/create_background_job_for_request follow
+    # for their own fan-out dispatch.
+    from app.workers.orchestration import fan_out_match_job
+
+    fan_out_match_job.delay(str(job.id))
 
     return await _build_match_accepted_response(job.id, variant_count)
 

@@ -848,6 +848,52 @@ async def test_retry_job_409_when_not_failed(client: AsyncClient, api_client_key
     assert resp.json()["error"]["code"] == "SUBJOB_NOT_RETRYABLE"
 
 
+async def test_retry_job_replay_same_key_is_noop_for_background(
+    client: AsyncClient, api_client_key: str, db_session: AsyncSession
+) -> None:
+    """Regression for the job-level retry-idempotency-target redesign
+    (app/api/v2/retry.py::retry_job) — Phase 18 Step 4 re-keyed the stored
+    idempotency target from the single sub-job's own ID (`f"{sub_job.id}"`)
+    to `f"{job.id}:retry"`, to generalize the route to a variable number of
+    sub-jobs (MATCH). This must be a strict behavior-preserving no-op for
+    the pre-existing single-sub-job (background) case: a replay of the same
+    Idempotency-Key against a job-level retry must still return a no-op 202,
+    not re-dispatch background.process a second time. Same shape as
+    tests/integration/test_retry_real.py's
+    test_retry_replay_same_key_is_noop_no_second_dispatch, which pins this
+    for the angle-level route (unchanged by this redesign).
+    """
+    storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
+    create_resp = await client.post(
+        "/api/v2/background/remove",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "retry-bg-replay-1"},
+        json={"storage_path": storage_path},
+    )
+    job_id = uuid.UUID(create_resp.json()["job_id"])
+
+    job = (await db_session.execute(select(Job).where(Job.id == job_id))).scalar_one()
+    sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
+    assert sub_job.status == SubJobStatus.COMPLETED  # real completion from the initial call
+    sub_job.status = SubJobStatus.FAILED
+    sub_job.failure_class = FailureClass.TRANSIENT_NETWORK
+    job.status = JobStatus.FAILED
+    await db_session.commit()
+
+    headers = {"X-API-Key": api_client_key, "Idempotency-Key": "retry-bg-replay-attempt-1"}
+    first = await client.post(f"/api/v2/jobs/{job_id}/retry", headers=headers)
+    assert first.status_code == 202, first.text
+
+    await db_session.refresh(sub_job)
+    attempt_count_after_first = sub_job.attempt_count
+    assert sub_job.status == SubJobStatus.COMPLETED
+
+    second = await client.post(f"/api/v2/jobs/{job_id}/retry", headers=headers)
+    assert second.status_code == 202, second.text
+
+    await db_session.refresh(sub_job)
+    assert sub_job.attempt_count == attempt_count_after_first  # no second dispatch happened
+
+
 # --- Step 5: worker, provider failure classes, subject-preservation QA gate --
 
 

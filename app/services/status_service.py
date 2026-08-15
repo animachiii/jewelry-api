@@ -7,7 +7,12 @@ read is exactly what production does; settings.MOCK_MODE no longer gates
 either route.
 """
 
-from app.api.v2.schemas.status import AngleStatus, BackgroundResultStatus, JobStatusResponse
+from app.api.v2.schemas.status import (
+    AngleStatus,
+    BackgroundResultStatus,
+    JobStatusResponse,
+    VariantStatus,
+)
 from app.db.models.enums import FailureClass, JobStatus, QAStatus, SourceType, SubJobStatus
 from app.db.models.jobs import Job, SubJob
 from app.services import storage_service
@@ -111,10 +116,52 @@ def build_background_result_status(
     )
 
 
+def build_variant_status(
+    job: Job, sub_job: SubJob, output_bucket_and_path: tuple[str, str] | None
+) -> VariantStatus:
+    """Mirrors build_background_result_status closely, but: `retryable`
+    only checks the FAILED branch (the QA_REVIEW+FLAGGED branch is
+    structurally impossible for MATCH — it never enters QA_REVIEW, see
+    phases/phase-18-match.md Step 4); `retry_url` is the same job-level
+    `/jobs/{job_id}/retry` route background operations use (Step 4 there
+    generalized it to retry every FAILED sub-job on a job, not just one);
+    and there's no `preview_image_url` (that's background's QA-preview-
+    specific addition, not applicable here).
+    """
+    assert sub_job.angle is None
+    assert sub_job.variant_index is not None
+
+    retryable = (
+        sub_job.status == SubJobStatus.FAILED
+        and sub_job.failure_class in _RETRYABLE_FAILURE_CLASSES
+        and sub_job.attempt_count < MAX_RETRY_ATTEMPTS
+    )
+
+    image_url: str | None = None
+    if sub_job.status == SubJobStatus.COMPLETED and output_bucket_and_path is not None:
+        bucket, path = output_bucket_and_path
+        image_url = storage_service.generate_signed_url(bucket, path)
+
+    return VariantStatus(
+        variant_index=sub_job.variant_index,
+        status=sub_job.status,
+        source_type=sub_job.source_type,
+        synthetic=sub_job.source_type == SourceType.SYNTHETIC,
+        image_url=image_url,
+        qa_status=sub_job.qa_status,
+        qa_score=float(sub_job.qa_score) if sub_job.qa_score is not None else None,
+        failure_class=sub_job.failure_class,
+        error_message=sub_job.error_message,
+        retryable=retryable,
+        retry_url=(f"/api/v2/jobs/{job.id}/retry" if retryable else None),
+    )
+
+
 def build_job_status_response(
     job: Job,
     angle_statuses: list[AngleStatus],
     result_statuses: list[BackgroundResultStatus] | None = None,
+    variant_statuses: list[VariantStatus] | None = None,
 ) -> JobStatusResponse:
     return JobStatusResponse(
         job_id=str(job.id),
@@ -129,6 +176,7 @@ def build_job_status_response(
         completed_at=job.completed_at,
         angles=angle_statuses,
         results=result_statuses or [],
+        variants=variant_statuses or [],
     )
 
 
