@@ -1,0 +1,110 @@
+name: Deploy AWS
+
+# Gated on CI (see .github/workflows/ci.yml) via workflow_run, same pattern
+# deploy.yml's Fly jobs already use — a red CI run can never trigger a
+# deploy. See phases/phase-17-aws-deployment.md and
+# docs/decisions/0003-deploy-to-aws.md.
+#
+# Authenticates via OIDC (aws-actions/configure-aws-credentials), not a
+# long-lived access key pair — a real improvement over deploy.yml's Fly
+# jobs, which use a static FLY_API_TOKEN. Requires an IAM role with a GitHub
+# OIDC trust policy scoped to this repo; this session cannot create that
+# role or the AWS account behind it — see docs/deployment-aws.md Step 1 for
+# what the user still needs to set up before either job below can succeed
+# for real.
+#
+# Builds the existing, unmodified Dockerfile and pushes a commit-SHA-tagged
+# image to ECR. If the App Runner service has AutoDeploymentsEnabled set on
+# that ECR repository, that alone triggers the new deployment — no explicit
+# `aws apprunner start-deployment` call needed, one less credential surface
+# in CI. See docs/deployment-aws.md for the App Runner service's own
+# configuration (auto-deploy setting included).
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+env:
+  ECR_REPOSITORY: jewelry-api
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy-staging:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN_STAGING }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY-staging:$IMAGE_TAG" \
+                        -t "$ECR_REGISTRY/$ECR_REPOSITORY-staging:latest" .
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY-staging:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY-staging:latest"
+
+  deploy-production:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN_PRODUCTION }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+                        -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" .
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
+      # Explicit trigger, not relied on as the only mechanism — belt and
+      # braces alongside AutoDeploymentsEnabled, and the one that matters if
+      # that setting is ever off. Idempotent: App Runner no-ops a
+      # start-deployment call against an image tag it's already deploying.
+      - name: Trigger App Runner deployment
+        run: |
+          aws apprunner start-deployment \
+            --service-arn "${{ secrets.AWS_APPRUNNER_SERVICE_ARN_PRODUCTION }}"

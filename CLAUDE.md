@@ -805,3 +805,26 @@ code but its symptoms never cleaned up.
   ops-side written sign-off that the new failure/reconciliation behavior
   is acceptable — same category of gap every prior phase's sign-off item
   carries.
+
+Phase 17 — AWS Deployment (App Runner) is **pipeline/config complete, no
+real AWS account behind it yet** — same category of "done" Phase 12's Fly
+path always was. Client-mandated move off Render's free tier
+(`docs/decisions/0003-deploy-to-aws.md`) after the crash history Phase 16
+fixed at the code level; AWS App Runner was chosen over ECS Fargate or EC2
+because it runs the existing container (`scripts/render_start.sh`)
+**unchanged** — no VPC, no task definitions, no service split. Everything
+session-provable is verified: `.github/workflows/deploy-aws.yml` is valid,
+OIDC-authenticated (a real improvement over the Fly path's static
+`FLY_API_TOKEN`), gated on CI via the same `workflow_run` pattern
+`deploy.yml` already uses; `docker build .` against the unmodified
+`Dockerfile` succeeds and the resulting image's `CMD` is still
+`./scripts/render_start.sh`, confirmed live, not assumed;
+`docs/deployment-aws.md`'s secrets table is cross-checked field-by-field
+against `app/config.py::Settings`, including a note that
+`IO_QUEUE_CONCURRENCY` stays inert under `--pool=solo` on this path too,
+same as every other path, unless a future capacity decision reintroduces
+prefork. **Render stays primary** (`docs/deployment-free-tier.md`) until
+App Runner is verified live — that verification is entirely the user's
+remaining step (AWS account, ECR repositories, OIDC IAM role, App Runner
+service — see `docs/deployment-aws.md`'s "What only the user can do"), the
+same honesty split Phase 12's Fly path always carried and never closed.
