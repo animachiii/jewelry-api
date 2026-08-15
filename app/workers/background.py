@@ -13,16 +13,24 @@ Dispatches `qa.score_background_operation` right after a QA_REVIEW-landing
 `process` call commits — same dispatch-after-commit placement
 generation.py uses for `qa.score_similarity`, so a QA dispatch never reads
 a sub-job row before its own creating transaction has landed.
+
+Phase 16 Step 1: bounded by `settings.WORKER_TASK_TIMEOUT_SECONDS` via
+`asyncio.wait_for`, same as generation.py — see that file's docstring and
+app/workers/celery_app.py's comment on why Celery's own time limits are
+inert under this deployment's `--pool=solo`.
 """
 
+import asyncio
 import uuid
 
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
 from app.core.redis_client import new_redis_client
 from app.db.models.enums import SubJobStatus
 from app.services.background_service import process
+from app.services.generation_service import mark_sub_job_timed_out
 from app.workers._async_utils import run_async
 from app.workers.celery_app import celery_app
 
@@ -41,9 +49,31 @@ async def _run(sub_job_id: str) -> str:
         await engine.dispose()
 
 
+async def _run_timed_out(sub_job_id: str) -> str:
+    """See generation.py's `_run_timed_out` — same fresh-session reasoning.
+    Reuses generation_service.mark_sub_job_timed_out unmodified: it's
+    already operation-agnostic (keyed on sub-job status, not angle vs
+    background), the same way status_rollup.compute_parent_status is.
+    """
+    engine = create_async_engine(settings.DATABASE_URL)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            sub_job = await mark_sub_job_timed_out(session, uuid.UUID(sub_job_id))
+            await session.commit()
+            return sub_job.status.value
+    finally:
+        await engine.dispose()
+
+
 @celery_app.task(name="background.process")  # type: ignore[untyped-decorator]
 def process_task(sub_job_id: str) -> str:
-    status = run_async(_run(sub_job_id))
+    try:
+        status = run_async(
+            asyncio.wait_for(_run(sub_job_id), timeout=settings.WORKER_TASK_TIMEOUT_SECONDS)
+        )
+    except (TimeoutError, SoftTimeLimitExceeded):
+        return run_async(_run_timed_out(sub_job_id))
     if status == SubJobStatus.QA_REVIEW.value:
         from app.workers.qa import score_background
 

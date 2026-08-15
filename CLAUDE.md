@@ -729,3 +729,79 @@ with a second reference image appended
 same status as `qa_similarity_threshold` and the other Phase 15 seed values
 above). Does not reopen decision 0002 — still no alpha channel, still one
 flattened image out.
+
+Phase 16 — Stability Closeout is **complete**, verified live against the
+real Render service (`srv-d9s46ifavr4c73ae6oc0`) and real Supabase project
+(`rsolykmjupiusdujajgj`) — not fixture-driven, per the phase file's own
+instruction. Not in the original 15-phase plan; added after a live
+diagnostic session found the 2026-08-13 free-tier OOM fix already landed in
+code but its symptoms never cleaned up.
+
+- **Task timeout enforcement had to change mechanism, not just get
+  configured.** `celery_app.conf.task_time_limit`/`task_soft_time_limit`
+  (180s/150s) are set, but confirmed **inert** under this deployment's
+  `--pool=solo` (the 2026-08-13 OOM fix) — read directly from the installed
+  `celery==5.6.3` source: solo's `TaskPool` reports `timeouts: ()`, and its
+  `on_apply` (`concurrency.base.apply_target`) silently discards a
+  `timeout`/`soft_timeout` kwarg without ever enforcing it. Real enforcement
+  is `settings.WORKER_TASK_TIMEOUT_SECONDS` (180s) applied via
+  `asyncio.wait_for` inside `app/workers/generation.py` and
+  `app/workers/background.py`, catching both `TimeoutError` and (for free,
+  in case the pool ever changes back) `SoftTimeLimitExceeded`. Both route to
+  new `generation_service.mark_sub_job_timed_out`.
+- **Reconciliation sweep** (`app/services/reconciliation_service.py`,
+  `app/workers/reconciliation.py`, beat task `reconciliation.sweep_stuck_sub_jobs`,
+  every `RECONCILIATION_SWEEP_CRON` — default 15 min, deliberately frequent
+  since this deployment's container restarts every 1-4 hours on the free
+  tier, confirmed via Render Events) is scoped to **`PENDING`/`GENERATING`
+  only, never `QA_REVIEW`** — the phase file's original sketch ("any
+  non-terminal status") would have wrongly failed sub-jobs correctly
+  waiting in the human review queue (`docs/business-rules.md` §7); caught
+  by checking real live data before writing the sweep, not by inspection
+  alone. One-time cleanup (`scripts/reconcile_legacy_orphans.py`)
+  reconciled 23 real pre-2026-08-13 orphaned sub-jobs live (not 15 — the
+  live count had grown since the diagnostic session that wrote this phase's
+  spec); every affected job's status rolled up correctly, verified live.
+- **Found and fixed, not anticipated by the phase file:**
+  `app/workers/retention.py` carried the exact same shared-engine +
+  bare-`asyncio.run()` shape `app/workers/config.py`'s own docstring already
+  documents as a past production incident (`RuntimeError`, connection bound
+  to a closed loop on a second same-process tick) — found while building
+  the new reconciliation worker on the same beat-task shape, not by
+  auditing retention on purpose. Fixed to the same per-call-engine +
+  `run_async` pattern `config.py` already established.
+- **RLS verification (not remediation):** confirmed, not assumed —
+  `DATABASE_URL` uses the Postgres session-pooler role (`postgres.<project-ref>`),
+  not an anon/authenticated JWT role; zero anon-key matches repo-wide;
+  `docs/integration-guide.md` never tells the Flutter team to hold a
+  Supabase credential. See `docs/schema.md`'s RLS note for the full
+  verification record.
+- **Storage audit found a different anomaly than expected.** The leading
+  hypothesis (a code bug writing placeholder objects on failed
+  generations) was wrong — confirmed by reading every OUTPUT-asset write
+  path. Real cause: this repo's own test suite (deliberately never mocking
+  Storage, per `docs/ai-integration.md`) uploads real bytes to the real,
+  shared Supabase project on every run with nothing ever cleaning them up.
+  99.7-99.9% of objects in both `jewelry-inputs`/`jewelry-outputs` had no
+  matching `assets` row. Fixed going forward with a new autouse pytest
+  fixture (`tests/conftest.py::_cleanup_storage_uploads`); the existing
+  57,022-object backlog (176MB) was deleted live after explicit
+  confirmation. A third bucket, `jewellery-gen` (308MB), is V1's and was
+  never touched — see `docs/storage-audit-2026-08.md` for the full
+  accounting, including the corrected note that this bucket, not V2's own
+  usage, is the larger long-term capacity constraint (Supabase's quota is
+  project-wide, not per-bucket — worth surfacing again before Phase 17).
+- **A related gap found while wiring up the `OUTPUT` retention default:**
+  `_complete_success` in both `generation_service.py` and
+  `background_service.py` never passed `expires_at` to `create_asset` at
+  all, so every `OUTPUT` asset was `NULL` regardless of
+  `RETENTION_DAYS[AssetKind.OUTPUT]` — setting that value would have been
+  silently inert without this fix. `RETENTION_DAYS[AssetKind.OUTPUT]` is
+  now **180 days** (defaulted, not resolved — roadmap open decision #5),
+  driven by the real 484.6MB-of-500MB pressure this audit found, not by an
+  actual client answer; it remains one dict entry the client can change at
+  any time.
+- **Not done, and can't be from this session:** a Flutter-lead or
+  ops-side written sign-off that the new failure/reconciliation behavior
+  is acceptable — same category of gap every prior phase's sign-off item
+  carries.
