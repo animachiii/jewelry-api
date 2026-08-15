@@ -10,6 +10,20 @@ transaction pooler (6543); it does not support prepared statements, which SQLAlc
 **Row Level Security:** disabled on all tables. The backend connects with the service role
 and is the only writer. The Flutter ERP never touches Postgres directly.
 
+**Verified 2026-08-15 (Phase 16 Step 3):** no anon-role credential exists in any deployed
+environment or client-facing code. `DATABASE_URL` in every environment (checked against
+`.env`, the authoritative known-good config — see `docs/deployment-free-tier.md`) uses
+`postgres.<project-ref>` on the session pooler (port 5432), the full Postgres role, not an
+anon/authenticated JWT role. A repo-wide grep (`ui/index.html` included) for a Supabase
+anon key or `SUPABASE_ANON_KEY` returns zero matches. `docs/integration-guide.md` never
+instructs the Flutter team to hold a Supabase credential — only presigned upload URLs and
+signed output URLs, both scoped, time-limited grants issued by this backend. Live Supabase
+advisory flags this as "critical" using generic language ("anyone with the anon key can
+read or modify every row") that does not apply here — no anon key is ever distributed to
+any client. The Supabase project connection is Postgres session-pooler only, not the REST
+API a browser client would use, so this architecture is not what the advisory is written
+for.
+
 ---
 
 ## Enums

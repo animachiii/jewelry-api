@@ -60,6 +60,7 @@ celery_app = Celery(
         "app.workers.health",
         "app.workers.config",
         "app.workers.retention",
+        "app.workers.reconciliation",
     ],
 )
 
@@ -71,6 +72,7 @@ celery_app.conf.task_routes = {
     "config.sync": {"queue": "io"},
     "health.ping_io": {"queue": "io"},
     "retention.*": {"queue": "io"},
+    "reconciliation.*": {"queue": "io"},
 }
 
 celery_app.conf.beat_schedule = {
@@ -82,12 +84,42 @@ celery_app.conf.beat_schedule = {
         "task": "retention.expire_assets",
         "schedule": _crontab_from_string(settings.RETENTION_SWEEP_CRON),
     },
+    "reconciliation-sweep": {
+        "task": "reconciliation.sweep_stuck_sub_jobs",
+        "schedule": _crontab_from_string(settings.RECONCILIATION_SWEEP_CRON),
+    },
 }
 
 celery_app.conf.task_serializer = "json"
 celery_app.conf.result_serializer = "json"
 celery_app.conf.accept_content = ["json"]
 celery_app.conf.timezone = "UTC"
+
+# Phase 16 Step 1: bounds a hung task (worker OOM-killed mid-task, an
+# unhandled path that doesn't reach generation_service's own classification,
+# or a future bug of the same shape as the two REDIS_SOCKET_TIMEOUT_SECONDS/
+# GEMINI_REQUEST_TIMEOUT_SECONDS incidents already fixed). 150/180 gives a
+# legitimate slow call (120s Gemini timeout + a few seconds of Redis/Storage
+# margin) room to finish while still bounding a genuine hang to minutes, not
+# forever.
+#
+# **Inert under the live deployment as of this phase.** scripts/render_start.sh
+# runs `--pool=solo` (2026-08-13, the OOM fix) specifically because a forked
+# prefork child no longer fits the free tier's 512MB — but Celery's soft/hard
+# time limits are enforced by the pool timing *child processes* and signaling
+# them; solo has no child and no timer (confirmed against the installed
+# celery==5.6.3: `celery.concurrency.solo.TaskPool` reports `timeouts: ()`,
+# and `concurrency.base.apply_target` — solo's `on_apply` — accepts and
+# silently discards a `timeout`/`soft_timeout` kwarg without ever enforcing
+# it). Setting these here is still correct — they document the intended
+# ceiling and take effect for free if the pool is ever switched back to
+# prefork — but they are not what actually bounds a hang today. The real
+# enforcement is `settings.WORKER_TASK_TIMEOUT_SECONDS`, applied via
+# `asyncio.wait_for` inside app/workers/generation.py and
+# app/workers/background.py, which works inside a single process regardless
+# of Celery's pool.
+celery_app.conf.task_time_limit = 180
+celery_app.conf.task_soft_time_limit = 150
 
 # Broker and result backend are separately configured even though both point at
 # the same Upstash instance today (one database is all the free tier allows —

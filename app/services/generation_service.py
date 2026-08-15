@@ -42,7 +42,7 @@ from app.db.repositories import job_events as job_events_repo
 from app.db.repositories import jobs as jobs_repo
 from app.providers.base import GenerationResult
 from app.providers.gemini import GeminiProvider
-from app.services import cost_service, storage_service
+from app.services import cost_service, retention_policy, storage_service
 from app.services.job_service import find_category
 from app.services.rate_limiter import acquire as acquire_rate_limit
 from app.services.status_rollup import TERMINAL_STATUSES, compute_parent_status
@@ -189,6 +189,57 @@ async def transform_photo(
     return sub_job
 
 
+async def mark_sub_job_timed_out(session: AsyncSession, sub_job_id: uuid.UUID) -> SubJob:
+    """Phase 16 Step 1 — called by a worker task's timeout handling
+    (app/workers/generation.py, app/workers/background.py) when the
+    coroutine doing the real work is cancelled by `asyncio.wait_for` (or, if
+    the pool ever supports it again, Celery's own `SoftTimeLimitExceeded`).
+    Routes through the same failure shape a caught `ProviderError` already
+    uses (`_fail` + `recompute_parent_status`), for a hang that never
+    reached that classification at all.
+
+    Runs in a session the caller owns, separate from whatever session the
+    cancelled call was using — that session is gone (closed without
+    committing) by the time this runs, since the cancellation unwinds
+    through its `async with` block. Idempotent/defensive: if the sub-job
+    somehow already reached a terminal status before this runs (a narrow
+    race — the underlying call finished and committed right as the timeout
+    fired), this is a no-op rather than clobbering a real result.
+    """
+    sub_job = await jobs_repo.get_sub_job_by_id(session, sub_job_id)
+    if sub_job is None:
+        raise SubJobNotFoundError(f"SubJob {sub_job_id} not found.")
+    job = await jobs_repo.get_by_id(session, sub_job.job_id)
+    if job is None:
+        raise SubJobNotFoundError(f"Job {sub_job.job_id} for sub-job {sub_job_id} not found.")
+
+    if sub_job.status not in (SubJobStatus.PENDING, SubJobStatus.GENERATING):
+        return sub_job
+
+    from_status = sub_job.status
+    sub_job.failure_class = FailureClass.INTERNAL
+    sub_job.error_message = (
+        f"Task exceeded the worker timeout ({settings.WORKER_TASK_TIMEOUT_SECONDS}s) "
+        "and was terminated."
+    )
+    sub_job.status = SubJobStatus.FAILED
+
+    job_events_repo.record_event(
+        session,
+        job.id,
+        "TASK_TIMEOUT",
+        sub_job_id=sub_job.id,
+        from_status=from_status.value,
+        to_status=SubJobStatus.FAILED.value,
+        detail={
+            "angle": sub_job.angle.value if sub_job.angle is not None else None,
+            "timeout_seconds": settings.WORKER_TASK_TIMEOUT_SECONDS,
+        },
+    )
+    await recompute_parent_status(session, job)
+    return sub_job
+
+
 async def recompute_parent_status(session: AsyncSession, job: Job) -> None:
     """Recomputes and persists the parent job's status from its sub-jobs'
     current state, in the same transaction as the sub-job write that
@@ -246,6 +297,12 @@ async def _complete_success(
         storage_path=storage_path,
         mime_type=result.mime_type,
         bytes_=len(result.image_bytes),
+        # Phase 16 Step 4: was never set — every OUTPUT asset got NULL
+        # regardless of RETENTION_DAYS[AssetKind.OUTPUT], so
+        # app/workers/retention.py had nothing of this kind to ever expire.
+        # Found while defaulting that value away from indefinite; without
+        # this fix the new default would have been silently inert.
+        expires_at=retention_policy.compute_expires_at(AssetKind.OUTPUT),
     )
     await session.flush()
 

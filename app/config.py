@@ -30,6 +30,19 @@ class Settings(BaseSettings):
     SIGNED_URL_TTL_SECONDS: int = 3600
     # Phase 4 — Celery beat schedule for app.workers.retention.expire_assets.
     RETENTION_SWEEP_CRON: str = "0 3 * * *"
+    # Phase 16 Step 2 — Celery beat schedule for
+    # app.workers.reconciliation.sweep_stuck_sub_jobs. Deliberately frequent,
+    # unlike RETENTION_SWEEP_CRON's daily cadence: a stuck job is a
+    # client-visible symptom, not housekeeping — and, confirmed live
+    # 2026-08-15, this free-tier instance's container restarts every 1-4
+    # hours, so a once-daily cron risks being skipped entirely for a day or
+    # more if the container happens to be down at the scheduled minute.
+    RECONCILIATION_SWEEP_CRON: str = "*/15 * * * *"
+    # Comfortably longer than WORKER_TASK_TIMEOUT_SECONDS (180s) — this
+    # sweep is the backstop for jobs the timeout itself failed to catch (a
+    # worker OOM-killed outright leaves no task running to hit that
+    # timeout), not the primary mechanism.
+    RECONCILIATION_STALE_AFTER_SECONDS: int = 600
 
     # --- Redis ---
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -49,6 +62,13 @@ class Settings(BaseSettings):
 
     # --- Celery / workers ---
     IO_QUEUE_CONCURRENCY: int = 20
+    # Phase 16 Step 1 — the real enforcement behind celery_app.py's
+    # task_time_limit/task_soft_time_limit, which are inert under the live
+    # `--pool=solo` deployment (see that file's comment). Applied via
+    # `asyncio.wait_for` around each worker task's coroutine
+    # (app/workers/generation.py, app/workers/background.py) so a hang is
+    # bounded regardless of which Celery pool is active.
+    WORKER_TASK_TIMEOUT_SECONDS: int = 180
 
     # --- Models (pinned, never floating aliases) ---
     QA_MODEL_ID: str = ""

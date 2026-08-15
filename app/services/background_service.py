@@ -34,7 +34,7 @@ from app.db.repositories import config_versions as config_versions_repo
 from app.db.repositories import jobs as jobs_repo
 from app.providers.base import GenerationResult
 from app.providers.gemini import GeminiProvider
-from app.services import cost_service, storage_service
+from app.services import cost_service, retention_policy, storage_service
 from app.services.generation_service import recompute_parent_status
 from app.services.job_service import (
     find_operation_config,
@@ -258,6 +258,8 @@ async def _complete_success(
         storage_path=storage_path,
         mime_type=result.mime_type,
         bytes_=len(result.image_bytes),
+        # Phase 16 Step 4 — see generation_service.py's identical fix.
+        expires_at=retention_policy.compute_expires_at(AssetKind.OUTPUT),
     )
     await session.flush()
 

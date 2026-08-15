@@ -80,6 +80,9 @@ useful in production.
 | `BUCKET_OUTPUTS` | Default `jewelry-outputs` is fine, same caveat |
 | `SIGNED_URL_TTL_SECONDS` | Default `3600` is fine |
 | `RETENTION_SWEEP_CRON` | Default is fine |
+| `WORKER_TASK_TIMEOUT_SECONDS` | Default `180` is fine — bounds a hung generation/background task via `asyncio.wait_for`, the mechanism that actually enforces this under `--pool=solo` (Phase 16 Step 1; Celery's own `task_time_limit`/`task_soft_time_limit`, set in `app/workers/celery_app.py`, are inert under solo — see that file's comment) |
+| `RECONCILIATION_SWEEP_CRON` | Default `*/15 * * * *` is fine — deliberately frequent; a stuck job is a client-visible symptom (Phase 16 Step 2) |
+| `RECONCILIATION_STALE_AFTER_SECONDS` | Default `600` is fine — should stay comfortably above `WORKER_TASK_TIMEOUT_SECONDS` |
 | `REDIS_URL` | (has a default, but production needs the real Upstash `rediss://` URL) |
 | `CELERY_BROKER_URL` | Same — Upstash `rediss://` URL. Celery refuses a `rediss://` URL with no `ssl_cert_reqs` (`ValueError: E_REDIS_SSL_CERT_REQS_MISSING_INVALID`, killing `celery beat` at startup); `app/workers/celery_app.py` now sets `CERT_REQUIRED` automatically for any `rediss://` URL, so no query param is needed. An explicit `?ssl_cert_reqs=required` is equivalent and harmless. |
 | `CELERY_RESULT_BACKEND` | Same — Upstash `rediss://` URL, same TLS note as the broker |

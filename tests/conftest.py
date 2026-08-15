@@ -4,6 +4,7 @@ Celery task_always_eager. No shared dev database — see docs/conventions.md.
 
 import json
 from collections.abc import AsyncGenerator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import fakeredis.aioredis
@@ -103,6 +104,65 @@ def _fake_gemini_success_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
     fixture = json.loads((_GEMINI_FIXTURES / "success.json").read_text())
     monkeypatch.setattr(GeminiProvider, "_call_api", lambda self, *a, **k: fixture)
+
+
+@contextmanager
+def track_storage_uploads() -> Iterator[list[tuple[str, str]]]:
+    """Patches storage_service.upload_bytes/upload_from_temp to record every
+    (bucket, path) written while active, and deletes all of them on exit.
+    Shared by `_cleanup_storage_uploads` below and by
+    tests/integration/test_storage_cleanup_fixture.py's regression test, so
+    the test exercises the exact same code the autouse fixture runs rather
+    than a reimplementation that could drift from it.
+    """
+    from app.services import storage_service
+
+    uploaded: list[tuple[str, str]] = []
+    orig_upload_bytes = storage_service.upload_bytes
+    orig_upload_from_temp = storage_service.upload_from_temp
+
+    def tracked_upload_bytes(
+        bucket: str, storage_path: str, data: bytes, content_type: str
+    ) -> None:
+        uploaded.append((bucket, storage_path))
+        orig_upload_bytes(bucket, storage_path, data, content_type)
+
+    def tracked_upload_from_temp(
+        bucket: str, storage_path: str, local_path: Path, content_type: str
+    ) -> None:
+        uploaded.append((bucket, storage_path))
+        orig_upload_from_temp(bucket, storage_path, local_path, content_type)
+
+    storage_service.upload_bytes = tracked_upload_bytes  # type: ignore[assignment]
+    storage_service.upload_from_temp = tracked_upload_from_temp  # type: ignore[assignment]
+    try:
+        yield uploaded
+    finally:
+        storage_service.upload_bytes = orig_upload_bytes  # type: ignore[assignment]
+        storage_service.upload_from_temp = orig_upload_from_temp  # type: ignore[assignment]
+        for bucket, path in uploaded:
+            storage_service.delete(bucket, path)
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_storage_uploads() -> Iterator[None]:
+    """Every integration test that calls storage_service uploads real bytes
+    to the real, shared Supabase project — there is no local Storage stub
+    (docs/ai-integration.md: Storage is deliberately never mocked). The
+    Postgres row a test creates alongside that upload lives in this test's
+    ephemeral testcontainers DB and is gone at teardown; the Storage object
+    is not, unless something removes it.
+
+    Found during Phase 16's storage audit (docs/storage-audit-2026-08.md):
+    39,618 of 39,656 objects in jewelry-outputs, and 17,404 of 17,449 in
+    jewelry-inputs, had no matching `assets` row at all — accumulated test
+    runs, not a production bug or code defect (every real, asset-backed
+    object was 1:1 with its row). This fixture tracks every (bucket, path)
+    a test uploads and removes it on teardown so the test suite stops
+    growing the real, capacity-constrained bucket on every run.
+    """
+    with track_storage_uploads():
+        yield
 
 
 _QA_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "qa"
