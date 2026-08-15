@@ -59,8 +59,25 @@ class ResolvedAnglePlan(BaseModel):
     storage_path: str | None = None
 
 
+class ResolvedVariantPlan(BaseModel):
+    # Parallel to ResolvedAnglePlan, for MATCH jobs (phases/phase-18-match.md
+    # Step 3) — a MATCH job's sub-jobs are indexed by variant_index rather
+    # than angle, each angle=NULL. Kept as its own model (rather than
+    # widening ResolvedAnglePlan with an optional variant_index) since the
+    # two response shapes never mix fields: an angle job's plan entries
+    # never have a variant_index and a MATCH job's never have an angle.
+    variant_index: int
+    status: SubJobStatus
+
+
 class JobAcceptedResponse(BaseModel):
     job_id: str
     status: Literal["PENDING"]
-    angles: list[ResolvedAnglePlan]
+    # Defaulted to [] rather than required: a MATCH response populates
+    # `variants` instead and never touches `angles` (and vice versa for
+    # /generate and background-operation responses, which never touch
+    # `variants`). Every existing caller still passes `angles` explicitly,
+    # so this default is additive, not a behavior change.
+    angles: list[ResolvedAnglePlan] = []
+    variants: list[ResolvedVariantPlan] = []
     poll_after_ms: int

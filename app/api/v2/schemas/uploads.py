@@ -31,7 +31,10 @@ class PresignUploadRequest(BaseModel):
         if angle_mode and (self.category_code is None or not self.angles):
             raise ValueError("category_code and angles must both be set together")
         if op_mode and self.operation == Operation.ANGLE_GENERATION:
-            raise ValueError("operation must be BACKGROUND_REMOVAL or BACKGROUND_REPLACEMENT")
+            raise ValueError(
+                "operation must be BACKGROUND_REMOVAL, BACKGROUND_REPLACEMENT, or MATCH "
+                "(ANGLE_GENERATION uses category_code/angles instead)"
+            )
         if not angle_mode and not op_mode:
             raise ValueError("either category_code+angles or operation is required")
         if self.include_background_upload and self.operation != Operation.BACKGROUND_REPLACEMENT:
