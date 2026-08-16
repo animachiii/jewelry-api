@@ -44,6 +44,7 @@ class Operation(enum.StrEnum):
     BACKGROUND_REPLACEMENT = "BACKGROUND_REPLACEMENT"
     MATCH = "MATCH"
     RECOLOR = "RECOLOR"
+    MIX = "MIX"
 
 
 class AssetKind(enum.StrEnum):

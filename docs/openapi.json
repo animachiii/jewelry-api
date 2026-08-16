@@ -946,13 +946,59 @@
         "title": "MatchRequest",
         "type": "object"
       },
+      "MixRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "primary_mask_storage_path": {
+            "title": "Primary Mask Storage Path",
+            "type": "string"
+          },
+          "primary_storage_path": {
+            "title": "Primary Storage Path",
+            "type": "string"
+          },
+          "secondary_mask_storage_path": {
+            "title": "Secondary Mask Storage Path",
+            "type": "string"
+          },
+          "secondary_storage_path": {
+            "title": "Secondary Storage Path",
+            "type": "string"
+          },
+          "sku_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sku Reference"
+          }
+        },
+        "required": [
+          "primary_storage_path",
+          "primary_mask_storage_path",
+          "secondary_storage_path",
+          "secondary_mask_storage_path"
+        ],
+        "title": "MixRequest",
+        "type": "object"
+      },
       "Operation": {
         "enum": [
           "ANGLE_GENERATION",
           "BACKGROUND_REMOVAL",
           "BACKGROUND_REPLACEMENT",
           "MATCH",
-          "RECOLOR"
+          "RECOLOR",
+          "MIX"
         ],
         "title": "Operation",
         "type": "string"
@@ -1081,6 +1127,26 @@
                 "type": "null"
               }
             ]
+          },
+          "secondary_mask_upload": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresignedSecondaryMaskUpload"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "secondary_upload": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresignedSecondaryUpload"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "title": "PresignUploadResponse",
@@ -1139,7 +1205,7 @@
         "type": "object"
       },
       "PresignedMaskUpload": {
-        "description": "Second upload slot for operation=RECOLOR \u2014 a RECOLOR job is never\nvalid without a mask (unlike a custom background photo for\nBACKGROUND_REPLACEMENT, which is optional), so this is always returned\nalongside operation_upload for RECOLOR, no extra request flag needed.\nSee phases/phase-19-recolor.md Step 3.",
+        "description": "Second upload slot for operation=RECOLOR, or the primary-mask slot\nfor operation=MIX (see PresignedSecondaryUpload/\nPresignedSecondaryMaskUpload below for MIX's other two) \u2014 a RECOLOR or\nMIX job is never valid without a mask (unlike a custom background photo\nfor BACKGROUND_REPLACEMENT, which is optional), so this is always\nreturned alongside operation_upload, no extra request flag needed. See\nphases/phase-19-recolor.md Step 3 and phases/phase-20-mix.md Step 3.",
         "properties": {
           "expires_at": {
             "format": "date-time",
@@ -1189,6 +1255,56 @@
           "expires_at"
         ],
         "title": "PresignedOperationUpload",
+        "type": "object"
+      },
+      "PresignedSecondaryMaskUpload": {
+        "description": "Fourth upload slot for operation=MIX \u2014 the mask on the second source\nphoto (region B to cut). See PresignedSecondaryUpload above.",
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "storage_path": {
+            "title": "Storage Path",
+            "type": "string"
+          },
+          "upload_url": {
+            "title": "Upload Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_url",
+          "storage_path",
+          "expires_at"
+        ],
+        "title": "PresignedSecondaryMaskUpload",
+        "type": "object"
+      },
+      "PresignedSecondaryUpload": {
+        "description": "Third upload slot for operation=MIX \u2014 the second source photo\n(image B, the piece grafted from). Always returned alongside\noperation_upload/mask_upload for MIX, no extra request flag needed \u2014 a\nMIX job is never valid without all four slots. See\nphases/phase-20-mix.md Step 3.",
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "storage_path": {
+            "title": "Storage Path",
+            "type": "string"
+          },
+          "upload_url": {
+            "title": "Upload Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_url",
+          "storage_path",
+          "expires_at"
+        ],
+        "title": "PresignedSecondaryUpload",
         "type": "object"
       },
       "QAStatus": {
@@ -2385,6 +2501,86 @@
         "summary": "Create Match Job",
         "tags": [
           "match"
+        ]
+      }
+    },
+    "/api/v2/mix": {
+      "post": {
+        "operationId": "create_mix_job_api_v2_mix_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MixRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAcceptedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "Idempotency-Key missing"
+          },
+          "401": {
+            "description": "Invalid API key"
+          },
+          "409": {
+            "description": "Idempotency key conflict"
+          },
+          "422": {
+            "description": "Operation disabled, asset not found/owned, invalid image, or mask contract violation (primary or secondary pair)"
+          },
+          "429": {
+            "description": "Rate limit or quota exceeded"
+          }
+        },
+        "summary": "Create Mix Job",
+        "tags": [
+          "mix"
         ]
       }
     },

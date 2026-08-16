@@ -92,6 +92,15 @@ Two mutually exclusive request modes:
   `upload_url`/`storage_path`/expiry shape as `background_upload`), always
   both, no extra request flag needed — a RECOLOR job is never valid without
   a mask. Quote both `storage_path`s back on `POST /recolor`.
+- `"operation"` also accepts `"MIX"` (Phase 20) — response gives **four**
+  slots, always all four, no extra request flag needed — a MIX job is never
+  valid without every one: `operation_upload` (the primary photo — the
+  piece receiving the graft), `mask_upload` (the primary mask),
+  `secondary_upload` (the secondary photo — the piece grafted from), and
+  `secondary_mask_upload` (the secondary mask), all the same
+  `upload_url`/`storage_path`/expiry shape. Quote all four `storage_path`s
+  back on `POST /mix` as `primary_storage_path`/`primary_mask_storage_path`/
+  `secondary_storage_path`/`secondary_mask_storage_path`.
 
 The client uploads directly to Supabase Storage — image bytes never pass through the API.
 This is what keeps `/generate` and the background routes fast and avoids request-size
@@ -137,19 +146,21 @@ Returns the parent `status` (`PENDING` | `PROCESSING` | `COMPLETED` | `PARTIAL_S
 `variants` — `angles` is otherwise byte-identical to before either phase):
 
 - `operation` — `ANGLE_GENERATION` | `BACKGROUND_REMOVAL` | `BACKGROUND_REPLACEMENT` |
-  `MATCH` | `RECOLOR`. **Read this first** to know which array to read next — exactly
-  one of `angles`/`results`/`variants` is ever non-empty for a given job.
+  `MATCH` | `RECOLOR` | `MIX`. **Read this first** to know which array to read next —
+  exactly one of `angles`/`results`/`variants` is ever non-empty for a given job.
 - `angles` — populated for `ANGLE_GENERATION` jobs, empty `[]` otherwise. Each item
   carries `angle`, `status`, `source_type`, `synthetic` flag,
   `image_url` (a **freshly signed URL, 1-hour TTL**, present only when `COMPLETED`),
   `qa_status`/`qa_score` when applicable, `failure_class`/`error_message`/`retryable`
   when failed, and `retry_url` (`/jobs/{job_id}/angles/{angle}/retry`) when retryable.
-- `results` — populated for background-operation and `RECOLOR` jobs (one element,
-  since each has exactly one sub-job), empty `[]` otherwise. Same per-item fields as
+- `results` — populated for background-operation, `RECOLOR`, and `MIX` jobs (one
+  element, since each has exactly one sub-job), empty `[]` otherwise. Same per-item fields as
   `angles` minus `angle` itself; `retry_url` points at the job-level
   `/jobs/{job_id}/retry` instead. For `RECOLOR`, `image_url` is the **composited**
   image — everything outside the mask is byte-identical to the uploaded source, see
-  `docs/business-rules.md` §15.
+  `docs/business-rules.md` §15. For `MIX`, `image_url` is likewise the composited
+  image — everything outside the seam band is byte-identical to the deterministic
+  rough-composite, see `docs/business-rules.md` §16.
 - `variants` — populated for `MATCH` jobs (1-4 elements, one per requested
   companion-piece variant), empty `[]` otherwise. Same per-item fields as `results`
   minus `preview_image_url` (a background-only, QA-preview addition — MATCH never
@@ -404,6 +415,73 @@ as the trivial single-sub-job case, same as background operations.
 
 ---
 
+## Two-Piece Masked Merge (Phase 20)
+
+`MIX` — two uploaded source photos + two uploaded masks in, one merged photo out,
+independent of the four-angle flow. See `phases/phase-20-mix.md` and
+`docs/ai-integration.md`'s Mode F. Reuses the existing job/sub-job state machine,
+`GET /status/{job_id}`, `POST /jobs/{job_id}/retry`, cost recording, and audit
+trail — no parallel pipeline, same posture as RECOLOR and Background Operations
+(MIX always has exactly one sub-job, not MATCH's 1-4).
+
+### `POST /api/v2/mix`
+**Auth required. `client` scope. `Idempotency-Key` header required.**
+
+Request: `{ "primary_storage_path": "...", "primary_mask_storage_path": "...", "secondary_storage_path": "...", "secondary_mask_storage_path": "...", "sku_reference"?: "...", "metadata"?: {} }`.
+All four `storage_path`s come from `POST /uploads/presign`'s
+`{"operation": "MIX"}` response (`operation_upload`/`mask_upload`/
+`secondary_upload`/`secondary_mask_upload` — see Uploads, above).
+"Primary" is the photo whose frame the final output keeps; "secondary" is
+the photo the grafted content comes from — both are equally real uploaded
+photographs of physical pieces, unlike MATCH's style-reference source.
+
+Returns `202` with the same `JobAcceptedResponse` shape as `/background/*`/`/recolor` —
+`job_id`, `status: PENDING`, `poll_after_ms`, and a one-element `angles` array with
+`angle: null` (MIX reuses this field the same way background operations and RECOLOR
+do — see those routes' own docs above).
+
+**Validation, in order — all failures are `4xx` before any job row is created:**
+
+1. `operations.MIX.enabled` is `true` in the active config version
+   (`422 OPERATION_DISABLED` otherwise)
+2. `primary_storage_path` exists in `jewelry-inputs` and belongs to this client, and
+   the uploaded image passes `image_validation.inspect_and_validate`
+   (`422 ASSET_NOT_FOUND` / `ASSET_NOT_OWNED` / `VALIDATION_ERROR`)
+3. `primary_mask_storage_path` exists and belongs to this client, and the uploaded
+   mask passes `mask_validation.validate_mask` against the **primary** source's own
+   dimensions — every mask-contract violation is a distinct, specifically named
+   `422 VALIDATION_ERROR` (same table `docs/business-rules.md` §15/§16 list), never
+   a generic "invalid mask" message
+4. `secondary_storage_path` exists and belongs to this client, and the uploaded
+   image passes `image_validation.inspect_and_validate` — independent of step 2;
+   the two source images are not required to share dimensions
+5. `secondary_mask_storage_path` exists and belongs to this client, and the
+   uploaded mask passes `mask_validation.validate_mask` against the **secondary**
+   source's own dimensions — `mask_validation.validate_mask` is called twice in
+   this route, once per pair, completely independently
+
+**Idempotency:** same `(client_id, Idempotency-Key)` durable dedup as `/generate` —
+a replay with an identical body returns the original `job_id` unchanged; the same
+key with a different body returns `409`.
+
+On acceptance, creates one job (`operation: MIX`, `category_code: null`,
+`requested_angles: 1`) and one sub-job (`angle: null`, `input_asset_id`/
+`mask_asset_id`/`secondary_input_asset_id`/`secondary_mask_asset_id` all set), then
+dispatches `mix.process` directly — no fan-out task, same as RECOLOR and background
+operations.
+
+### Status and retry
+`GET /api/v2/status/{job_id}` — read `operation: "MIX"` first, then `results`
+instead of `angles`/`variants` (see that route's docs above). `image_url` is the
+**composited** output — everything outside the seam band is byte-identical to the
+deterministic rough-composite (not either original source photo directly — see
+`docs/business-rules.md` §16). `POST /api/v2/jobs/{job_id}/retry` works unchanged:
+a MIX job always has exactly one sub-job, so Phase 18's all-or-nothing
+generalization applies as the trivial single-sub-job case, same as RECOLOR and
+background operations.
+
+---
+
 ## Ops
 
 ### `GET /api/v2/jobs`
@@ -433,7 +511,7 @@ moves it to `REJECTED` with `failure_class: QA_REJECTED`. Both recompute parent 
 
 | Scope | Routes |
 | :--- | :--- |
-| `client` | config, uploads, generate, status, retry, `/background/*`, `/match`, `/recolor` |
+| `client` | config, uploads, generate, status, retry, `/background/*`, `/match`, `/recolor`, `/mix` |
 | `ops` | everything in `client` plus `/internal/*`, `/jobs`, `/qa/*` |
 
 Scope lives on the `api_clients` row. There are exactly two scopes — resist adding more

@@ -24,6 +24,9 @@ source of truth shared by `/generate` and `/match` alike. The angle-enablement a
 **RECOLOR (§15, Phase 19) has no category_code and no angle matrix at all** — same
 carve-out as background operations (§13), not MATCH's. See §15.
 
+**MIX (§16, Phase 20) has no category_code and no angle matrix either** — same
+carve-out as RECOLOR and background operations. See §16.
+
 ---
 
 ## 2. Job state machine
@@ -200,6 +203,17 @@ perceptual-similarity question `GeminiQaProvider` is built to answer. It's
 verified by a deterministic test (off-mask pixel diff), not a probabilistic model
 call. RECOLOR ships straight to `COMPLETED` on successful compositing — see
 `app/services/recolor_service.py`.
+
+**MIX (§16, Phase 20) also has no QA gate — a fourth distinct reason, not a fifth
+posture, since it's still "no gate at all" alongside real-photo angles, MATCH, and
+RECOLOR.** RECOLOR's output is provably identical to *the original untouched
+source* outside a static mask. **MIX's output is provably identical to
+`rough_composite` — itself already a deterministic merge of two different pieces'
+photos, not an untouched original — outside the seam band.** The correctness claim
+is real and testable the same way RECOLOR's is, but the baseline it's compared
+against is a synthesized intermediate, not either original photo. MIX ships
+straight to `COMPLETED` on successful compositing — see
+`app/services/mix_service.py`.
 
 ---
 
@@ -462,3 +476,88 @@ one sub-job, so Phase 18's all-or-nothing multi-sub-job generalization applies h
 as the trivial "set of size 1" case, same as it already does for background
 operations — no further changes to the retry route were needed for RECOLOR, only a
 third entry in its dispatch-task lookup (`app/api/v2/retry.py`).
+
+---
+
+## 16. MIX (Phase 20)
+
+`MIX` merges a masked region from one uploaded piece into a masked region of another
+— `POST /api/v2/mix`. See `phases/phase-20-mix.md` and `docs/ai-integration.md`'s
+Mode F. Like RECOLOR and background operations (always exactly one sub-job) and
+unlike MATCH, MIX does not fan out.
+
+**Operation matrix** — goes through the same `GeminiProvider` seam every other
+operation uses, unmodified. Like RECOLOR, the mask never travels to Gemini as a
+mask — the Gemini API has no mask parameter:
+
+| Operation | Input | Prompt source | Output |
+| :--- | :--- | :--- | :--- |
+| `MIX` | Two uploaded photos ("primary" — the piece receiving the graft, "secondary" — the piece grafted from) + one mask on each | `config.global.operations.MIX.prompt` — a complete, final string, no runtime template placeholder (unlike MATCH/RECOLOR) | The primary photo's frame, with the secondary photo's masked region deterministically grafted in and its seam refined |
+
+- **No category rules (§1) apply** — a MIX job has `category_code: NULL`, same as
+  RECOLOR and background operations, not MATCH.
+- `requested_angles` is always `1` for a MIX job — see §3's note. `PARTIAL_SUCCESS`
+  is structurally unreachable, same reasoning §13 gives for background operations.
+- `operations.MIX.enabled` gates `POST /mix` — `422 OPERATION_DISABLED` if `false`
+  or absent, same code every other operation uses.
+- **No palette, no preset** — MIX has no analogous per-request color/style choice.
+- **Mask contract**, validated on ingest, before any provider call — the exact same
+  six rules RECOLOR's mask contract table lists (§15), applied **twice, completely
+  independently**: once for the primary photo/mask pair, once for the secondary
+  pair. Each mask is checked against its *own* source's dimensions, not the other
+  pair's. See `app/services/mask_validation.py` — unmodified, called twice.
+- **No cross-mask validation at ingest time** (e.g. a minimum region size relative
+  to `MIX_SEAM_BAND_PX`/`MASK_FEATHER_PX`, or a bound on the primary/secondary
+  region aspect-ratio mismatch) — deliberately deferred, same "flag the risk, don't
+  solve it speculatively" posture RECOLOR's own reality check gave prong-bleed
+  calibration. See the seam-band note below for the specific, real limitation this
+  leaves open.
+- `unit_cost_usd` resolves per-operation (`config.global.operations.MIX.unit_cost_usd`),
+  falling back to `config.global.unit_cost_usd` when unset — same generic fallback
+  rule §10 states for every other operation.
+- **No QA gate.** See §7's MIX note — a fourth distinct reason, not a fourth
+  posture, verified by a deterministic compositing test instead.
+
+**Deterministic rough-composite, then seam-scoped generate-then-composite.** Unlike
+every other operation, MIX's first real step is not a provider call at all:
+
+1. **Before any provider call:** region B is cropped to its mask's bounding box and
+   scaled (aspect ratio **not** preserved — a deliberate simplification, not yet
+   validated against real client pieces) to exactly fit region A's bounding box,
+   then pasted onto a copy of image A using mask A's own crop as the paste alpha.
+   This produces a fully deterministic `rough_composite` — no model call, no
+   hallucination risk on *placement*, since placement is Pillow math, not something
+   asked of Gemini.
+2. **The seam-band mask:** a ring `MIX_SEAM_BAND_PX` pixels wide (default 6)
+   straddling mask A's boundary — `dilate(mask_a, band_px) - erode(mask_a, band_px)`
+   — marks only the visible graft edge, burned into a magenta overlay on
+   `rough_composite` the same hard-edged way RECOLOR's overlay works. This is what's
+   sent to Gemini, alongside a prompt asking it to blend only the marked seam.
+3. **After the call:** the seam-band mask is feathered by `MASK_FEATHER_PX` (the
+   same existing RECOLOR setting, reused rather than duplicated) and used to
+   composite Gemini's raw output back onto `rough_composite` — not onto either
+   original source directly. Everywhere the feathered seam-band mask is 0 — both
+   the untouched rest of image A *and* the already-correct interior of the graft —
+   the stored `OUTPUT` asset's pixel is `rough_composite`'s own pixel, exactly.
+
+**Known limitation, not fixed in this phase:** for a masked region narrower than
+roughly `2 * (MIX_SEAM_BAND_PX + MASK_FEATHER_PX)` in either dimension, the
+post-call Gaussian feather can bleed through the graft's interior from both sides of
+the seam-band ring at once, letting the provider's output reach pixels this rule
+otherwise guarantees are protected. No ingest-time minimum-region-size check exists
+yet — see `app/services/mix_service.py::_seam_band_mask`'s own docstring. Found and
+documented while building this phase's own central pixel-identity test, not a
+theoretical concern.
+
+See `app/services/mix_service.py` for the implementation.
+**Unvalidated against a real model call** — no real `GEMINI_API_KEY` exists in this
+environment, same gap every phase since 6 has hit. Both the non-aspect-preserving
+scale-to-fit and the seam-only refinement strategy are unvalidated against real
+jewelry macro photography; a correction belongs in `docs/ai-integration.md`'s
+Mode F and this rule, not silently in code.
+
+**Retry.** `POST /jobs/{job_id}/retry` — see §5. A MIX job always has exactly one
+sub-job, so Phase 18's all-or-nothing multi-sub-job generalization applies here as
+the trivial "set of size 1" case, same as it already does for RECOLOR and
+background operations — no further changes to the retry route were needed for MIX,
+only a fourth entry in its dispatch-task lookup (`app/api/v2/retry.py`).
