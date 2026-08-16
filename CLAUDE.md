@@ -592,6 +592,29 @@ handling) rather than implementing a spec; added as roadmap open decision
 #9 instead. A pen-test pass needs a live deployment, which doesn't exist
 yet (Phase 1's own open item) — revisit after Phase 12.
 
+Phase 11 — Observability & Cost Tracking is **complete, scoped narrower than
+the roadmap line** — decided directly with the user, 2026-08-16: Sentry
+declined for cost reasons (its free Developer tier would likely cover this
+project's current volume, but the user chose not to add another account
+regardless), and Celery/queue-depth dashboards (Flower/Grafana) deliberately
+not built, same "on client request only" reasoning `phases/phase-roadmap.md`'s
+own "Deferred to v3" table already gives for a queue admin dashboard.
+structlog correlation was already real since Phase 0/1 — not part of this
+phase's actual scope despite the roadmap line naming it. What got built:
+`GET /jobs` and `GET /jobs/{job_id}/cost` (`app/api/v2/jobs.py`), both real
+for the first time — previously `raise NotImplementedError` stubs with
+real schemas and ops-scope auth already wired since Phase 1. Job listing is
+paginated and filterable by `status`/`category_code`/`created_after`/
+`created_before`; cost reporting sums a job's `cost_events` with a
+**derived**, not stored, `attempt_count` per sub-job (no such column exists
+on `cost_events`). One real bug found and fixed while building, not
+anticipated by the stub: `JobSummary.category_code` was typed non-optional,
+but `jobs.category_code` has been nullable since Phase 15 — would have
+crashed response validation on the first background/RECOLOR/MIX job. Per-SKU
+cost aggregation explicitly not built — no API contract for it exists in
+`docs/api-routes.md`, unlike the two routes this phase built. No new
+migration. See `phases/phase-11-observability-cost-tracking.md`.
+
 Phase 12 — CI/CD & Deployment is **config/pipeline complete, live deploy
 not verified** — a fundamentally different kind of "done" than every phase
 before it, stated plainly rather than glossed over: this session has no

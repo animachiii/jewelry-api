@@ -4,13 +4,20 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
-from app.db.models.enums import JobStatus
+from app.db.models.enums import JobStatus, Operation
 
 
 class JobSummary(BaseModel):
     job_id: str
+    operation: Operation
     status: JobStatus
-    category_code: str
+    # NULL for background operations, RECOLOR, and MIX (docs/schema.md) — only
+    # ANGLE_GENERATION and MATCH (which reuses this column for
+    # target_category) ever set it. Found while building
+    # phases/phase-11-observability-cost-tracking.md's real GET /jobs: this
+    # was typed non-optional here since before any operation but
+    # ANGLE_GENERATION existed.
+    category_code: str | None
     requested_angles: int
     succeeded_angles: int
     failed_angles: int

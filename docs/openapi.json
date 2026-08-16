@@ -852,8 +852,15 @@
       "JobSummary": {
         "properties": {
           "category_code": {
-            "title": "Category Code",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category Code"
           },
           "completed_at": {
             "anyOf": [
@@ -880,6 +887,9 @@
             "title": "Job Id",
             "type": "string"
           },
+          "operation": {
+            "$ref": "#/components/schemas/Operation"
+          },
           "requested_angles": {
             "title": "Requested Angles",
             "type": "integer"
@@ -894,6 +904,7 @@
         },
         "required": [
           "job_id",
+          "operation",
           "status",
           "category_code",
           "requested_angles",
@@ -2105,6 +2116,40 @@
                 }
               ],
               "title": "Category Code"
+            }
+          },
+          {
+            "in": "query",
+            "name": "created_after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Created After"
+            }
+          },
+          {
+            "in": "query",
+            "name": "created_before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Created Before"
             }
           },
           {

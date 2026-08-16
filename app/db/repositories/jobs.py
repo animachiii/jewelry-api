@@ -86,6 +86,43 @@ async def get_flagged_qa_review(session: AsyncSession) -> list[SubJob]:
     return list(result.scalars().all())
 
 
+async def list_jobs(
+    session: AsyncSession,
+    *,
+    status: JobStatus | None,
+    category_code: str | None,
+    created_after: datetime | None,
+    created_before: datetime | None,
+    page: int,
+    page_size: int,
+) -> tuple[list[Job], int]:
+    """Unscoped by client — ops sees every client's jobs, unlike every other
+    query in this repository. See phases/phase-11-observability-cost-tracking.md
+    Step 1. Two separate queries (page + count) rather than a window
+    function: this table has no ops-wide index, so either shape scans; two
+    simple queries are easier to test independently.
+    """
+    filters = []
+    if status is not None:
+        filters.append(Job.status == status)
+    if category_code is not None:
+        filters.append(Job.category_code == category_code)
+    if created_after is not None:
+        filters.append(Job.created_at >= created_after)
+    if created_before is not None:
+        filters.append(Job.created_at <= created_before)
+
+    page_result = await session.execute(
+        select(Job)
+        .where(*filters)
+        .order_by(Job.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    count_result = await session.execute(select(func.count()).select_from(Job).where(*filters))
+    return list(page_result.scalars().all()), int(count_result.scalar_one())
+
+
 def create_job(
     session: AsyncSession,
     *,
