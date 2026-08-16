@@ -52,6 +52,22 @@ case. See `docs/business-rules.md` §14, `docs/api-routes.md`'s
 "Companion-Piece Generation" section, and `docs/ai-integration.md`'s Mode D
 for the full contract.
 
+**Correction, 2026-08-16 (Phase 19):** a fifth operation family now exists:
+`POST /recolor` (`RECOLOR`) recolors a masked gemstone region to a palette
+color from one uploaded source photo plus one uploaded mask. First
+operation needing a mask — the Gemini API has no mask parameter, so the
+mask is conveyed as a colour overlay before the provider call and drives a
+server-side compositing step afterward that discards everything the
+provider changed outside the (feathered) mask. Unlike every other
+operation, **the client-facing output is not the provider's raw
+response** — it's the original source composited with the provider's
+response, so everything outside the mask is byte-identical to the upload.
+No QA gate, for a third, distinct reason from MATCH's (a pixel-exact
+compositing-correctness question, not a similarity-score one). See
+`docs/business-rules.md` §15, `docs/api-routes.md`'s "Masked Gemstone
+Recolor" section, and `docs/ai-integration.md`'s Mode E for the full
+contract.
+
 **Actors:**
 
 | Actor | Can do |

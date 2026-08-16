@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends
 from app.api.v2.schemas.uploads import (
     PresignedAngle,
     PresignedBackgroundUpload,
+    PresignedMaskUpload,
     PresignedOperationUpload,
     PresignUploadRequest,
     PresignUploadResponse,
@@ -26,6 +27,7 @@ from app.api.v2.schemas.uploads import (
 from app.config import settings
 from app.core.auth import require_client_scope
 from app.db.models.api_clients import ApiClient
+from app.db.models.enums import Operation
 from app.services import storage_service
 
 router = APIRouter(tags=["uploads"])
@@ -75,6 +77,24 @@ async def presign_uploads(
                 expires_at=expires_at,
             )
 
+        mask_upload = None
+        if body.operation == Operation.RECOLOR:
+            # A RECOLOR job is never valid without a mask, unlike a custom
+            # background photo — always issued, no request flag needed. See
+            # phases/phase-19-recolor.md Step 3.
+            mask_storage_path = (
+                f"pending/{client.id}/{group_id}/{body.operation.value}/"
+                f"mask_{uuid.uuid4().hex[:8]}.png"
+            )
+            mask_result = storage_service.generate_upload_url(
+                settings.BUCKET_INPUTS, mask_storage_path
+            )
+            mask_upload = PresignedMaskUpload(
+                upload_url=mask_result["signedUrl"],
+                storage_path=mask_storage_path,
+                expires_at=expires_at,
+            )
+
         return PresignUploadResponse(
             angles=[],
             operation_upload=PresignedOperationUpload(
@@ -84,6 +104,7 @@ async def presign_uploads(
                 expires_at=expires_at,
             ),
             background_upload=background_upload,
+            mask_upload=mask_upload,
         )
 
     assert body.angles is not None  # enforced by the request schema's mode validator

@@ -135,13 +135,17 @@ def create_sub_job(
     input_asset_id: uuid.UUID | None = None,
     background_asset_id: uuid.UUID | None = None,
     variant_index: int | None = None,
+    mask_asset_id: uuid.UUID | None = None,
+    palette_code: str | None = None,
 ) -> SubJob:
-    """`angle` is None for a background-operation or MATCH sub-job.
-    `background_asset_id` is set only for a BACKGROUND_REPLACEMENT sub-job
-    that used an uploaded background photo instead of a preset.
+    """`angle` is None for a background-operation, MATCH, or RECOLOR
+    sub-job. `background_asset_id` is set only for a BACKGROUND_REPLACEMENT
+    sub-job that used an uploaded background photo instead of a preset.
     `variant_index` is set only for a MATCH sub-job (0-based position within
     the job's requested companion-piece variants — see migration 0013 and
-    phases/phase-18-match.md Step 1). Callers must have already validated
+    phases/phase-18-match.md Step 1). `mask_asset_id`/`palette_code` are set
+    only for a RECOLOR sub-job — see migration 0015 and
+    phases/phase-19-recolor.md Step 1. Callers must have already validated
     operation/angle consistency — see
     app/services/job_service.py::validate_operation_angle_consistency.
     """
@@ -153,6 +157,8 @@ def create_sub_job(
         input_asset_id=input_asset_id,
         background_asset_id=background_asset_id,
         variant_index=variant_index,
+        mask_asset_id=mask_asset_id,
+        palette_code=palette_code,
     )
     session.add(sub_job)
     return sub_job

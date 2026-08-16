@@ -23,6 +23,12 @@ RETENTION_DAYS: dict[AssetKind, int | None] = {
     AssetKind.INPUT: 90,
     AssetKind.MATTE: 30,
     AssetKind.OUTPUT: 180,  # defaulted 2026-08-15 (Phase 16), not resolved — see module docstring
+    # A client-drawn artifact, not a byproduct the system could recreate
+    # (unlike MATTE, which is regenerable from input) — but it also has no
+    # purpose once its one RECOLOR job is terminal, so it doesn't need
+    # INPUT's 90-day retry-window justification either. See migration 0015
+    # and phases/phase-19-recolor.md Step 5.
+    AssetKind.MASK: 7,
 }
 
 

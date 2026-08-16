@@ -43,12 +43,14 @@ class Operation(enum.StrEnum):
     BACKGROUND_REMOVAL = "BACKGROUND_REMOVAL"
     BACKGROUND_REPLACEMENT = "BACKGROUND_REPLACEMENT"
     MATCH = "MATCH"
+    RECOLOR = "RECOLOR"
 
 
 class AssetKind(enum.StrEnum):
     INPUT = "INPUT"
     MATTE = "MATTE"
     OUTPUT = "OUTPUT"
+    MASK = "MASK"
 
 
 class FailureClass(enum.StrEnum):

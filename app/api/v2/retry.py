@@ -223,9 +223,11 @@ async def retry_job(
 
     from app.workers.background import process_task as background_process_task
     from app.workers.match import process_task as match_process_task
+    from app.workers.recolor import process_task as recolor_process_task
 
-    dispatch_task = (
-        match_process_task if job.operation == Operation.MATCH else background_process_task
-    )
+    dispatch_task = {
+        Operation.MATCH: match_process_task,
+        Operation.RECOLOR: recolor_process_task,
+    }.get(job.operation, background_process_task)
     for sub_job in failed:
         dispatch_task.delay(str(sub_job.id))

@@ -19,6 +19,7 @@ from app.api.v2.schemas.config import (
     AngleAvailability,
     CategoryConfig,
     ConfigResponse,
+    PaletteSummary,
     PresetSummary,
 )
 from app.core.errors import AppError, ErrorCode
@@ -58,10 +59,19 @@ def build_config_response(config_version: ConfigVersion) -> ConfigResponse:
         for preset in config_version.payload.get("global", {}).get("background_presets", [])
         if preset.get("is_active", False)
     ]
+    # code + label only, active entries only — prompt_phrase stays internal,
+    # same rule background presets already follow. See
+    # phases/phase-19-recolor.md Step 2.
+    palette = [
+        PaletteSummary(code=entry["code"], label=entry["label"])
+        for entry in config_version.payload.get("global", {}).get("palette", [])
+        if entry.get("is_active", False)
+    ]
     return ConfigResponse(
         config_version=config_version.version_number,
         categories=categories,
         background_presets=presets,
+        palette=palette,
     )
 
 

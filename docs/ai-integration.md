@@ -23,6 +23,14 @@ A-C, its source image is a style reference rather than the subject being
 transformed, and it has no QA gate at all (not even Mode C's unconditional
 one) — see Mode D for why.
 
+**2026-08-16 (Phase 19):** `RECOLOR` (masked gemstone recolor) is a fourth
+reuse of Call site 1, via `app/workers/recolor.py` /
+`app/services/recolor_service.py`. See Mode E under Call site 1. The first
+mode where the client-facing output is not the provider's raw response —
+Gemini has no mask parameter, so RECOLOR conveys the mask as a colour
+overlay before the call and uses it to composite the result back onto the
+original source afterward.
+
 ---
 
 ## Call site 1 — Image generation
@@ -123,6 +131,53 @@ separate budget.
 
 **Recorded on every call** (to `sub_jobs`): `prompt_snapshot`, `model_version`,
 `seed` — same fields, same reason, as Mode C.
+
+### Mode E — Masked gemstone recolor (RECOLOR, Phase 19)
+
+| | |
+| :--- | :--- |
+| **Trigger** | Same as Mode A/B/C/D — sub-job enters `GENERATING` |
+| **Where** | Celery `io` queue, `app/workers/recolor.py` via `app/providers/gemini.py` — **the same `GeminiProvider` class**, unmodified |
+| **Input** | One image: a solid-magenta overlay burned onto the source photo through the (eroded) mask — never the raw source, never the mask itself. Built by `app/services/recolor_service.py::_build_overlay` |
+| **Output** | The provider's raw response is **not** the client-facing artifact — see below |
+
+**Unlike every other mode, the client-facing output is not the provider's raw
+response.** Confirmed from `app/providers/gemini.py::_call_api`: the Gemini API
+takes only `Part.from_text` and `Part.from_bytes` — there is no mask parameter,
+no alpha-channel input. So the mask does its real work in two places, neither of
+which is "passed as a mask":
+
+1. **Before the call**, it's burned into a colour overlay (a solid magenta fill
+   over the eroded mask region) that becomes the single image sent to the
+   provider, alongside a prompt referencing "the region marked in magenta."
+2. **After the call**, it drives a server-side compositing step
+   (`app/services/recolor_service.py::_composite_result`) that discards
+   everything the provider changed outside a *feathered* version of the mask —
+   erosion and feathering are two separate passes for two separate purposes (see
+   `docs/business-rules.md` §15), not the same blur applied twice. Everywhere the
+   feathered mask is 0, the stored `OUTPUT` asset's pixel is the original
+   source's pixel, exactly.
+
+This is the direct architectural consequence of the same fact Call site 1's own
+constraint note above already states — no mask parameter exists — applied to a
+case (RECOLOR) that, unlike Modes A-D, genuinely needs to preserve part of an
+image byte-for-byte while regenerating another part.
+
+**No QA gate**, for a third, distinct reason from MATCH's — see
+`docs/business-rules.md` §7's RECOLOR note and §15.
+
+**Reuses `rate_limiter` unmodified** — same global `GEMINI_RATE_LIMIT_PER_MINUTE`
+window every other mode competes for.
+
+**Recorded on every call** (to `sub_jobs`): `prompt_snapshot`, `model_version`,
+`seed` — same fields, same reason, as every other mode.
+
+**Mask-conveyance strategy (the colour overlay) is unvalidated against a real
+model call** — no real `GEMINI_API_KEY` exists in this environment, same gap
+every phase since 6 has hit. If a future session with a real key finds this
+doesn't reliably confine edits to the marked region on real jewelry macro
+photography, that correction belongs here and in
+`phases/phase-19-recolor.md`'s own reality-check section — not silently in code.
 
 **Rate limiting (Phase 6, `app/services/rate_limiter.py`).** All provider
 calls pass through a **Redis fixed-window counter**
