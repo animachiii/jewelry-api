@@ -485,10 +485,29 @@ background operations.
 ## Ops
 
 ### `GET /api/v2/jobs`
-Paginated job list, filterable by status, category, and date range. **Ops-only scope.**
+Paginated job list, filterable by `status`, `category_code`, and `created_after`/
+`created_before` (date range). **Ops-only scope.** Real as of Phase 11 (scoped) —
+see `phases/phase-11-observability-cost-tracking.md`. Unscoped by client — ops
+sees every client's jobs, unlike every other route in this API. Each `JobSummary`
+carries `operation` (so a list mixing all five operation types is still readable)
+and a `category_code` that is genuinely nullable in the response — `NULL` for
+background operations, RECOLOR, and MIX, matching `jobs.category_code`'s real
+schema nullability (a gap found and fixed while building this route: the
+response schema was typed non-optional before any operation but
+`ANGLE_GENERATION` existed). `total` reflects the full filtered count, not just
+the current page's size.
 
 ### `GET /api/v2/jobs/{job_id}/cost`
-Aggregated `cost_events` for a job, broken down per angle and attempt. **Ops-only scope.**
+Aggregated `cost_events` for a job, broken down per angle and attempt. **Ops-only
+scope.** Real as of Phase 11 (scoped). Returns `404` for an unknown `job_id` — a
+plain not-found, not the client-scoped 404-not-403 masking `GET /status` uses,
+since ops has no client to scope against. A job with no cost events (e.g. failed
+before any provider call) returns `total_cost_usd: 0`, `events: []`, not a `404`.
+`attempt_count` on each event is **derived**, not a stored column — cost_events
+has no attempt_count field of its own, so each sub-job's own events are numbered
+in creation order (1st call = attempt 1, 2nd = attempt 2, ...). A failed/refused
+call's cost event is always included — `docs/business-rules.md` §10: a refused
+generation is still billed, and this report must not silently drop it.
 
 ### `GET /api/v2/qa/review-queue`
 Sub-jobs in `QA_REVIEW` — synthetic angle outputs or background-operation outputs that
