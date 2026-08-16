@@ -1089,3 +1089,240 @@ def test_0014_is_a_noop_with_no_active_config_version(
 
     cfg = Config("alembic.ini")
     command.upgrade(cfg, "head")  # must not raise
+
+
+def test_0015_adds_recolor_operation_mask_kind_and_columns(
+    postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 19 Step 1 Checkpoint 1 — migration 0015 adds `RECOLOR` to
+    `operation_t`, `MASK` to `asset_kind_t`, and `sub_jobs.mask_asset_id` /
+    `sub_jobs.palette_code`. Unlike migration 0013, it does not touch
+    `ux_sub_jobs_job_single` — a RECOLOR job always has exactly one sub-job,
+    so the existing narrowed index already covers it."""
+    async_url = postgres_container.get_connection_url()
+    monkeypatch.setattr("app.config.settings.DATABASE_URL", async_url)
+
+    async def _reset_schema() -> None:
+        engine = create_async_engine(async_url)
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+        await engine.dispose()
+
+    asyncio.run(_reset_schema())
+
+    cfg = Config("alembic.ini")
+    command.upgrade(cfg, "0014")
+    assert "mask_asset_id" not in asyncio.run(_columns(async_url, "sub_jobs"))
+    assert "palette_code" not in asyncio.run(_columns(async_url, "sub_jobs"))
+    assert "RECOLOR" not in asyncio.run(_enum_values(async_url, "operation_t"))
+    assert "MASK" not in asyncio.run(_enum_values(async_url, "asset_kind_t"))
+    indexes_before = asyncio.run(_indexes(async_url, "sub_jobs"))
+
+    command.upgrade(cfg, "0015")
+    assert "mask_asset_id" in asyncio.run(_columns(async_url, "sub_jobs"))
+    assert "palette_code" in asyncio.run(_columns(async_url, "sub_jobs"))
+    assert "RECOLOR" in asyncio.run(_enum_values(async_url, "operation_t"))
+    assert "MASK" in asyncio.run(_enum_values(async_url, "asset_kind_t"))
+    # No index change — same three partial indexes as before 0015.
+    assert asyncio.run(_indexes(async_url, "sub_jobs")) == indexes_before
+
+    command.downgrade(cfg, "0014")
+    assert "mask_asset_id" not in asyncio.run(_columns(async_url, "sub_jobs"))
+    assert "palette_code" not in asyncio.run(_columns(async_url, "sub_jobs"))
+    # Deliberately not removed — Postgres has no ALTER TYPE ... DROP VALUE,
+    # same posture 0013's downgrade already established.
+    assert "RECOLOR" in asyncio.run(_enum_values(async_url, "operation_t"))
+    assert "MASK" in asyncio.run(_enum_values(async_url, "asset_kind_t"))
+
+    command.upgrade(cfg, "head")
+
+
+def test_0015_recolor_sub_job_with_mask_and_palette_succeeds(
+    postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 19 Step 1 Checkpoint 1 — a single angle-less, variant-less
+    sub-job with mask_asset_id and palette_code set inserts cleanly under a
+    RECOLOR job, and the existing ux_sub_jobs_job_single still rejects a
+    second one under the same job (the background-operation invariant is
+    unbroken by this migration)."""
+    async_url = postgres_container.get_connection_url()
+    monkeypatch.setattr("app.config.settings.DATABASE_URL", async_url)
+
+    async def _reset_schema() -> None:
+        engine = create_async_engine(async_url)
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+        await engine.dispose()
+
+    asyncio.run(_reset_schema())
+    cfg = Config("alembic.ini")
+    command.upgrade(cfg, "head")
+
+    client_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    config_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    asyncio.run(_insert_client_and_config(async_url, client_id, "pfx9", config_id, 300))
+
+    async def _attempt() -> None:
+        from sqlalchemy.exc import IntegrityError
+
+        engine = create_async_engine(async_url)
+        try:
+            async with engine.begin() as conn:
+                result = await conn.execute(
+                    text(
+                        """
+                        INSERT INTO jobs
+                            (client_id, idempotency_key, payload_hash, category_code,
+                             config_version_id, requested_angles, operation)
+                        VALUES (:client_id, 'idem-recolor-1', 'ph-recolor-1', NULL,
+                                :config_id, 1, 'RECOLOR')
+                        RETURNING id
+                        """
+                    ),
+                    {"client_id": client_id, "config_id": config_id},
+                )
+                job_id = result.scalar_one()
+
+                await conn.execute(
+                    text(
+                        "INSERT INTO sub_jobs "
+                        "(job_id, angle, variant_index, source_type, palette_code) "
+                        "VALUES (:job_id, NULL, NULL, 'UPLOADED', 'EMERALD_GREEN')"
+                    ),
+                    {"job_id": job_id},
+                )
+                count = (
+                    await conn.execute(
+                        text("SELECT count(*) FROM sub_jobs WHERE job_id = :job_id"),
+                        {"job_id": job_id},
+                    )
+                ).scalar_one()
+                assert count == 1
+
+                with pytest.raises(IntegrityError):
+                    async with conn.begin_nested():
+                        await conn.execute(
+                            text(
+                                "INSERT INTO sub_jobs "
+                                "(job_id, angle, variant_index, source_type, palette_code) "
+                                "VALUES (:job_id, NULL, NULL, 'UPLOADED', 'RUBY_RED')"
+                            ),
+                            {"job_id": job_id},
+                        )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_attempt())
+
+
+def test_0015_model_matches_live_schema_no_autogenerate_diff(
+    postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 19 Step 1 Checkpoint 1 — after `alembic upgrade head`, the live
+    schema and `Base.metadata` (app/db/models) agree exactly."""
+    async_url = postgres_container.get_connection_url()
+    monkeypatch.setattr("app.config.settings.DATABASE_URL", async_url)
+
+    async def _reset_schema() -> None:
+        engine = create_async_engine(async_url)
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+        await engine.dispose()
+
+    asyncio.run(_reset_schema())
+    cfg = Config("alembic.ini")
+    command.upgrade(cfg, "head")
+
+    async def _diff() -> list[object]:
+        from alembic.autogenerate import compare_metadata
+        from alembic.runtime.migration import MigrationContext
+
+        from app.db.models import Base
+
+        engine = create_async_engine(async_url)
+        try:
+            async with engine.connect() as conn:
+
+                def _compare(sync_conn):  # type: ignore[no-untyped-def]
+                    mc = MigrationContext.configure(sync_conn)
+                    return compare_metadata(mc, Base.metadata)
+
+                return await conn.run_sync(_compare)
+        finally:
+            await engine.dispose()
+
+    diffs = asyncio.run(_diff())
+    assert diffs == [], f"unexpected schema diff (whole schema): {diffs}"
+
+
+def test_0016_seeds_recolor_and_palette_alongside_existing_operations(
+    postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 19 Step 2 Checkpoint 2 — migration 0016 inserts a new active
+    config_versions row with `RECOLOR` merged into
+    `payload.global.operations` (BACKGROUND_REMOVAL/BACKGROUND_REPLACEMENT/
+    MATCH must survive, not be clobbered) and a new `payload.global.palette`
+    list; the previous row is deactivated, not mutated."""
+    async_url = postgres_container.get_connection_url()
+    monkeypatch.setattr("app.config.settings.DATABASE_URL", async_url)
+
+    async def _reset_schema() -> None:
+        engine = create_async_engine(async_url)
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+        await engine.dispose()
+
+    asyncio.run(_reset_schema())
+
+    cfg = Config("alembic.ini")
+    command.upgrade(cfg, "0006")
+    asyncio.run(_seed_active_config_version(async_url, "gemini-3.1-flash-image"))
+    command.upgrade(cfg, "0015")
+    before = asyncio.run(_active_config_version(async_url))
+    before_payload = json.loads(before["payload_text"])  # type: ignore[arg-type]
+    assert "RECOLOR" not in before_payload["global"].get("operations", {})
+    assert "palette" not in before_payload["global"]
+
+    command.upgrade(cfg, "0016")
+    active = asyncio.run(_active_config_version(async_url))
+    assert active["version_number"] == before["version_number"] + 1  # new row, not mutated
+    payload = json.loads(active["payload_text"])  # type: ignore[arg-type]
+    recolor_config = payload["global"]["operations"]["RECOLOR"]
+    assert recolor_config["enabled"] is True
+    assert recolor_config["unit_cost_usd"] == 0.02
+    assert "{palette_prompt}" in recolor_config["prompt"]
+    palette = payload["global"]["palette"]
+    assert {"EMERALD_GREEN", "RUBY_RED", "SAPPHIRE_BLUE", "AMETHYST_PURPLE", "CITRINE_YELLOW"} == {
+        p["code"] for p in palette
+    }
+    assert all(p["is_active"] for p in palette)
+    assert payload["global"]["model_version"] == "gemini-3.1-flash-image"
+
+    command.downgrade(cfg, "0015")
+    reverted = asyncio.run(_active_config_version(async_url))
+    assert reverted["version_number"] == before["version_number"]
+
+    command.upgrade(cfg, "head")
+
+
+def test_0016_is_a_noop_with_no_active_config_version(
+    postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async_url = postgres_container.get_connection_url()
+    monkeypatch.setattr("app.config.settings.DATABASE_URL", async_url)
+
+    async def _reset_schema() -> None:
+        engine = create_async_engine(async_url)
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+        await engine.dispose()
+
+    asyncio.run(_reset_schema())
+
+    cfg = Config("alembic.ini")
+    command.upgrade(cfg, "head")  # must not raise

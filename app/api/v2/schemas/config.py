@@ -27,10 +27,21 @@ class PresetSummary(BaseModel):
     name: str
 
 
+class PaletteSummary(BaseModel):
+    """code + label only — prompt_phrase stays internal, same rule
+    PresetSummary already follows for background presets. Only active
+    palette entries are listed; see phases/phase-19-recolor.md Step 2.
+    """
+
+    code: str
+    label: str
+
+
 class ConfigResponse(BaseModel):
     config_version: int
     categories: list[CategoryConfig]
     background_presets: list[PresetSummary] = []
+    palette: list[PaletteSummary] = []
 
 
 class ConfigSyncResponse(BaseModel):

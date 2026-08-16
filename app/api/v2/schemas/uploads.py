@@ -32,8 +32,8 @@ class PresignUploadRequest(BaseModel):
             raise ValueError("category_code and angles must both be set together")
         if op_mode and self.operation == Operation.ANGLE_GENERATION:
             raise ValueError(
-                "operation must be BACKGROUND_REMOVAL, BACKGROUND_REPLACEMENT, or MATCH "
-                "(ANGLE_GENERATION uses category_code/angles instead)"
+                "operation must be BACKGROUND_REMOVAL, BACKGROUND_REPLACEMENT, MATCH, "
+                "or RECOLOR (ANGLE_GENERATION uses category_code/angles instead)"
             )
         if not angle_mode and not op_mode:
             raise ValueError("either category_code+angles or operation is required")
@@ -64,7 +64,21 @@ class PresignedBackgroundUpload(BaseModel):
     expires_at: datetime
 
 
+class PresignedMaskUpload(BaseModel):
+    """Second upload slot for operation=RECOLOR — a RECOLOR job is never
+    valid without a mask (unlike a custom background photo for
+    BACKGROUND_REPLACEMENT, which is optional), so this is always returned
+    alongside operation_upload for RECOLOR, no extra request flag needed.
+    See phases/phase-19-recolor.md Step 3.
+    """
+
+    upload_url: str
+    storage_path: str
+    expires_at: datetime
+
+
 class PresignUploadResponse(BaseModel):
     angles: list[PresignedAngle] = []
     operation_upload: PresignedOperationUpload | None = None
     background_upload: PresignedBackgroundUpload | None = None
+    mask_upload: PresignedMaskUpload | None = None

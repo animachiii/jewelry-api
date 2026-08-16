@@ -391,6 +391,14 @@
           "config_version": {
             "title": "Config Version",
             "type": "integer"
+          },
+          "palette": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PaletteSummary"
+            },
+            "title": "Palette",
+            "type": "array"
           }
         },
         "required": [
@@ -943,10 +951,30 @@
           "ANGLE_GENERATION",
           "BACKGROUND_REMOVAL",
           "BACKGROUND_REPLACEMENT",
-          "MATCH"
+          "MATCH",
+          "RECOLOR"
         ],
         "title": "Operation",
         "type": "string"
+      },
+      "PaletteSummary": {
+        "description": "code + label only \u2014 prompt_phrase stays internal, same rule\nPresetSummary already follows for background presets. Only active\npalette entries are listed; see phases/phase-19-recolor.md Step 2.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "label"
+        ],
+        "title": "PaletteSummary",
+        "type": "object"
       },
       "PresetSummary": {
         "description": "code + name only \u2014 prompts and reference_image_urls stay internal,\nsame rule angle prompts already follow. Only active presets are listed;\nsee phases/phase-15-background-operations.md Step 3.",
@@ -1034,6 +1062,16 @@
               }
             ]
           },
+          "mask_upload": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresignedMaskUpload"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "operation_upload": {
             "anyOf": [
               {
@@ -1098,6 +1136,31 @@
           "expires_at"
         ],
         "title": "PresignedBackgroundUpload",
+        "type": "object"
+      },
+      "PresignedMaskUpload": {
+        "description": "Second upload slot for operation=RECOLOR \u2014 a RECOLOR job is never\nvalid without a mask (unlike a custom background photo for\nBACKGROUND_REPLACEMENT, which is optional), so this is always returned\nalongside operation_upload for RECOLOR, no extra request flag needed.\nSee phases/phase-19-recolor.md Step 3.",
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "storage_path": {
+            "title": "Storage Path",
+            "type": "string"
+          },
+          "upload_url": {
+            "title": "Upload Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_url",
+          "storage_path",
+          "expires_at"
+        ],
+        "title": "PresignedMaskUpload",
         "type": "object"
       },
       "PresignedOperationUpload": {
@@ -1253,6 +1316,46 @@
           "items"
         ],
         "title": "QaReviewQueueResponse",
+        "type": "object"
+      },
+      "RecolorRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "mask_storage_path": {
+            "title": "Mask Storage Path",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "palette_code": {
+            "title": "Palette Code",
+            "type": "string"
+          },
+          "sku_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sku Reference"
+          },
+          "storage_path": {
+            "title": "Storage Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "storage_path",
+          "mask_storage_path",
+          "palette_code"
+        ],
+        "title": "RecolorRequest",
         "type": "object"
       },
       "ResolvedAnglePlan": {
@@ -2415,6 +2518,86 @@
         "summary": "Submit Qa Decision Route",
         "tags": [
           "qa"
+        ]
+      }
+    },
+    "/api/v2/recolor": {
+      "post": {
+        "operationId": "create_recolor_job_api_v2_recolor_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecolorRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAcceptedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "Idempotency-Key missing"
+          },
+          "401": {
+            "description": "Invalid API key"
+          },
+          "409": {
+            "description": "Idempotency key conflict"
+          },
+          "422": {
+            "description": "Operation disabled, palette not found/inactive, asset not found/owned, invalid image, or mask contract violation"
+          },
+          "429": {
+            "description": "Rate limit or quota exceeded"
+          }
+        },
+        "summary": "Create Recolor Job",
+        "tags": [
+          "recolor"
         ]
       }
     },

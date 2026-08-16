@@ -191,6 +191,20 @@ class SubJob(Base):
         ForeignKey("assets.id", name="fk_sub_jobs_background_asset_id", use_alter=True),
         nullable=True,
     )
+    # NULL for every operation except RECOLOR — the uploaded mask asset a
+    # RECOLOR sub-job validates and consumes server-side to build the
+    # Gemini overlay and drive generate-then-composite. Never sent to the
+    # provider directly. See migration 0015 and
+    # phases/phase-19-recolor.md Step 1.
+    mask_asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("assets.id", name="fk_sub_jobs_mask_asset_id", use_alter=True),
+        nullable=True,
+    )
+    # NULL for every operation except RECOLOR — the requested palette code,
+    # validated against the active config's payload.global.palette. See
+    # migration 0015 and phases/phase-19-recolor.md Step 1.
+    palette_code: Mapped[str | None] = mapped_column(String, nullable=True)
     prompt_snapshot: Mapped[str | None] = mapped_column(String, nullable=True)
     model_version: Mapped[str | None] = mapped_column(String, nullable=True)
     seed: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

@@ -74,6 +74,10 @@ Runner doesn't exist to verify against).
 | `GEMINI_API_KEY` | **Yes** | |
 | `GEMINI_RATE_LIMIT_PER_MINUTE` | No | Default `60` fine to start |
 | `GEMINI_REQUEST_TIMEOUT_SECONDS` | No | Default `120` fine |
+| `MASK_ERODE_PX` | No | Default `2` fine — RECOLOR mask erosion |
+| `MASK_FEATHER_PX` | No | Default `3` fine — RECOLOR compositing feather |
+| `MASK_MIN_COVERAGE_PCT` | No | Default `0.5` fine — RECOLOR mask contract |
+| `MASK_MAX_COVERAGE_PCT` | No | Default `60.0` fine — RECOLOR mask contract |
 | `SENTRY_DSN` | **Yes**, if set | Empty is valid (no error reporting) until Phase 11 is built |
 
 Secrets referenced via App Runner's native Secrets Manager integration

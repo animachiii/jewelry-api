@@ -80,6 +80,11 @@ async def get_status(
         ]
         return status_service.build_job_status_response(job, [], [], variant_statuses)
 
+    # BACKGROUND_REMOVAL, BACKGROUND_REPLACEMENT, and RECOLOR all fall
+    # through to here — each has exactly one angle-less, variant-less
+    # sub-job, so `build_background_result_status` (which only asserts
+    # `angle is None`) applies unmodified to RECOLOR too. See
+    # phases/phase-19-recolor.md Step 4.
     result_statuses = [
         status_service.build_background_result_status(job, sub_job, bucket_and_paths[sub_job.id])
         for sub_job in sub_jobs

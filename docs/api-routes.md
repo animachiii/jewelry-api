@@ -87,6 +87,11 @@ Two mutually exclusive request modes:
 - `"operation"` also accepts `"MATCH"` (Phase 18) — same `operation_upload`
   response shape as the two background values above, one upload slot
   regardless of `variant_count`, to quote back on `POST /match`.
+- `"operation"` also accepts `"RECOLOR"` (Phase 19) — response gives both
+  `operation_upload` (the source photo) **and** `mask_upload` (same
+  `upload_url`/`storage_path`/expiry shape as `background_upload`), always
+  both, no extra request flag needed — a RECOLOR job is never valid without
+  a mask. Quote both `storage_path`s back on `POST /recolor`.
 
 The client uploads directly to Supabase Storage — image bytes never pass through the API.
 This is what keeps `/generate` and the background routes fast and avoids request-size
@@ -132,17 +137,19 @@ Returns the parent `status` (`PENDING` | `PROCESSING` | `COMPLETED` | `PARTIAL_S
 `variants` — `angles` is otherwise byte-identical to before either phase):
 
 - `operation` — `ANGLE_GENERATION` | `BACKGROUND_REMOVAL` | `BACKGROUND_REPLACEMENT` |
-  `MATCH`. **Read this first** to know which array to read next — exactly one of
-  `angles`/`results`/`variants` is ever non-empty for a given job.
+  `MATCH` | `RECOLOR`. **Read this first** to know which array to read next — exactly
+  one of `angles`/`results`/`variants` is ever non-empty for a given job.
 - `angles` — populated for `ANGLE_GENERATION` jobs, empty `[]` otherwise. Each item
   carries `angle`, `status`, `source_type`, `synthetic` flag,
   `image_url` (a **freshly signed URL, 1-hour TTL**, present only when `COMPLETED`),
   `qa_status`/`qa_score` when applicable, `failure_class`/`error_message`/`retryable`
   when failed, and `retry_url` (`/jobs/{job_id}/angles/{angle}/retry`) when retryable.
-- `results` — populated for background-operation jobs (one element, since a background
-  job has exactly one sub-job), empty `[]` otherwise. Same per-item fields as `angles`
-  minus `angle` itself; `retry_url` points at the job-level
-  `/jobs/{job_id}/retry` instead.
+- `results` — populated for background-operation and `RECOLOR` jobs (one element,
+  since each has exactly one sub-job), empty `[]` otherwise. Same per-item fields as
+  `angles` minus `angle` itself; `retry_url` points at the job-level
+  `/jobs/{job_id}/retry` instead. For `RECOLOR`, `image_url` is the **composited**
+  image — everything outside the mask is byte-identical to the uploaded source, see
+  `docs/business-rules.md` §15.
 - `variants` — populated for `MATCH` jobs (1-4 elements, one per requested
   companion-piece variant), empty `[]` otherwise. Same per-item fields as `results`
   minus `preview_image_url` (a background-only, QA-preview addition — MATCH never
@@ -340,6 +347,63 @@ generalization.
 
 ---
 
+## Masked Gemstone Recolor (Phase 19)
+
+`RECOLOR` — one uploaded source photo + one uploaded mask in, one recolored photo
+out, independent of the four-angle flow. See `phases/phase-19-recolor.md` and
+`docs/ai-integration.md`'s Mode E. Reuses the existing job/sub-job state machine,
+`GET /status/{job_id}`, `POST /jobs/{job_id}/retry`, cost recording, and audit
+trail — no parallel pipeline, same posture as Background Operations (RECOLOR always
+has exactly one sub-job, same as those, not MATCH's 1-4).
+
+### `POST /api/v2/recolor`
+**Auth required. `client` scope. `Idempotency-Key` header required.**
+
+Request: `{ "storage_path": "...", "mask_storage_path": "...", "palette_code": "...", "sku_reference"?: "...", "metadata"?: {} }`.
+`storage_path`/`mask_storage_path` come from `POST /uploads/presign`'s
+`{"operation": "RECOLOR"}` response (`operation_upload`/`mask_upload` — see
+Uploads, above). `palette_code` must name an active entry in `GET /config`'s
+`palette` list.
+
+Returns `202` with the same `JobAcceptedResponse` shape as `/background/*` — `job_id`,
+`status: PENDING`, `poll_after_ms`, and a one-element `angles` array with
+`angle: null` (RECOLOR reuses this field the same way background operations do —
+see that route's own docs above).
+
+**Validation, in order — all failures are `4xx` before any job row is created:**
+
+1. `operations.RECOLOR.enabled` is `true` in the active config version
+   (`422 OPERATION_DISABLED` otherwise)
+2. `palette_code` exists and is active in the active config version's `palette`
+   (`422 PALETTE_NOT_FOUND` / `422 PALETTE_INACTIVE`)
+3. `storage_path` exists in `jewelry-inputs` and belongs to this client, and the
+   uploaded image passes `image_validation.inspect_and_validate`
+   (`422 ASSET_NOT_FOUND` / `ASSET_NOT_OWNED` / `VALIDATION_ERROR`)
+4. `mask_storage_path` exists in `jewelry-inputs` and belongs to this client, and
+   the uploaded mask passes `mask_validation.validate_mask` against the source's
+   own dimensions — every mask-contract violation is a distinct, specifically
+   named `422 VALIDATION_ERROR` (see `docs/business-rules.md` §15's mask contract
+   table), never a generic "invalid mask" message
+
+**Idempotency:** same `(client_id, Idempotency-Key)` durable dedup as `/generate` —
+a replay with an identical body returns the original `job_id` unchanged; the same
+key with a different body returns `409`.
+
+On acceptance, creates one job (`operation: RECOLOR`, `category_code: null`,
+`requested_angles: 1`) and one sub-job (`angle: null`, `mask_asset_id` and
+`palette_code` set), then dispatches `recolor.process` directly — no fan-out task,
+same as background operations.
+
+### Status and retry
+`GET /api/v2/status/{job_id}` — read `operation: "RECOLOR"` first, then `results`
+instead of `angles`/`variants` (see that route's docs above). `image_url` is the
+**composited** output — everything outside the mask is byte-identical to the
+uploaded source. `POST /api/v2/jobs/{job_id}/retry` works unchanged: a RECOLOR job
+always has exactly one sub-job, so Phase 18's all-or-nothing generalization applies
+as the trivial single-sub-job case, same as background operations.
+
+---
+
 ## Ops
 
 ### `GET /api/v2/jobs`
@@ -369,7 +433,7 @@ moves it to `REJECTED` with `failure_class: QA_REJECTED`. Both recompute parent 
 
 | Scope | Routes |
 | :--- | :--- |
-| `client` | config, uploads, generate, status, retry, `/background/*` |
+| `client` | config, uploads, generate, status, retry, `/background/*`, `/match`, `/recolor` |
 | `ops` | everything in `client` plus `/internal/*`, `/jobs`, `/qa/*` |
 
 Scope lives on the `api_clients` row. There are exactly two scopes — resist adding more

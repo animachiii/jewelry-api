@@ -19,6 +19,7 @@ from app.api.v2 import health as health_routes
 from app.api.v2 import jobs as jobs_routes
 from app.api.v2 import match as match_routes
 from app.api.v2 import qa as qa_routes
+from app.api.v2 import recolor as recolor_routes
 from app.api.v2 import retry as retry_routes
 from app.api.v2 import status as status_routes
 from app.api.v2 import uploads as uploads_routes
@@ -51,6 +52,7 @@ api_v2.include_router(uploads_routes.router)
 api_v2.include_router(generate_routes.router)
 api_v2.include_router(background_routes.router)
 api_v2.include_router(match_routes.router)
+api_v2.include_router(recolor_routes.router)
 api_v2.include_router(status_routes.router)
 api_v2.include_router(retry_routes.router)
 api_v2.include_router(jobs_routes.router)

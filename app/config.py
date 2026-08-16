@@ -87,6 +87,21 @@ class Settings(BaseSettings):
     # multi-step image generation, still bounded.
     GEMINI_REQUEST_TIMEOUT_SECONDS: int = 120
 
+    # --- RECOLOR mask processing (Phase 19) ---
+    # docs/conventions.md: tunable numeric behaviour is env-configurable,
+    # not hardcoded. Pulls the mask edge back off metal/prongs a hand-drawn
+    # or auto-generated mask routinely catches at its boundary — applied to
+    # the overlay sent to Gemini. See app/services/mask_validation.py and
+    # app/services/recolor_service.py.
+    MASK_ERODE_PX: int = 2
+    # Applied only to the compositing alpha (never the overlay sent to
+    # Gemini, which needs a hard-edged instruction region) so the seam
+    # between original and recolored pixels blends rather than showing a
+    # hard ring. See recolor_service.py.
+    MASK_FEATHER_PX: int = 3
+    MASK_MIN_COVERAGE_PCT: float = 0.5
+    MASK_MAX_COVERAGE_PCT: float = 60.0
+
     # --- Observability ---
     SENTRY_DSN: str = ""
 

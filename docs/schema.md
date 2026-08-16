@@ -40,7 +40,7 @@ sub_job_status_t PENDING | MATTING | GENERATING | QA_REVIEW
 
 source_type_t    UPLOADED | SYNTHETIC
 
-asset_kind_t     INPUT | MATTE | OUTPUT
+asset_kind_t     INPUT | MATTE | OUTPUT | MASK
 
 failure_class_t  TRANSIENT_PROVIDER | TRANSIENT_NETWORK | RATE_LIMITED
                  | INVALID_INPUT | SAFETY_REFUSAL | QA_REJECTED | INTERNAL
@@ -50,7 +50,7 @@ qa_status_t      NOT_APPLICABLE | PASSED | FLAGGED | FAILED
 sync_status_t    SUCCESS | FAILED
 
 operation_t      ANGLE_GENERATION | BACKGROUND_REMOVAL | BACKGROUND_REPLACEMENT
-                 | MATCH
+                 | MATCH | RECOLOR
 ```
 
 `REJECTED` is distinct from `FAILED`: it means the provider deterministically declined
@@ -73,6 +73,10 @@ operations section. `MATCH` was added by migration 0013 (Phase 18) via
 the first migration in this project to actually do that (0006 created
 `operation_t` fresh with all its values baked in; it did not set an
 ADD VALUE precedent despite `phases/phase-18-match.md` claiming it did).
+`RECOLOR` was added by migration 0015 (Phase 19), same `ALTER TYPE ... ADD
+VALUE` mechanism as `MATCH`. `asset_kind_t.MASK` was added by the same
+migration — see `docs/business-rules.md` §15 and
+`phases/phase-19-recolor.md` Step 1.
 
 ---
 
@@ -146,11 +150,15 @@ Partial unique index: `CREATE UNIQUE INDEX ON config_versions (is_active) WHERE 
         "unit_cost_usd": 0.02,
         "custom_background_prompt": "..."
       },
-      "MATCH": { "enabled": true, "prompt": "...{target_category}...", "unit_cost_usd": 0.02 }
+      "MATCH": { "enabled": true, "prompt": "...{target_category}...", "unit_cost_usd": 0.02 },
+      "RECOLOR": { "enabled": true, "prompt": "...{palette_prompt}...", "unit_cost_usd": 0.02 }
     },
     "background_presets": [
       { "code": "STUDIO_WHITE", "name": "Studio White", "prompt": "...",
         "reference_image_urls": [], "is_active": true }
+    ],
+    "palette": [
+      { "code": "EMERALD_GREEN", "label": "Emerald", "prompt_phrase": "...", "is_active": true }
     ]
   }
 }
@@ -190,6 +198,16 @@ on a database that already ran `0007`). `prompt` carries a genuine runtime
 `app/services/job_service.py::resolve_match_prompt` and roadmap open decision
 #12 (prompt wording / pricing not yet reviewed by the client).
 
+**`global.operations.RECOLOR` and `global.palette` (Phase 19, migration 0016):**
+`operations.RECOLOR` seeded the same merge-not-replace way as `MATCH` (this is the
+*third* migration to touch `operations`). `prompt` carries a genuine runtime
+`{palette_prompt}` placeholder — see `app/services/job_service.py::resolve_recolor_prompt`.
+`global.palette` is a brand-new top-level `global` key (no prior migration to
+collide with), a fixed set of client-selectable colors — raw hex input is
+deliberately not supported (see `phases/phase-19-recolor.md`'s reality-check
+section). Same uncalibrated-placeholder status as every other seeded
+prompt/cost/palette entry in this project.
+
 ---
 
 ## `jobs`
@@ -208,7 +226,7 @@ One row per `POST /api/v2/generate`, `POST /api/v2/background/remove`, or
 | `preset_code` | TEXT NULL | Set only for `BACKGROUND_REPLACEMENT` — the pinned backdrop preset the worker resolves its prompt from. Added in migration 0009 (Phase 15). |
 | `config_version_id` | UUID NOT NULL FK → `config_versions.id` | Pinned at creation. Never changes. |
 | `status` | `job_status_t` NOT NULL DEFAULT `PENDING` | |
-| `requested_angles` | INT NOT NULL | Count of angles not skipped for an angle job; always `1` for a background job; count of requested companion-piece variants (1-4) for a `MATCH` job. Keeps its name across all three — see docs/business-rules.md. |
+| `requested_angles` | INT NOT NULL | Count of angles not skipped for an angle job; always `1` for a background job; count of requested companion-piece variants (1-4) for a `MATCH` job; always `1` for a `RECOLOR` job (same posture as a background job — exactly one sub-job). Keeps its name across all four — see docs/business-rules.md. |
 | `succeeded_angles` | INT NOT NULL DEFAULT 0 | |
 | `failed_angles` | INT NOT NULL DEFAULT 0 | |
 | `sku_reference` | TEXT NULL | Client's own product reference, passed through |
@@ -228,7 +246,9 @@ Indexes: `(client_id, created_at DESC)`, `(status)` partial where status in
 One row per angle (including skipped angles) for an `ANGLE_GENERATION` job; exactly
 one row, `angle IS NULL`, for a background-operation job; 1-4 rows, `angle IS NULL`
 and `variant_index` 0-based and distinct, for a `MATCH` job (migration 0013,
-Phase 18).
+Phase 18); exactly one row, `angle IS NULL`, `mask_asset_id` and `palette_code` set,
+for a `RECOLOR` job (migration 0015, Phase 19) — same single-sub-job shape as a
+background-operation job.
 
 | Column | Type | Notes |
 | :--- | :--- | :--- |
@@ -243,6 +263,8 @@ Phase 18).
 | `output_asset_id` | UUID NULL FK → `assets.id` | |
 | `background_asset_id` | UUID NULL FK → `assets.id` | Set only for a BACKGROUND_REPLACEMENT sub-job that used an uploaded background photo instead of a preset (migration 0011). An ordinary INPUT-kind asset, distinguished from `input_asset_id` only by which FK column points at it. |
 | `variant_index` | INT NULL | Set only for a `MATCH` sub-job — its 0-based position among the job's requested companion-piece variants (migration 0013, Phase 18). NULL for every other operation, mirroring how `angle` is NULL for non-`ANGLE_GENERATION` operations. |
+| `mask_asset_id` | UUID NULL FK → `assets.id` | Set only for a `RECOLOR` sub-job — the uploaded `MASK`-kind asset consumed server-side to build the Gemini overlay and drive generate-then-composite (migration 0015, Phase 19). Never sent to the provider directly. |
+| `palette_code` | TEXT NULL | Set only for a `RECOLOR` sub-job — the requested target color, validated against `payload.global.palette` (migration 0015, Phase 19). |
 | `prompt_snapshot` | TEXT NULL | Exact resolved prompt sent to the provider |
 | `model_version` | TEXT NULL | Pinned provider model string actually used |
 | `seed` | BIGINT NULL | Recorded for reproducibility |

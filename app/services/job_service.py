@@ -28,7 +28,7 @@ from app.db.models.jobs import SubJob
 from app.db.repositories import assets as assets_repo
 from app.db.repositories import job_events as job_events_repo
 from app.db.repositories import jobs as jobs_repo
-from app.services import image_validation, retention_policy, storage_service
+from app.services import image_validation, mask_validation, retention_policy, storage_service
 from app.services.image_validation import ImageMetadata
 
 MAX_RETRY_ATTEMPTS = 3
@@ -97,6 +97,16 @@ class PresetNotFoundError(AppError):
 
 class PresetInactiveError(AppError):
     code = ErrorCode.PRESET_INACTIVE
+    http_status = 422
+
+
+class PaletteNotFoundError(AppError):
+    code = ErrorCode.PALETTE_NOT_FOUND
+    http_status = 422
+
+
+class PaletteInactiveError(AppError):
+    code = ErrorCode.PALETTE_INACTIVE
     http_status = 422
 
 
@@ -255,6 +265,46 @@ def resolve_match_prompt(config_version: ConfigVersion, target_category: str) ->
     op_config = find_operation_config(config_version, Operation.MATCH) or {}
     template = str(op_config.get("prompt", ""))
     return template.format(target_category=target_category)
+
+
+def resolve_recolor_prompt(config_version: ConfigVersion, palette_code: str) -> str:
+    """RECOLOR's `operations.RECOLOR.prompt` template (phases/phase-19-recolor.md
+    Step 2, seeded by migration 0016) carries a genuine runtime
+    `{palette_prompt}` placeholder — same `str.format`/fail-loud-on-KeyError
+    posture `resolve_match_prompt` already established for
+    `{target_category}`: a prompt with a literal `{...}` left in it must
+    never ship to Gemini, so an unresolvable placeholder in a future config
+    edit surfaces as an uncaught KeyError here, not a silently degraded
+    prompt.
+
+    Callers must have already validated `palette_code` via `validate_palette`
+    — this function assumes the palette entry exists.
+    """
+    op_config = find_operation_config(config_version, Operation.RECOLOR) or {}
+    template = str(op_config.get("prompt", ""))
+    palette_entry = find_palette_entry(config_version, palette_code)
+    assert palette_entry is not None  # validated at job-creation time; config is pinned, immutable
+    return template.format(palette_prompt=palette_entry["prompt_phrase"])
+
+
+def find_palette_entry(config_version: ConfigVersion, palette_code: str) -> dict[str, Any] | None:
+    for entry in config_version.payload.get("global", {}).get("palette", []):
+        if entry["code"] == palette_code:
+            return dict(entry)
+    return None
+
+
+def validate_palette(config_version: ConfigVersion, palette_code: str) -> dict[str, Any]:
+    entry = find_palette_entry(config_version, palette_code)
+    if entry is None:
+        raise PaletteNotFoundError(
+            f"Palette code {palette_code} not found.", details={"palette_code": palette_code}
+        )
+    if not entry.get("is_active", False):
+        raise PaletteInactiveError(
+            f"Palette code {palette_code} is not active.", details={"palette_code": palette_code}
+        )
+    return entry
 
 
 def find_preset(config_version: ConfigVersion, preset_code: str) -> dict[str, Any] | None:
@@ -935,3 +985,199 @@ async def _handle_match_replay_race(
             "This Idempotency-Key was already used with a different request body."
         )
     return await _build_match_accepted_response(existing.id, variant_count)
+
+
+async def _build_recolor_accepted_response(
+    job_id: uuid.UUID, storage_path: str
+) -> JobAcceptedResponse:
+    """Same shape _build_background_accepted_response uses — a RECOLOR job
+    has exactly one sub-job, same as a background job, not MATCH's 1-4. See
+    phases/phase-19-recolor.md Step 3.
+    """
+    return JobAcceptedResponse(
+        job_id=str(job_id),
+        status="PENDING",
+        angles=[
+            ResolvedAnglePlan(
+                angle=None,
+                source_type=SourceType.UPLOADED,
+                status=SubJobStatus.PENDING,
+                storage_path=storage_path,
+            )
+        ],
+        poll_after_ms=POLL_AFTER_MS,
+    )
+
+
+async def create_recolor_job_for_request(
+    session: AsyncSession,
+    client: ApiClient,
+    config_version: ConfigVersion,
+    storage_path: str,
+    mask_storage_path: str,
+    palette_code: str,
+    sku_reference: str | None,
+    metadata: dict[str, Any],
+    idempotency_key: str,
+    payload_hash: str,
+) -> JobAcceptedResponse:
+    """Implements POST /recolor — see phases/phase-19-recolor.md Step 3.
+    Mirrors create_background_job_for_request's shape (idempotency -> rate
+    limit/quota -> validate -> create -> commit -> dispatch), since a
+    RECOLOR job has exactly one sub-job, same as a background job, not
+    MATCH's 1-4 fan-out. The one genuinely new piece: a second uploaded
+    file (the mask) is validated against the mask contract
+    (app/services/mask_validation.py), dimension-checked against the
+    source's own width/height, and stored as a MASK-kind asset linked via
+    sub_jobs.mask_asset_id.
+
+    Dispatches app.workers.recolor.process_task directly after commit, for
+    a genuinely new job only — same "never re-dispatch on a replay" rule
+    every other job-creating function here follows.
+    """
+    existing = await jobs_repo.get_by_idempotency_key(session, client.id, idempotency_key)
+    if existing is not None:
+        if existing.payload_hash != payload_hash:
+            raise IdempotencyKeyConflictError(
+                "This Idempotency-Key was already used with a different request body."
+            )
+        return await _build_recolor_accepted_response(existing.id, storage_path)
+
+    await _enforce_rate_limit_and_quota(session, client)
+
+    validate_operation_enabled(config_version, Operation.RECOLOR)
+    validate_palette(config_version, palette_code)
+
+    if not storage_service.exists(settings.BUCKET_INPUTS, storage_path):
+        raise AssetNotFoundError(
+            f"No uploaded asset found at {storage_path}.",
+            details={"storage_path": storage_path},
+        )
+    if not storage_path.startswith(f"pending/{client.id}/"):
+        raise AssetNotOwnedError(
+            f"storage_path {storage_path} does not belong to this client.",
+            details={"storage_path": storage_path},
+        )
+    meta = image_validation.inspect_and_validate(settings.BUCKET_INPUTS, storage_path)
+
+    if not storage_service.exists(settings.BUCKET_INPUTS, mask_storage_path):
+        raise AssetNotFoundError(
+            f"No uploaded asset found at {mask_storage_path}.",
+            details={"storage_path": mask_storage_path},
+        )
+    if not mask_storage_path.startswith(f"pending/{client.id}/"):
+        raise AssetNotOwnedError(
+            f"storage_path {mask_storage_path} does not belong to this client.",
+            details={"storage_path": mask_storage_path},
+        )
+    mask_meta = mask_validation.validate_mask(
+        settings.BUCKET_INPUTS, mask_storage_path, meta.width_px, meta.height_px
+    )
+
+    job = jobs_repo.create_job(
+        session,
+        client_id=client.id,
+        idempotency_key=idempotency_key,
+        payload_hash=payload_hash,
+        category_code=None,
+        config_version_id=config_version.id,
+        requested_angles=1,
+        sku_reference=sku_reference,
+        metadata=metadata,
+        operation=Operation.RECOLOR,
+    )
+
+    try:
+        await session.flush()  # assigns job.id
+    except IntegrityError:
+        await session.rollback()
+        return await _handle_recolor_replay_race(
+            session, client, idempotency_key, payload_hash, storage_path
+        )
+
+    asset = assets_repo.create_asset(
+        session,
+        job_id=job.id,
+        kind=AssetKind.INPUT,
+        bucket=settings.BUCKET_INPUTS,
+        storage_path=storage_path,
+        mime_type=meta.mime_type,
+        width_px=meta.width_px,
+        height_px=meta.height_px,
+        bytes_=meta.bytes,
+        checksum_sha256=meta.checksum_sha256,
+        expires_at=retention_policy.compute_expires_at(AssetKind.INPUT),
+    )
+    await session.flush()  # assigns asset.id
+
+    mask_asset = assets_repo.create_asset(
+        session,
+        job_id=job.id,
+        kind=AssetKind.MASK,
+        bucket=settings.BUCKET_INPUTS,
+        storage_path=mask_storage_path,
+        mime_type="image/png",
+        width_px=mask_meta.width_px,
+        height_px=mask_meta.height_px,
+        bytes_=mask_meta.bytes,
+        checksum_sha256=mask_meta.checksum_sha256,
+        expires_at=retention_policy.compute_expires_at(AssetKind.MASK),
+    )
+    await session.flush()  # assigns mask_asset.id
+
+    validate_operation_angle_consistency(Operation.RECOLOR, None)
+    sub_job = jobs_repo.create_sub_job(
+        session,
+        job_id=job.id,
+        angle=None,
+        status=SubJobStatus.PENDING,
+        source_type=SourceType.UPLOADED,
+        input_asset_id=asset.id,
+        mask_asset_id=mask_asset.id,
+        palette_code=palette_code,
+    )
+    await session.flush()  # assigns sub_job.id
+
+    job_events_repo.record_event(
+        session,
+        job.id,
+        "JOB_CREATED",
+        to_status=job.status.value,
+        detail={"operation": Operation.RECOLOR.value, "palette_code": palette_code},
+    )
+
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        return await _handle_recolor_replay_race(
+            session, client, idempotency_key, payload_hash, storage_path
+        )
+
+    # dispatch real work only for a genuinely new job — an idempotency
+    # replay (both branches above) must never re-dispatch, same rule every
+    # other job-creating function here follows.
+    from app.workers.recolor import process_task
+
+    process_task.delay(str(sub_job.id))
+
+    return await _build_recolor_accepted_response(job.id, storage_path)
+
+
+async def _handle_recolor_replay_race(
+    session: AsyncSession,
+    client: ApiClient,
+    idempotency_key: str,
+    payload_hash: str,
+    storage_path: str,
+) -> JobAcceptedResponse:
+    existing = await jobs_repo.get_by_idempotency_key(session, client.id, idempotency_key)
+    if existing is None:
+        raise AppError(
+            "Idempotency key conflict could not be resolved.", code=ErrorCode.INTERNAL_ERROR
+        )
+    if existing.payload_hash != payload_hash:
+        raise IdempotencyKeyConflictError(
+            "This Idempotency-Key was already used with a different request body."
+        )
+    return await _build_recolor_accepted_response(existing.id, storage_path)

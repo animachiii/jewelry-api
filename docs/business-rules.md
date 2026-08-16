@@ -21,6 +21,9 @@ has no category enumeration of its own; category existence/active-ness is a sing
 source of truth shared by `/generate` and `/match` alike. The angle-enablement and
 `synthetic_allowed` bullets above don't apply to MATCH (it has no angles).
 
+**RECOLOR (§15, Phase 19) has no category_code and no angle matrix at all** — same
+carve-out as background operations (§13), not MATCH's. See §15.
+
 ---
 
 ## 2. Job state machine
@@ -188,6 +191,16 @@ before real output quality shows it's needed, isn't this project's posture (see
 the "Deferred to v3" table in `phases/phase-roadmap.md`). MATCH ships straight to
 `COMPLETED` on a successful provider call — see `app/services/match_service.py`.
 
+**RECOLOR (§15, Phase 19) also has no QA gate — a third, distinct reason from
+MATCH's, not a fourth posture, since it's still "no gate at all" alongside
+real-photo angles and MATCH.** MATCH's output is *supposed* to differ from its
+source. RECOLOR's output is supposed to be **provably identical to the source
+outside the mask** — that's a pixel-exact compositing-correctness question, not a
+perceptual-similarity question `GeminiQaProvider` is built to answer. It's
+verified by a deterministic test (off-mask pixel diff), not a probabilistic model
+call. RECOLOR ships straight to `COMPLETED` on successful compositing — see
+`app/services/recolor_service.py`.
+
 ---
 
 ## 8. Idempotency
@@ -239,6 +252,7 @@ the "Deferred to v3" table in `phases/phase-roadmap.md`). MATCH ships straight t
 | `INPUT` | 90 days | Must outlive the retry window and support audit |
 | `MATTE` | 30 days | Regenerable from input |
 | `OUTPUT` | Indefinite (pending client policy) | Client's catalog assets |
+| `MASK` | 7 days | A client-drawn artifact, not regenerable — but has no purpose once its one `RECOLOR` job is terminal, so it doesn't need `INPUT`'s 90-day retry-window justification either (Phase 19) |
 
 Asset rows are never deleted. Set `expires_at`; storage lifecycle removes the bytes. A
 row whose bytes are gone still answers "what did we produce for this SKU."
@@ -374,3 +388,77 @@ route was generalized:
 See `app/api/v2/retry.py::retry_job` for the implementation and
 `docs/api-routes.md`'s "Status and retry" note under Companion-Piece Generation for
 the client-facing contract.
+
+---
+
+## 15. RECOLOR (Phase 19)
+
+`RECOLOR` recolors a masked gemstone region to a palette color from one uploaded
+source photo plus one uploaded mask — `POST /api/v2/recolor`. See
+`phases/phase-19-recolor.md` and `docs/ai-integration.md`'s Mode E. Like background
+operations (always exactly one sub-job) and unlike MATCH, RECOLOR does not fan out.
+
+**Operation matrix** — goes through the same `GeminiProvider` seam every other
+operation uses, unmodified. The mask never travels to Gemini as a mask — the Gemini
+API has no mask parameter (confirmed from `app/providers/gemini.py::_call_api`,
+which takes only image + text):
+
+| Operation | Input | Prompt source | Output |
+| :--- | :--- | :--- | :--- |
+| `RECOLOR` | One uploaded photo + one uploaded mask + `palette_code` | `config.global.operations.RECOLOR.prompt`, with `{palette_prompt}` substituted at call time (`job_service.resolve_recolor_prompt`) | The original source photo, unchanged outside the mask, with the masked gemstone recolored |
+
+- **No category rules (§1) apply** — a RECOLOR job has `category_code: NULL`, same
+  as a background job, not MATCH.
+- `requested_angles` is always `1` for a RECOLOR job — see §3's note. `PARTIAL_SUCCESS`
+  is structurally unreachable, same reasoning §13 gives for background operations.
+- `operations.RECOLOR.enabled` gates `POST /recolor` — `422 OPERATION_DISABLED` if
+  `false` or absent, same code every other operation uses.
+- `palette_code` must name an **active** entry in `config.global.palette` —
+  `422 PALETTE_NOT_FOUND` / `422 PALETTE_INACTIVE` otherwise, same shape preset
+  validation (§13) already uses.
+- **Mask contract**, validated on ingest, before any provider call — `422
+  VALIDATION_ERROR` naming the specific violation, never a silent best-effort:
+
+  | Rule | Failure detail |
+  | :--- | :--- |
+  | PNG format | names the format actually received |
+  | Single-channel 8-bit grayscale, no alpha | names the mode actually received |
+  | Dimensions exactly match the source image | names both the mask's and the source's dimensions |
+  | Binary values only (0 and 255) | names the count of intermediate values found |
+  | At least `MASK_MIN_COVERAGE_PCT` (default 0.5%) white | names the measured coverage |
+  | At most `MASK_MAX_COVERAGE_PCT` (default 60.0%) white | names the measured coverage |
+
+  See `app/services/mask_validation.py`.
+- `unit_cost_usd` resolves per-operation (`config.global.operations.RECOLOR.unit_cost_usd`),
+  falling back to `config.global.unit_cost_usd` when unset — same generic fallback
+  rule §10 states for every other operation.
+- **No QA gate.** See §7's RECOLOR note — a deliberate scope decision, verified by a
+  deterministic compositing test instead.
+
+**Mask-to-Gemini conveyance and generate-then-composite.** Since Gemini has no mask
+parameter, the mask does its work in two places:
+
+1. **Before the call:** the mask is eroded by `MASK_ERODE_PX` (default 2px — pulls
+   the edit region back off metal/prongs a hand-drawn mask routinely catches at its
+   boundary), then burned into a solid magenta overlay composited onto the source.
+   This single overlay image is what's sent to Gemini, alongside a prompt
+   referencing "the region marked in magenta."
+2. **After the call:** the mask is feathered by `MASK_FEATHER_PX` (default 3px, a
+   *separate* pass from erosion — feathering softens the compositing alpha, erosion
+   shrinks the edit region; they are not the same operation applied twice) and used
+   to composite Gemini's raw output back onto the **original, full** source image.
+   Everywhere the feathered mask is 0, the stored `OUTPUT` asset's pixel is the
+   original source's pixel, exactly. This is the **only** operation in this
+   codebase where the client-facing artifact is not the provider's raw response.
+
+See `app/services/recolor_service.py` for the implementation.
+**Unvalidated against a real model call** — no real `GEMINI_API_KEY` exists in this
+environment, same gap every phase since 6 has hit. If the magenta-overlay approach
+doesn't hold up against real jewelry macro photography, that's a correction to
+`docs/ai-integration.md`'s Mode E and this rule, not a silent code change.
+
+**Retry.** `POST /jobs/{job_id}/retry` — see §5. A RECOLOR job always has exactly
+one sub-job, so Phase 18's all-or-nothing multi-sub-job generalization applies here
+as the trivial "set of size 1" case, same as it already does for background
+operations — no further changes to the retry route were needed for RECOLOR, only a
+third entry in its dispatch-task lookup (`app/api/v2/retry.py`).

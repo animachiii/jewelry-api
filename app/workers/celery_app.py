@@ -55,6 +55,8 @@ celery_app = Celery(
     include=[
         "app.workers.generation",
         "app.workers.background",
+        "app.workers.match",
+        "app.workers.recolor",
         "app.workers.qa",
         "app.workers.orchestration",
         "app.workers.health",
@@ -67,6 +69,8 @@ celery_app = Celery(
 celery_app.conf.task_routes = {
     "generation.*": {"queue": "io"},
     "background.*": {"queue": "io"},
+    "match.*": {"queue": "io"},
+    "recolor.*": {"queue": "io"},
     "orchestration.*": {"queue": "io"},
     "qa.*": {"queue": "io"},
     "config.sync": {"queue": "io"},
