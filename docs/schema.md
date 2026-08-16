@@ -50,6 +50,7 @@ qa_status_t      NOT_APPLICABLE | PASSED | FLAGGED | FAILED
 sync_status_t    SUCCESS | FAILED
 
 operation_t      ANGLE_GENERATION | BACKGROUND_REMOVAL | BACKGROUND_REPLACEMENT
+                 | MATCH
 ```
 
 `REJECTED` is distinct from `FAILED`: it means the provider deterministically declined
@@ -67,7 +68,11 @@ sets either value. Do not use them in new code.
 `operation_t` (Phase 15, migration 0006) — `jobs.operation` defaults to
 `ANGLE_GENERATION`, so every pre-Phase-15 row is unaffected. See
 `phases/phase-15-background-operations.md` and `docs/business-rules.md`'s
-operations section.
+operations section. `MATCH` was added by migration 0013 (Phase 18) via
+`ALTER TYPE ... ADD VALUE` — see that migration's docstring for why this is
+the first migration in this project to actually do that (0006 created
+`operation_t` fresh with all its values baked in; it did not set an
+ADD VALUE precedent despite `phases/phase-18-match.md` claiming it did).
 
 ---
 
@@ -140,7 +145,8 @@ Partial unique index: `CREATE UNIQUE INDEX ON config_versions (is_active) WHERE 
         "enabled": true,
         "unit_cost_usd": 0.02,
         "custom_background_prompt": "..."
-      }
+      },
+      "MATCH": { "enabled": true, "prompt": "...{target_category}...", "unit_cost_usd": 0.02 }
     },
     "background_presets": [
       { "code": "STUDIO_WHITE", "name": "Studio White", "prompt": "...",
@@ -175,6 +181,15 @@ forward. All three are placeholders pending real business decisions — see
 `docs/decisions/0002-background-removal-approach.md` and roadmap open decision #11
 (preset list).
 
+**`global.operations.MATCH` (Phase 18, migration 0014):** seeded the same way,
+alongside the two `BACKGROUND_*` keys already there rather than replacing them
+(migration 0014 merges into the existing `operations` object; a naive
+`setdefault` would have silently dropped the background operations' own config
+on a database that already ran `0007`). `prompt` carries a genuine runtime
+`{target_category}` placeholder, substituted per-request — see
+`app/services/job_service.py::resolve_match_prompt` and roadmap open decision
+#12 (prompt wording / pricing not yet reviewed by the client).
+
 ---
 
 ## `jobs`
@@ -193,7 +208,7 @@ One row per `POST /api/v2/generate`, `POST /api/v2/background/remove`, or
 | `preset_code` | TEXT NULL | Set only for `BACKGROUND_REPLACEMENT` — the pinned backdrop preset the worker resolves its prompt from. Added in migration 0009 (Phase 15). |
 | `config_version_id` | UUID NOT NULL FK → `config_versions.id` | Pinned at creation. Never changes. |
 | `status` | `job_status_t` NOT NULL DEFAULT `PENDING` | |
-| `requested_angles` | INT NOT NULL | Count of angles not skipped for an angle job; always `1` for a background job. Keeps its name across both — see docs/business-rules.md. |
+| `requested_angles` | INT NOT NULL | Count of angles not skipped for an angle job; always `1` for a background job; count of requested companion-piece variants (1-4) for a `MATCH` job. Keeps its name across all three — see docs/business-rules.md. |
 | `succeeded_angles` | INT NOT NULL DEFAULT 0 | |
 | `failed_angles` | INT NOT NULL DEFAULT 0 | |
 | `sku_reference` | TEXT NULL | Client's own product reference, passed through |
@@ -211,7 +226,9 @@ Indexes: `(client_id, created_at DESC)`, `(status)` partial where status in
 ## `sub_jobs`
 
 One row per angle (including skipped angles) for an `ANGLE_GENERATION` job; exactly
-one row, `angle IS NULL`, for a background-operation job.
+one row, `angle IS NULL`, for a background-operation job; 1-4 rows, `angle IS NULL`
+and `variant_index` 0-based and distinct, for a `MATCH` job (migration 0013,
+Phase 18).
 
 | Column | Type | Notes |
 | :--- | :--- | :--- |
@@ -225,6 +242,7 @@ one row, `angle IS NULL`, for a background-operation job.
 | `matte_asset_id` | UUID NULL FK → `assets.id` | |
 | `output_asset_id` | UUID NULL FK → `assets.id` | |
 | `background_asset_id` | UUID NULL FK → `assets.id` | Set only for a BACKGROUND_REPLACEMENT sub-job that used an uploaded background photo instead of a preset (migration 0011). An ordinary INPUT-kind asset, distinguished from `input_asset_id` only by which FK column points at it. |
+| `variant_index` | INT NULL | Set only for a `MATCH` sub-job — its 0-based position among the job's requested companion-piece variants (migration 0013, Phase 18). NULL for every other operation, mirroring how `angle` is NULL for non-`ANGLE_GENERATION` operations. |
 | `prompt_snapshot` | TEXT NULL | Exact resolved prompt sent to the provider |
 | `model_version` | TEXT NULL | Pinned provider model string actually used |
 | `seed` | BIGINT NULL | Recorded for reproducibility |
@@ -236,12 +254,19 @@ one row, `angle IS NULL`, for a background-operation job.
 | `started_at` | TIMESTAMPTZ NULL | |
 | `completed_at` | TIMESTAMPTZ NULL | |
 
-Two partial unique indexes (migration 0006, replacing the old plain
-`UNIQUE(job_id, angle)` — Postgres treats `NULL` as distinct from every other `NULL`,
-so a plain unique constraint would not stop a job accumulating more than one
-angle-less sub-job):
+Three partial unique indexes (the first two from migration 0006, replacing the old
+plain `UNIQUE(job_id, angle)` — Postgres treats `NULL` as distinct from every other
+`NULL`, so a plain unique constraint would not stop a job accumulating more than one
+angle-less sub-job; the third added in migration 0013, Phase 18):
 - `ux_sub_jobs_job_angle` — `(job_id, angle)` unique where `angle IS NOT NULL`
-- `ux_sub_jobs_job_single` — `(job_id)` unique where `angle IS NULL`
+- `ux_sub_jobs_job_single` — `(job_id)` unique where `angle IS NULL AND variant_index IS NULL`.
+  Narrowed by migration 0013 from plain `angle IS NULL` so a `MATCH` job's several
+  angle-less, variant-indexed sub-jobs don't collide with it — background-operation
+  sub-jobs have `variant_index` NULL too, so the "exactly one angle-less sub-job per
+  job" invariant for `BACKGROUND_REMOVAL`/`BACKGROUND_REPLACEMENT` is unchanged.
+- `ux_sub_jobs_job_variant` — `(job_id, variant_index)` unique where `variant_index IS NOT NULL`.
+  The `MATCH` equivalent of `ux_sub_jobs_job_angle`, enforcing "no duplicate
+  variant_index within a job."
 
 Index: `(job_id)`, `(status)` partial where status = `QA_REVIEW`.
 

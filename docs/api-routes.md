@@ -84,6 +84,9 @@ Two mutually exclusive request modes:
   `background_upload` (same `upload_url`/`storage_path`/expiry shape), for a
   custom background photo. Rejected with `422 VALIDATION_ERROR` if set for
   any other operation.
+- `"operation"` also accepts `"MATCH"` (Phase 18) — same `operation_upload`
+  response shape as the two background values above, one upload slot
+  regardless of `variant_count`, to quote back on `POST /match`.
 
 The client uploads directly to Supabase Storage — image bytes never pass through the API.
 This is what keeps `/generate` and the background routes fast and avoids request-size
@@ -125,11 +128,12 @@ Poll for job state. **Auth required. Scoped to the owning client — another cli
 `job_id` returns `404`, never `403`.**
 
 Returns the parent `status` (`PENDING` | `PROCESSING` | `COMPLETED` | `PARTIAL_SUCCESS` |
-`FAILED`), counts, and two additive fields (Phase 15 — both fields are new, `angles`
-is otherwise byte-identical to before that phase):
+`FAILED`), counts, and three additive fields (Phase 15 added `results`, Phase 18 added
+`variants` — `angles` is otherwise byte-identical to before either phase):
 
-- `operation` — `ANGLE_GENERATION` | `BACKGROUND_REMOVAL` | `BACKGROUND_REPLACEMENT`.
-  **Read this first** to know which array to read next.
+- `operation` — `ANGLE_GENERATION` | `BACKGROUND_REMOVAL` | `BACKGROUND_REPLACEMENT` |
+  `MATCH`. **Read this first** to know which array to read next — exactly one of
+  `angles`/`results`/`variants` is ever non-empty for a given job.
 - `angles` — populated for `ANGLE_GENERATION` jobs, empty `[]` otherwise. Each item
   carries `angle`, `status`, `source_type`, `synthetic` flag,
   `image_url` (a **freshly signed URL, 1-hour TTL**, present only when `COMPLETED`),
@@ -139,6 +143,15 @@ is otherwise byte-identical to before that phase):
   job has exactly one sub-job), empty `[]` otherwise. Same per-item fields as `angles`
   minus `angle` itself; `retry_url` points at the job-level
   `/jobs/{job_id}/retry` instead.
+- `variants` — populated for `MATCH` jobs (1-4 elements, one per requested
+  companion-piece variant), empty `[]` otherwise. Same per-item fields as `results`
+  minus `preview_image_url` (a background-only, QA-preview addition — MATCH never
+  enters `QA_REVIEW`, so there's nothing to preview ahead of a decision), plus
+  `variant_index` (0-based) instead of `angle`. Ordered by `variant_index` — the route
+  sorts explicitly, since sub-jobs' natural DB ordering is by `angle`, which is `NULL`
+  for every MATCH row. `retry_url` points at the same job-level `/jobs/{job_id}/retry`
+  route as `results`, generalized in Phase 18 to retry every `FAILED` variant at once
+  — see `docs/business-rules.md` §14.
 
 `retryable` is `false` for `REJECTED` — a safety refusal or QA rejection will not resolve
 by retrying, and the ERP must not offer the button.
@@ -178,14 +191,32 @@ at most one extra generation call on one angle, not the whole-job
 double-billing risk `/generate`'s durable dedup exists to prevent.
 
 ### `POST /api/v2/jobs/{job_id}/retry`
-Re-runs a background-operation job's single sub-job. Phase 15 — see
-`phases/phase-15-background-operations.md` Step 4. **Auth required.
-`Idempotency-Key` header required.**
+Job-level retry. Real as of Phase 15 for background operations; **generalized in
+Phase 18** to also cover MATCH's multi-sub-job case — see
+`phases/phase-15-background-operations.md` Step 4 and
+`phases/phase-18-match.md` Step 4. **Auth required. `Idempotency-Key` header
+required.**
 
-Same preconditions, same `retryidem:` idempotency caveat, and reuses the same
-`app/services/retry_service.py::execute_retry` primitive as the per-angle route above —
-this route just looks up the job's one sub-job instead of one named by an `{angle}`
-path segment.
+**Retries every `FAILED` sub-job on the job, not a single named one.** For a
+background-operation job that's always at most one sub-job, so this reads as
+"retry the job" the same way it always did. For a MATCH job (1-4 sub-jobs) it
+retries every currently-`FAILED` variant in one call — **all-or-nothing**: every
+failed sub-job's own preconditions (attempt ceiling, expired input) are checked
+before any of them is executed, so a job with one still-eligible failed variant
+and one that's exceeded its retry ceiling returns `409` for the whole request
+rather than silently retrying one and skipping the other. See
+`docs/business-rules.md` §14 for the full rule and why this is a real,
+non-trivial behavior change to a route background operations also use — it is
+verified to be a strict no-op for the single-sub-job background case (same
+observable behavior as before Phase 18; only the Redis-internal idempotency
+target key changed shape, and that key is never exposed to a client).
+
+Same preconditions per retried sub-job, same `retryidem:` idempotency caveat
+(now keyed `f"{job_id}:retry"` rather than a specific sub-job's ID — necessary
+because MATCH's retryable set varies request-to-request), and reuses the same
+`app/services/retry_service.py::execute_retry` primitive as the per-angle route
+above, called once per failed sub-job. Dispatches `match.process` or
+`background.process` per retried sub-job depending on `job.operation`.
 
 Returns `409` (`ANGLE_JOB_RETRY_NOT_ALLOWED`) if called on an `ANGLE_GENERATION` job —
 that job type must keep naming its angle via the route above.
@@ -241,9 +272,71 @@ between 1 and 2: the preset must exist and be active
 `preset_code` was given.
 
 ### Status and retry
-`GET /api/v2/status/{job_id}` and `POST /api/v2/jobs/{job_id}/retry` (above) both work
-unchanged for background jobs — read `operation` first, then `results` instead of
-`angles`.
+`GET /api/v2/status/{job_id}` works unchanged for background jobs — read `operation`
+first, then `results` instead of `angles`. `POST /api/v2/jobs/{job_id}/retry` was
+generalized in Phase 18 to also cover MATCH's multi-sub-job case (see that route's
+own docs above); for a background job, which always has at most one sub-job, its
+observable behavior is unchanged.
+
+---
+
+## Companion-Piece Generation (Phase 18)
+
+`MATCH` — one uploaded style-reference photo in, 1-4 generated companion-piece
+variants out, independent of the four-angle flow. See
+`phases/phase-18-match.md` and `docs/ai-integration.md`'s Mode D. Reuses the
+existing job/sub-job state machine, `GET /status/{job_id}`, the generalized
+`POST /jobs/{job_id}/retry` (above), cost recording, and audit trail — no parallel
+pipeline, same posture as Background Operations.
+
+### `POST /api/v2/match`
+**Auth required. `client` scope. `Idempotency-Key` header required.**
+
+Request: `{ "storage_path": "...", "target_category": "...", "variant_count"?: 1-4 (default 1), "sku_reference"?: "...", "metadata"?: {} }`.
+`storage_path` comes from `POST /uploads/presign`'s `{"operation": "MATCH"}` response
+(see Uploads, above). `target_category` is the requested companion-piece's category
+code (e.g. `EARRING`) — **not necessarily the reference photo's own category** —
+validated the same way `/generate`'s `category_code` is (`docs/business-rules.md`
+§1's MATCH note).
+
+Returns `202` with the same `JobAcceptedResponse` shape as `/generate` and the
+background routes — `job_id`, `status: PENDING`, `poll_after_ms`, and a `variants`
+array (parallel to `/generate`'s `angles`, `/background/*`'s single-element `angles`)
+with one `{ "variant_index": <0-based int>, "status": "PENDING" }` entry per
+requested variant.
+
+**Validation, in order — all failures are `4xx` before any job row is created:**
+
+1. `operations.MATCH.enabled` is `true` in the active config version
+   (`422 OPERATION_DISABLED` otherwise)
+2. `target_category` exists and is active in the current config version
+   (`422 CATEGORY_NOT_FOUND` / `422 CATEGORY_INACTIVE`)
+3. `storage_path` exists in `jewelry-inputs` and belongs to this client
+   (`422 ASSET_NOT_FOUND` / `422 ASSET_NOT_OWNED`)
+4. The uploaded image passes `image_validation.inspect_and_validate`
+   (`422 VALIDATION_ERROR`)
+
+**Idempotency:** same `(client_id, Idempotency-Key)` durable dedup as `/generate` —
+a replay with an identical body returns the original `job_id` unchanged; the same
+key with a different body returns `409`.
+
+On acceptance, creates one job (`operation: MATCH`, `category_code: target_category`,
+`requested_angles: variant_count`) and `variant_count` sub-jobs (`angle: NULL`,
+`variant_index: 0..variant_count-1`, all sharing the one uploaded reference-photo
+asset), then dispatches `orchestration.fan_out_match_job`, which fans out to one
+`match.process` Celery task per variant.
+
+### Status and retry
+`GET /api/v2/status/{job_id}` — read `operation: "MATCH"` first, then `variants`
+instead of `angles`/`results` (see that route's docs above for the full field list).
+`POST /api/v2/jobs/{job_id}/retry` retries every currently-`FAILED` variant on the
+job in one all-or-nothing call — **this is the one place in the docs where the
+retry route's real, generalized behavior most matters**, since it's shared code
+that also serves background operations' retry. See that route's own docs above and
+`docs/business-rules.md` §14 for the full rule; do not read this as "works
+unchanged" — the phase file that originally planned this route's reuse said that,
+and it turned out to require a real, if behaviorally-safe-for-background,
+generalization.
 
 ---
 

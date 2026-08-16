@@ -10,7 +10,12 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v2.schemas.generate import GenerateJobRequest, JobAcceptedResponse, ResolvedAnglePlan
+from app.api.v2.schemas.generate import (
+    GenerateJobRequest,
+    JobAcceptedResponse,
+    ResolvedAnglePlan,
+    ResolvedVariantPlan,
+)
 from app.config import settings
 from app.core import ratelimit
 from app.core.errors import AppError, ErrorCode, QuotaExceededError, RateLimitError
@@ -232,6 +237,24 @@ def find_operation_config(
     """
     operations: dict[str, Any] = config_version.payload.get("global", {}).get("operations", {})
     return operations.get(operation.value)
+
+
+def resolve_match_prompt(config_version: ConfigVersion, target_category: str) -> str:
+    """MATCH's `operations.MATCH.prompt` template (phases/phase-18-match.md
+    Step 2, seeded by migration 0014) carries a genuine runtime
+    `{target_category}` placeholder — the first operation prompt in this
+    codebase that isn't a complete, final string at rest. `str.format` is
+    the right tool, not a custom regex/replace: if the seeded template ever
+    references some other unresolved placeholder (a typo, or a field this
+    function doesn't supply), `.format` raises `KeyError` on its own — the
+    fail-loud behavior the checkpoint wants, so a prompt with a literal
+    `{...}` left in it never ships to Gemini. That KeyError is left to
+    propagate uncaught; do not add a fallback that silently returns the
+    unsubstituted template.
+    """
+    op_config = find_operation_config(config_version, Operation.MATCH) or {}
+    template = str(op_config.get("prompt", ""))
+    return template.format(target_category=target_category)
 
 
 def find_preset(config_version: ConfigVersion, preset_code: str) -> dict[str, Any] | None:
@@ -722,3 +745,193 @@ async def _handle_background_replay_race(
             "This Idempotency-Key was already used with a different request body."
         )
     return await _build_background_accepted_response(existing.id, storage_path)
+
+
+async def _build_match_accepted_response(
+    job_id: uuid.UUID, variant_count: int
+) -> JobAcceptedResponse:
+    """Hardcodes a PENDING plan for each requested variant, same shape
+    `_build_background_accepted_response` uses for its single-element
+    `angles` list — no re-query of the sub_jobs table needed since the
+    caller always just created (or is replaying) a job whose sub-jobs are
+    all still PENDING at accept time.
+    """
+    return JobAcceptedResponse(
+        job_id=str(job_id),
+        status="PENDING",
+        variants=[
+            ResolvedVariantPlan(variant_index=i, status=SubJobStatus.PENDING)
+            for i in range(variant_count)
+        ],
+        poll_after_ms=POLL_AFTER_MS,
+    )
+
+
+async def create_match_job_for_request(
+    session: AsyncSession,
+    client: ApiClient,
+    config_version: ConfigVersion,
+    storage_path: str,
+    target_category: str,
+    variant_count: int,
+    sku_reference: str | None,
+    metadata: dict[str, Any],
+    idempotency_key: str,
+    payload_hash: str,
+) -> JobAcceptedResponse:
+    """Implements POST /match — see phases/phase-18-match.md Step 3. Mirrors
+    create_background_job_for_request's shape: idempotency -> rate
+    limit/quota -> validate -> create -> commit. Unlike background
+    operations (always exactly one angle-less sub-job), MATCH fans out to
+    `variant_count` (1-4) angle-less sub-jobs, each with a distinct
+    `variant_index`, all sharing one uploaded reference-photo asset — the
+    same "record the same source per output" pattern angle generation uses,
+    applied to variants instead of angles.
+
+    Dispatches `orchestration.fan_out_match_job` after commit, for a
+    genuinely new job only (Phase 18 Step 4) — see this function's own call
+    site below.
+    """
+    existing = await jobs_repo.get_by_idempotency_key(session, client.id, idempotency_key)
+    if existing is not None:
+        if existing.payload_hash != payload_hash:
+            raise IdempotencyKeyConflictError(
+                "This Idempotency-Key was already used with a different request body."
+            )
+        return await _build_match_accepted_response(existing.id, variant_count)
+
+    await _enforce_rate_limit_and_quota(session, client)
+
+    validate_operation_enabled(config_version, Operation.MATCH)
+
+    # target_category is validated against payload.categories, the same
+    # single source of truth /generate's category_code uses — not a
+    # MATCH-specific list. operations.MATCH itself has no category list.
+    category = find_category(config_version, target_category)
+    if category is None:
+        raise CategoryNotFoundError(
+            f"Category {target_category} not found.",
+            details={"category_code": target_category},
+        )
+    if not category["is_active"]:
+        raise CategoryInactiveError(
+            f"Category {target_category} is not active.",
+            details={"category_code": target_category},
+        )
+
+    if not storage_service.exists(settings.BUCKET_INPUTS, storage_path):
+        raise AssetNotFoundError(
+            f"No uploaded asset found at {storage_path}.",
+            details={"storage_path": storage_path},
+        )
+    if not storage_path.startswith(f"pending/{client.id}/"):
+        raise AssetNotOwnedError(
+            f"storage_path {storage_path} does not belong to this client.",
+            details={"storage_path": storage_path},
+        )
+    meta = image_validation.inspect_and_validate(settings.BUCKET_INPUTS, storage_path)
+
+    job = jobs_repo.create_job(
+        session,
+        client_id=client.id,
+        idempotency_key=idempotency_key,
+        payload_hash=payload_hash,
+        category_code=target_category,
+        config_version_id=config_version.id,
+        requested_angles=variant_count,
+        sku_reference=sku_reference,
+        metadata=metadata,
+        operation=Operation.MATCH,
+    )
+
+    try:
+        await session.flush()  # assigns job.id
+    except IntegrityError:
+        await session.rollback()
+        return await _handle_match_replay_race(
+            session, client, idempotency_key, payload_hash, variant_count
+        )
+
+    # One uploaded reference-photo asset, linked once per variant sub-job —
+    # same pattern angle generation uses to record the same source per
+    # angle, applied here to variants instead.
+    asset = assets_repo.create_asset(
+        session,
+        job_id=job.id,
+        kind=AssetKind.INPUT,
+        bucket=settings.BUCKET_INPUTS,
+        storage_path=storage_path,
+        mime_type=meta.mime_type,
+        width_px=meta.width_px,
+        height_px=meta.height_px,
+        bytes_=meta.bytes,
+        checksum_sha256=meta.checksum_sha256,
+        expires_at=retention_policy.compute_expires_at(AssetKind.INPUT),
+    )
+    await session.flush()  # assigns asset.id
+
+    for variant_index in range(variant_count):
+        validate_operation_angle_consistency(Operation.MATCH, None)
+        jobs_repo.create_sub_job(
+            session,
+            job_id=job.id,
+            angle=None,
+            status=SubJobStatus.PENDING,
+            source_type=SourceType.UPLOADED,
+            input_asset_id=asset.id,
+            variant_index=variant_index,
+        )
+    await session.flush()  # assigns sub_job ids
+
+    job_events_repo.record_event(
+        session,
+        job.id,
+        "JOB_CREATED",
+        to_status=job.status.value,
+        detail={
+            "operation": Operation.MATCH.value,
+            "target_category": target_category,
+            "variant_count": variant_count,
+        },
+    )
+
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        return await _handle_match_replay_race(
+            session, client, idempotency_key, payload_hash, variant_count
+        )
+
+    # Phase 18 Step 4: dispatch real work only for a genuinely new job — an
+    # idempotency replay (both branches above) must never re-dispatch, same
+    # rule create_job_for_request/create_background_job_for_request follow
+    # for their own fan-out dispatch.
+    from app.workers.orchestration import fan_out_match_job
+
+    fan_out_match_job.delay(str(job.id))
+
+    return await _build_match_accepted_response(job.id, variant_count)
+
+
+async def _handle_match_replay_race(
+    session: AsyncSession,
+    client: ApiClient,
+    idempotency_key: str,
+    payload_hash: str,
+    variant_count: int,
+) -> JobAcceptedResponse:
+    """A concurrent request created the MATCH job for this key between our
+    idempotency check and our insert. Treat it exactly like a replay — same
+    shape as _handle_background_replay_race.
+    """
+    existing = await jobs_repo.get_by_idempotency_key(session, client.id, idempotency_key)
+    if existing is None:
+        raise AppError(
+            "Idempotency key conflict could not be resolved.", code=ErrorCode.INTERNAL_ERROR
+        )
+    if existing.payload_hash != payload_hash:
+        raise IdempotencyKeyConflictError(
+            "This Idempotency-Key was already used with a different request body."
+        )
+    return await _build_match_accepted_response(existing.id, variant_count)

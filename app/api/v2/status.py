@@ -56,15 +56,29 @@ async def get_status(
                 bucket_and_path = (asset.bucket, asset.storage_path)
         bucket_and_paths[sub_job.id] = bucket_and_path
 
-    # Additive per phases/phase-15-background-operations.md Step 4: `angles`
-    # stays exactly as it was before this phase for ANGLE_GENERATION jobs;
-    # a background job populates `results` instead, never both.
+    # Additive per phases/phase-15-background-operations.md Step 4 and
+    # phases/phase-18-match.md Step 4: `angles` stays exactly as it was
+    # before those phases for ANGLE_GENERATION jobs; a background job
+    # populates `results` instead, a MATCH job populates `variants` —
+    # exactly one of the three is ever non-empty for a given job.
     if job.operation == Operation.ANGLE_GENERATION:
         angle_statuses = [
             status_service.build_angle_status(job, sub_job, bucket_and_paths[sub_job.id])
             for sub_job in sub_jobs
         ]
         return status_service.build_job_status_response(job, angle_statuses)
+
+    if job.operation == Operation.MATCH:
+        # get_sub_jobs orders by `angle`, which is NULL for every MATCH
+        # sub-job — no natural ordering from that column, so sort by
+        # variant_index here for a stable, readable response (mirrors how
+        # angle jobs get their order for free from the angle_t enum).
+        match_sub_jobs = sorted(sub_jobs, key=lambda sj: sj.variant_index or 0)
+        variant_statuses = [
+            status_service.build_variant_status(job, sub_job, bucket_and_paths[sub_job.id])
+            for sub_job in match_sub_jobs
+        ]
+        return status_service.build_job_status_response(job, [], [], variant_statuses)
 
     result_statuses = [
         status_service.build_background_result_status(job, sub_job, bucket_and_paths[sub_job.id])

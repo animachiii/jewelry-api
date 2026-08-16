@@ -96,9 +96,9 @@ class SubJob(Base):
         # NULLs as distinct, so it wouldn't stop a job accumulating more than
         # one angle-less sub-job. These two partial indexes replace it: one
         # enforces "no duplicate angle within a job" (angle jobs only), the
-        # other "at most one angle-less sub-job per job" (background jobs
-        # only). See docs/schema.md and phases/phase-15-background-operations.md
-        # Step 2.
+        # other "at most one angle-less, variant-less sub-job per job"
+        # (background jobs only). See docs/schema.md and
+        # phases/phase-15-background-operations.md Step 2.
         Index(
             "ux_sub_jobs_job_angle",
             "job_id",
@@ -106,11 +106,27 @@ class SubJob(Base):
             unique=True,
             postgresql_where=text("angle IS NOT NULL"),
         ),
+        # Narrowed in migration 0013 (Phase 18) from `angle IS NULL` to also
+        # require `variant_index IS NULL` — background-operation sub-jobs
+        # have variant_index NULL too, so the "exactly one" invariant for
+        # BACKGROUND_REMOVAL/BACKGROUND_REPLACEMENT is unchanged, while a
+        # MATCH job's several angle-less, variant-indexed sub-jobs no longer
+        # collide with it. See migrations/versions/0013_add_match_operation.py.
         Index(
             "ux_sub_jobs_job_single",
             "job_id",
             unique=True,
-            postgresql_where=text("angle IS NULL"),
+            postgresql_where=text("angle IS NULL AND variant_index IS NULL"),
+        ),
+        # MATCH equivalent of ux_sub_jobs_job_angle — enforces "no duplicate
+        # variant_index within a job" for MATCH's 1-4 companion-piece
+        # sub-jobs. Added in migration 0013 (Phase 18).
+        Index(
+            "ux_sub_jobs_job_variant",
+            "job_id",
+            "variant_index",
+            unique=True,
+            postgresql_where=text("variant_index IS NOT NULL"),
         ),
         Index("ix_sub_jobs_job_id", "job_id"),
         Index(
@@ -132,6 +148,11 @@ class SubJob(Base):
     # which is the Postgres-CHECK-that-can't-be-expressed this schema
     # otherwise relies on.
     angle: Mapped[Angle | None] = mapped_column(Enum(Angle, name="angle_t"), nullable=True)
+    # NULL for every operation except MATCH — 0-based position within a
+    # MATCH job's requested companion-piece variants (1-4 per job), mirroring
+    # how `angle` is NULL for non-ANGLE_GENERATION operations. See migration
+    # 0013 and phases/phase-18-match.md Step 1.
+    variant_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[SubJobStatus] = mapped_column(
         Enum(SubJobStatus, name="sub_job_status_t"),
         nullable=False,

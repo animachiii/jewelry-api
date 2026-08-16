@@ -16,6 +16,13 @@ background note under Call site 2, and
 `docs/decisions/0002-background-removal-approach.md` for why no
 alpha-channel path exists.
 
+**2026-08-16 (Phase 18):** `MATCH` (companion-piece generation) is a third
+reuse of Call site 1, via its own `app/workers/match.py` /
+`app/services/match_service.py`. See Mode D under Call site 1. Unlike Modes
+A-C, its source image is a style reference rather than the subject being
+transformed, and it has no QA gate at all (not even Mode C's unconditional
+one) — see Mode D for why.
+
 ---
 
 ## Call site 1 — Image generation
@@ -77,6 +84,45 @@ product being sold.
 
 **Recorded on every call** (to `sub_jobs`): `prompt_snapshot`, `model_version`, `seed`.
 Without all three, a bad output cannot be reproduced or debugged.
+
+### Mode D — Companion-piece generation (MATCH, Phase 18)
+
+| | |
+| :--- | :--- |
+| **Trigger** | Same as Mode A/B/C — sub-job enters `GENERATING` |
+| **Where** | Celery `io` queue, `app/workers/match.py` via `app/providers/gemini.py` — **the same `GeminiProvider` class**, unmodified |
+| **Input** | One uploaded photo (the style reference) + `{target_category}` from the request, substituted into `config.global.operations.MATCH.prompt` at call time by `app/services/job_service.py::resolve_match_prompt` (`str.format`, fails loud with `KeyError` if the template ever references an unsupplied placeholder — never ships a literal `{...}` to Gemini) |
+| **Output** | A standalone studio product photograph of a **different, new** item — a companion piece, not the input piece |
+
+**The source image is a style reference, not the subject being transformed —
+this is the key difference from Modes A-C.** Mode A/B transform or invent a
+view of *the same physical piece*; Mode C's cutout/composite *is* the
+product being sold, byte-for-byte the same subject on a new backdrop. MATCH's
+output is a **different physical piece** that doesn't exist yet — Gemini is
+asked to match metal tone, stone type/cut, and design language, then render
+a new, standalone item. Because the output is never supposed to be the same
+object as the input, none of Modes A-C's compositing or subject-preservation
+logic applies here: there's nothing to preserve outside a mask (no mask
+exists) and no "did this drift from the source" question to ask, because
+drifting from the source — while staying stylistically consistent with it —
+is the entire point.
+
+**No QA gate.** This is also why MATCH ships straight to `COMPLETED` on a
+successful provider call, unlike Mode C's unconditional `QA_REVIEW`: the
+existing `GeminiQaProvider` gate is a subject-preservation similarity
+check ("did the output stay faithful to the input"), and that question is
+the wrong one for MATCH's output by design. A stylistic-consistency judge
+would be a different tool than what Phase 9 built, and this phase
+deliberately didn't build one speculatively — see
+`docs/business-rules.md` §7. Same "let data decide" posture the "Deferred
+to v3" table already uses elsewhere in this project.
+
+**Reuses `rate_limiter` unmodified** — MATCH's calls compete with Modes
+A/B/C for the same global `GEMINI_RATE_LIMIT_PER_MINUTE` window, no
+separate budget.
+
+**Recorded on every call** (to `sub_jobs`): `prompt_snapshot`, `model_version`,
+`seed` — same fields, same reason, as Mode C.
 
 **Rate limiting (Phase 6, `app/services/rate_limiter.py`).** All provider
 calls pass through a **Redis fixed-window counter**

@@ -635,6 +635,7 @@
       "JobAcceptedResponse": {
         "properties": {
           "angles": {
+            "default": [],
             "items": {
               "$ref": "#/components/schemas/ResolvedAnglePlan"
             },
@@ -653,12 +654,19 @@
             "const": "PENDING",
             "title": "Status",
             "type": "string"
+          },
+          "variants": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ResolvedVariantPlan"
+            },
+            "title": "Variants",
+            "type": "array"
           }
         },
         "required": [
           "job_id",
           "status",
-          "angles",
           "poll_after_ms"
         ],
         "title": "JobAcceptedResponse",
@@ -809,6 +817,14 @@
           "succeeded_angles": {
             "title": "Succeeded Angles",
             "type": "integer"
+          },
+          "variants": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/VariantStatus"
+            },
+            "title": "Variants",
+            "type": "array"
           }
         },
         "required": [
@@ -880,11 +896,54 @@
         "title": "JobSummary",
         "type": "object"
       },
+      "MatchRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "sku_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sku Reference"
+          },
+          "storage_path": {
+            "title": "Storage Path",
+            "type": "string"
+          },
+          "target_category": {
+            "title": "Target Category",
+            "type": "string"
+          },
+          "variant_count": {
+            "default": 1,
+            "maximum": 4.0,
+            "minimum": 1.0,
+            "title": "Variant Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "storage_path",
+          "target_category"
+        ],
+        "title": "MatchRequest",
+        "type": "object"
+      },
       "Operation": {
         "enum": [
           "ANGLE_GENERATION",
           "BACKGROUND_REMOVAL",
-          "BACKGROUND_REPLACEMENT"
+          "BACKGROUND_REPLACEMENT",
+          "MATCH"
         ],
         "title": "Operation",
         "type": "string"
@@ -1233,6 +1292,23 @@
         "title": "ResolvedAnglePlan",
         "type": "object"
       },
+      "ResolvedVariantPlan": {
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/SubJobStatus"
+          },
+          "variant_index": {
+            "title": "Variant Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "variant_index",
+          "status"
+        ],
+        "title": "ResolvedVariantPlan",
+        "type": "object"
+      },
       "SourceType": {
         "enum": [
           "UPLOADED",
@@ -1293,6 +1369,96 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "VariantStatus": {
+        "description": "Same per-item fields as BackgroundResultStatus, minus `angle` (same\nreason \u2014 a MATCH sub-job has no angle either) plus `variant_index` \u2014\nMATCH's 1-4 companion-piece variants need something to order/identify\nthemselves by, the same role `angle` plays for AngleStatus. No\n`preview_image_url`: that's background's QA-preview-specific addition\n(2026-08-13), not applicable here since MATCH never enters QA_REVIEW \u2014\nsee phases/phase-18-match.md Step 4. `qa_status`/`qa_score` are kept for\nresponse-shape consistency with the other two status types even though\nthey're always NOT_APPLICABLE/None for MATCH (it never enters\nQA_REVIEW) \u2014 a client parsing all three shapes the same way shouldn't\nhave to special-case MATCH's.",
+        "properties": {
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "failure_class": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FailureClass"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
+          },
+          "qa_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qa Score"
+          },
+          "qa_status": {
+            "$ref": "#/components/schemas/QAStatus"
+          },
+          "retry_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry Url"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "source_type": {
+            "$ref": "#/components/schemas/SourceType"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SubJobStatus"
+          },
+          "synthetic": {
+            "title": "Synthetic",
+            "type": "boolean"
+          },
+          "variant_index": {
+            "title": "Variant Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "variant_index",
+          "status",
+          "source_type",
+          "synthetic",
+          "qa_status",
+          "retryable"
+        ],
+        "title": "VariantStatus",
         "type": "object"
       }
     },
@@ -2036,6 +2202,86 @@
         "summary": "Retry Job",
         "tags": [
           "retry"
+        ]
+      }
+    },
+    "/api/v2/match": {
+      "post": {
+        "operationId": "create_match_job_api_v2_match_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAcceptedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "Idempotency-Key missing"
+          },
+          "401": {
+            "description": "Invalid API key"
+          },
+          "409": {
+            "description": "Idempotency key conflict"
+          },
+          "422": {
+            "description": "Operation disabled, category not found/inactive, asset not found/owned, or invalid image"
+          },
+          "429": {
+            "description": "Rate limit or quota exceeded"
+          }
+        },
+        "summary": "Create Match Job",
+        "tags": [
+          "match"
         ]
       }
     },
