@@ -287,6 +287,22 @@ def resolve_recolor_prompt(config_version: ConfigVersion, palette_code: str) -> 
     return template.format(palette_prompt=palette_entry["prompt_phrase"])
 
 
+def resolve_mix_prompt(config_version: ConfigVersion) -> str:
+    """MIX's `operations.MIX.prompt` template (phases/phase-20-mix.md
+    Step 2, seeded by migration 0018) carries **no runtime template
+    placeholder** — unlike `resolve_match_prompt`'s `{target_category}` or
+    `resolve_recolor_prompt`'s `{palette_prompt}`, it's a complete, final
+    string at rest. There is nothing per-request to substitute into it: the
+    seam-band overlay itself (app/services/mix_service.py) carries the
+    visual information, not a text parameter. Kept as its own function
+    rather than inlined at the call site for the same reason
+    `resolve_match_prompt`/`resolve_recolor_prompt` are — one place per
+    operation to look up how its prompt is resolved.
+    """
+    op_config = find_operation_config(config_version, Operation.MIX) or {}
+    return str(op_config.get("prompt", ""))
+
+
 def find_palette_entry(config_version: ConfigVersion, palette_code: str) -> dict[str, Any] | None:
     for entry in config_version.payload.get("global", {}).get("palette", []):
         if entry["code"] == palette_code:
@@ -1181,3 +1197,252 @@ async def _handle_recolor_replay_race(
             "This Idempotency-Key was already used with a different request body."
         )
     return await _build_recolor_accepted_response(existing.id, storage_path)
+
+
+async def _build_mix_accepted_response(
+    job_id: uuid.UUID, primary_storage_path: str
+) -> JobAcceptedResponse:
+    """Same shape _build_recolor_accepted_response/_build_background_accepted_response
+    use — a MIX job has exactly one sub-job, same as RECOLOR and background
+    operations, not MATCH's 1-4. See phases/phase-20-mix.md Step 3."""
+    return JobAcceptedResponse(
+        job_id=str(job_id),
+        status="PENDING",
+        angles=[
+            ResolvedAnglePlan(
+                angle=None,
+                source_type=SourceType.UPLOADED,
+                status=SubJobStatus.PENDING,
+                storage_path=primary_storage_path,
+            )
+        ],
+        poll_after_ms=POLL_AFTER_MS,
+    )
+
+
+async def _validate_and_ingest_mix_asset(client_id: uuid.UUID, storage_path: str) -> ImageMetadata:
+    """Shared existence/ownership/structural-validity check for MIX's two
+    independent source photos — same three checks _validate_request runs
+    per angle, applied here to a standalone photo the way
+    create_recolor_job_for_request already applies it to RECOLOR's source.
+    """
+    if not storage_service.exists(settings.BUCKET_INPUTS, storage_path):
+        raise AssetNotFoundError(
+            f"No uploaded asset found at {storage_path}.",
+            details={"storage_path": storage_path},
+        )
+    if not storage_path.startswith(f"pending/{client_id}/"):
+        raise AssetNotOwnedError(
+            f"storage_path {storage_path} does not belong to this client.",
+            details={"storage_path": storage_path},
+        )
+    return image_validation.inspect_and_validate(settings.BUCKET_INPUTS, storage_path)
+
+
+async def _validate_and_ingest_mix_mask(
+    client_id: uuid.UUID, mask_storage_path: str, source_meta: ImageMetadata
+) -> mask_validation.MaskMetadata:
+    """Shared existence/ownership/mask-contract check for MIX's two
+    independent masks — mask_validation.validate_mask is called once per
+    pair, completely independently, same as RECOLOR's own single call; it
+    has no knowledge of MIX or of a second image, and needs no change to
+    serve this. See phases/phase-20-mix.md Step 3."""
+    if not storage_service.exists(settings.BUCKET_INPUTS, mask_storage_path):
+        raise AssetNotFoundError(
+            f"No uploaded asset found at {mask_storage_path}.",
+            details={"storage_path": mask_storage_path},
+        )
+    if not mask_storage_path.startswith(f"pending/{client_id}/"):
+        raise AssetNotOwnedError(
+            f"storage_path {mask_storage_path} does not belong to this client.",
+            details={"storage_path": mask_storage_path},
+        )
+    return mask_validation.validate_mask(
+        settings.BUCKET_INPUTS, mask_storage_path, source_meta.width_px, source_meta.height_px
+    )
+
+
+async def create_mix_job_for_request(
+    session: AsyncSession,
+    client: ApiClient,
+    config_version: ConfigVersion,
+    primary_storage_path: str,
+    primary_mask_storage_path: str,
+    secondary_storage_path: str,
+    secondary_mask_storage_path: str,
+    sku_reference: str | None,
+    metadata: dict[str, Any],
+    idempotency_key: str,
+    payload_hash: str,
+) -> JobAcceptedResponse:
+    """Implements POST /mix — see phases/phase-20-mix.md Step 3. Mirrors
+    create_recolor_job_for_request's shape (idempotency -> rate limit/quota
+    -> validate -> create -> commit -> dispatch), since a MIX job has
+    exactly one sub-job, same as RECOLOR and background jobs, not MATCH's
+    1-4 fan-out. The one genuinely new piece: **two** independent uploaded
+    photo/mask pairs are validated, each via the same
+    image_validation.inspect_and_validate / mask_validation.validate_mask
+    calls RECOLOR already uses for its one pair, called here twice,
+    completely independently — no cross-mask validation at ingest time (see
+    this phase file's own Step 3 note on why).
+
+    Dispatches app.workers.mix.process_task directly after commit, for a
+    genuinely new job only — same "never re-dispatch on a replay" rule
+    every other job-creating function here follows.
+    """
+    existing = await jobs_repo.get_by_idempotency_key(session, client.id, idempotency_key)
+    if existing is not None:
+        if existing.payload_hash != payload_hash:
+            raise IdempotencyKeyConflictError(
+                "This Idempotency-Key was already used with a different request body."
+            )
+        return await _build_mix_accepted_response(existing.id, primary_storage_path)
+
+    await _enforce_rate_limit_and_quota(session, client)
+
+    validate_operation_enabled(config_version, Operation.MIX)
+
+    primary_meta = await _validate_and_ingest_mix_asset(client.id, primary_storage_path)
+    primary_mask_meta = await _validate_and_ingest_mix_mask(
+        client.id, primary_mask_storage_path, primary_meta
+    )
+    secondary_meta = await _validate_and_ingest_mix_asset(client.id, secondary_storage_path)
+    secondary_mask_meta = await _validate_and_ingest_mix_mask(
+        client.id, secondary_mask_storage_path, secondary_meta
+    )
+
+    job = jobs_repo.create_job(
+        session,
+        client_id=client.id,
+        idempotency_key=idempotency_key,
+        payload_hash=payload_hash,
+        category_code=None,
+        config_version_id=config_version.id,
+        requested_angles=1,
+        sku_reference=sku_reference,
+        metadata=metadata,
+        operation=Operation.MIX,
+    )
+
+    try:
+        await session.flush()  # assigns job.id
+    except IntegrityError:
+        await session.rollback()
+        return await _handle_mix_replay_race(
+            session, client, idempotency_key, payload_hash, primary_storage_path
+        )
+
+    primary_asset = assets_repo.create_asset(
+        session,
+        job_id=job.id,
+        kind=AssetKind.INPUT,
+        bucket=settings.BUCKET_INPUTS,
+        storage_path=primary_storage_path,
+        mime_type=primary_meta.mime_type,
+        width_px=primary_meta.width_px,
+        height_px=primary_meta.height_px,
+        bytes_=primary_meta.bytes,
+        checksum_sha256=primary_meta.checksum_sha256,
+        expires_at=retention_policy.compute_expires_at(AssetKind.INPUT),
+    )
+    await session.flush()  # assigns asset.id
+
+    primary_mask_asset = assets_repo.create_asset(
+        session,
+        job_id=job.id,
+        kind=AssetKind.MASK,
+        bucket=settings.BUCKET_INPUTS,
+        storage_path=primary_mask_storage_path,
+        mime_type="image/png",
+        width_px=primary_mask_meta.width_px,
+        height_px=primary_mask_meta.height_px,
+        bytes_=primary_mask_meta.bytes,
+        checksum_sha256=primary_mask_meta.checksum_sha256,
+        expires_at=retention_policy.compute_expires_at(AssetKind.MASK),
+    )
+    await session.flush()
+
+    secondary_asset = assets_repo.create_asset(
+        session,
+        job_id=job.id,
+        kind=AssetKind.INPUT,
+        bucket=settings.BUCKET_INPUTS,
+        storage_path=secondary_storage_path,
+        mime_type=secondary_meta.mime_type,
+        width_px=secondary_meta.width_px,
+        height_px=secondary_meta.height_px,
+        bytes_=secondary_meta.bytes,
+        checksum_sha256=secondary_meta.checksum_sha256,
+        expires_at=retention_policy.compute_expires_at(AssetKind.INPUT),
+    )
+    await session.flush()
+
+    secondary_mask_asset = assets_repo.create_asset(
+        session,
+        job_id=job.id,
+        kind=AssetKind.MASK,
+        bucket=settings.BUCKET_INPUTS,
+        storage_path=secondary_mask_storage_path,
+        mime_type="image/png",
+        width_px=secondary_mask_meta.width_px,
+        height_px=secondary_mask_meta.height_px,
+        bytes_=secondary_mask_meta.bytes,
+        checksum_sha256=secondary_mask_meta.checksum_sha256,
+        expires_at=retention_policy.compute_expires_at(AssetKind.MASK),
+    )
+    await session.flush()
+
+    validate_operation_angle_consistency(Operation.MIX, None)
+    sub_job = jobs_repo.create_sub_job(
+        session,
+        job_id=job.id,
+        angle=None,
+        status=SubJobStatus.PENDING,
+        source_type=SourceType.UPLOADED,
+        input_asset_id=primary_asset.id,
+        mask_asset_id=primary_mask_asset.id,
+        secondary_input_asset_id=secondary_asset.id,
+        secondary_mask_asset_id=secondary_mask_asset.id,
+    )
+    await session.flush()  # assigns sub_job.id
+
+    job_events_repo.record_event(
+        session,
+        job.id,
+        "JOB_CREATED",
+        to_status=job.status.value,
+        detail={"operation": Operation.MIX.value},
+    )
+
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        return await _handle_mix_replay_race(
+            session, client, idempotency_key, payload_hash, primary_storage_path
+        )
+
+    from app.workers.mix import process_task
+
+    process_task.delay(str(sub_job.id))
+
+    return await _build_mix_accepted_response(job.id, primary_storage_path)
+
+
+async def _handle_mix_replay_race(
+    session: AsyncSession,
+    client: ApiClient,
+    idempotency_key: str,
+    payload_hash: str,
+    primary_storage_path: str,
+) -> JobAcceptedResponse:
+    existing = await jobs_repo.get_by_idempotency_key(session, client.id, idempotency_key)
+    if existing is None:
+        raise AppError(
+            "Idempotency key conflict could not be resolved.", code=ErrorCode.INTERNAL_ERROR
+        )
+    if existing.payload_hash != payload_hash:
+        raise IdempotencyKeyConflictError(
+            "This Idempotency-Key was already used with a different request body."
+        )
+    return await _build_mix_accepted_response(existing.id, primary_storage_path)

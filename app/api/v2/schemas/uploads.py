@@ -33,7 +33,7 @@ class PresignUploadRequest(BaseModel):
         if op_mode and self.operation == Operation.ANGLE_GENERATION:
             raise ValueError(
                 "operation must be BACKGROUND_REMOVAL, BACKGROUND_REPLACEMENT, MATCH, "
-                "or RECOLOR (ANGLE_GENERATION uses category_code/angles instead)"
+                "RECOLOR, or MIX (ANGLE_GENERATION uses category_code/angles instead)"
             )
         if not angle_mode and not op_mode:
             raise ValueError("either category_code+angles or operation is required")
@@ -65,11 +65,36 @@ class PresignedBackgroundUpload(BaseModel):
 
 
 class PresignedMaskUpload(BaseModel):
-    """Second upload slot for operation=RECOLOR — a RECOLOR job is never
-    valid without a mask (unlike a custom background photo for
-    BACKGROUND_REPLACEMENT, which is optional), so this is always returned
-    alongside operation_upload for RECOLOR, no extra request flag needed.
-    See phases/phase-19-recolor.md Step 3.
+    """Second upload slot for operation=RECOLOR, or the primary-mask slot
+    for operation=MIX (see PresignedSecondaryUpload/
+    PresignedSecondaryMaskUpload below for MIX's other two) — a RECOLOR or
+    MIX job is never valid without a mask (unlike a custom background photo
+    for BACKGROUND_REPLACEMENT, which is optional), so this is always
+    returned alongside operation_upload, no extra request flag needed. See
+    phases/phase-19-recolor.md Step 3 and phases/phase-20-mix.md Step 3.
+    """
+
+    upload_url: str
+    storage_path: str
+    expires_at: datetime
+
+
+class PresignedSecondaryUpload(BaseModel):
+    """Third upload slot for operation=MIX — the second source photo
+    (image B, the piece grafted from). Always returned alongside
+    operation_upload/mask_upload for MIX, no extra request flag needed — a
+    MIX job is never valid without all four slots. See
+    phases/phase-20-mix.md Step 3.
+    """
+
+    upload_url: str
+    storage_path: str
+    expires_at: datetime
+
+
+class PresignedSecondaryMaskUpload(BaseModel):
+    """Fourth upload slot for operation=MIX — the mask on the second source
+    photo (region B to cut). See PresignedSecondaryUpload above.
     """
 
     upload_url: str
@@ -82,3 +107,5 @@ class PresignUploadResponse(BaseModel):
     operation_upload: PresignedOperationUpload | None = None
     background_upload: PresignedBackgroundUpload | None = None
     mask_upload: PresignedMaskUpload | None = None
+    secondary_upload: PresignedSecondaryUpload | None = None
+    secondary_mask_upload: PresignedSecondaryMaskUpload | None = None

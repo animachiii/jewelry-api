@@ -99,6 +99,7 @@ useful in production.
 | `MASK_FEATHER_PX` | Default `3` is fine to start — RECOLOR compositing feather, see `app/services/recolor_service.py` |
 | `MASK_MIN_COVERAGE_PCT` | Default `0.5` is fine to start — RECOLOR mask contract, see `app/services/mask_validation.py` |
 | `MASK_MAX_COVERAGE_PCT` | Default `60.0` is fine to start — RECOLOR mask contract, see `app/services/mask_validation.py` |
+| `MIX_SEAM_BAND_PX` | Default `6` is fine to start — MIX seam-band width, see `app/services/mix_service.py` |
 | `SENTRY_DSN` | (has a default; empty means no error reporting — fine to leave empty until Phase 11 is built) |
 
 `rediss://` (TLS) is Upstash's URL scheme — `redis.asyncio.from_url`

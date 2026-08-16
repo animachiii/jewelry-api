@@ -218,6 +218,72 @@ ERP must not offer a retry button for it.
 evaluated — including calls that end in refusal. A refused generation is
 still billed.
 
+### Mode F — Two-piece masked merge (MIX, Phase 20)
+
+| | |
+| :--- | :--- |
+| **Trigger** | Same as Mode A/B/C/D/E — sub-job enters `GENERATING` |
+| **Where** | Celery `io` queue, `app/workers/mix.py` via `app/providers/gemini.py` — **the same `GeminiProvider` class**, unmodified |
+| **Input** | One image: a solid-magenta *seam-band* overlay burned onto a deterministically-assembled `rough_composite`, not onto either raw source. Built by `app/services/mix_service.py::_build_rough_composite` (no model call) then `_build_seam_overlay` |
+| **Output** | The provider's raw response is **not** the client-facing artifact, same as Mode E — see below |
+
+**Unlike Mode E, the step before the provider call does real deterministic image
+assembly, not just an overlay burn.** Mode E's overlay is the *source* photo with a
+colour fill over the edit region — the underlying image content is unchanged. MIX's
+overlay is built from `rough_composite`, an image that does not exist anywhere
+until this phase's own new pre-provider step constructs it: region B (the piece
+being grafted from) is cropped to its mask's bounding box, scaled (aspect ratio not
+preserved) to fit region A's bounding box, and pasted onto image A via mask A's own
+silhouette as the paste alpha. **No model call is involved in placement at all** —
+only the visible seam between the two pieces is Gemini's job, confined to a ring
+(`MIX_SEAM_BAND_PX` pixels wide) around the graft boundary rather than the mask's
+full interior the way Mode E's edit region is. This split exists because cross-image
+spatial reasoning — correctly placing content from one photo's frame into another's
+— is the weakest capability in play for any current-generation image model; asking
+Gemini to do placement *and* blending in one call risks the graft landing in the
+wrong position or at the wrong scale with no ground truth to check it against.
+
+1. **Before the call**, `rough_composite` is built deterministically (Pillow only),
+   then a seam-band ring (`dilate(mask_a, band_px) - erode(mask_a, band_px)`) is
+   burned into a magenta overlay on top of it — same hard-edged-overlay mechanism
+   Mode E established, applied to a ring instead of a filled region.
+2. **After the call**, the same seam-band mask, feathered by `MASK_FEATHER_PX`
+   (Mode E's own existing setting, reused rather than duplicated), drives a
+   server-side compositing step (`app/services/mix_service.py::_composite_seam_result`)
+   that discards everything the provider changed outside the seam. Everywhere the
+   feathered seam-band mask is 0 — both the untouched rest of image A *and* the
+   already-correct interior of the graft — the stored `OUTPUT` asset's pixel is
+   `rough_composite`'s own pixel, exactly.
+
+This is the direct architectural consequence of the same fact Call site 1's own
+constraint note above already states — no mask parameter exists — applied to a case
+(MIX) that, unlike every mode before it, needs to assemble content from **two**
+independent source images before any provider involvement, then bound the provider's
+influence to a boundary between them rather than a single edit region.
+
+**No QA gate**, for a fourth, distinct reason from MATCH's and RECOLOR's — see
+`docs/business-rules.md` §7's MIX note and §16.
+
+**Reuses `rate_limiter` unmodified** — same global `GEMINI_RATE_LIMIT_PER_MINUTE`
+window every other mode competes for.
+
+**Recorded on every call** (to `sub_jobs`): `prompt_snapshot`, `model_version`,
+`seed` — same fields, same reason, as every other mode.
+
+**Both the non-aspect-preserving scale-to-fit and the seam-only refinement strategy
+are unvalidated against a real model call** — no real `GEMINI_API_KEY` exists in
+this environment, same gap every phase since 6 has hit. If a future session with a
+real key finds either doesn't hold up on real jewelry macro photography, that
+correction belongs here and in `phases/phase-20-mix.md`'s own reality-check section
+— not silently in code.
+
+**Known limitation, found while building this phase's own central pixel-identity
+test, not a theoretical concern:** for a masked region narrower than roughly
+`2 * (MIX_SEAM_BAND_PX + MASK_FEATHER_PX)` in either dimension, the post-call
+Gaussian feather can bleed through the graft's interior from both sides of the
+seam-band ring at once — see `app/services/mix_service.py::_seam_band_mask`'s own
+docstring and `docs/business-rules.md` §16.
+
 ---
 
 ## Call site 2 — QA similarity gate

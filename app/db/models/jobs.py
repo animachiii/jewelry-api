@@ -205,6 +205,25 @@ class SubJob(Base):
     # validated against the active config's payload.global.palette. See
     # migration 0015 and phases/phase-19-recolor.md Step 1.
     palette_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    # NULL for every operation except MIX — the second uploaded source photo
+    # (image B, the piece grafted from). An ordinary INPUT-kind asset,
+    # distinguished from input_asset_id only by which FK column points at
+    # it (same pattern background_asset_id already uses). See migration
+    # 0017 and phases/phase-20-mix.md Step 1.
+    secondary_input_asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("assets.id", name="fk_sub_jobs_secondary_input_asset_id", use_alter=True),
+        nullable=True,
+    )
+    # NULL for every operation except MIX — the mask on the second source
+    # photo (region B to cut). An ordinary MASK-kind asset, distinguished
+    # from mask_asset_id only by which FK column points at it. See
+    # migration 0017 and phases/phase-20-mix.md Step 1.
+    secondary_mask_asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("assets.id", name="fk_sub_jobs_secondary_mask_asset_id", use_alter=True),
+        nullable=True,
+    )
     prompt_snapshot: Mapped[str | None] = mapped_column(String, nullable=True)
     model_version: Mapped[str | None] = mapped_column(String, nullable=True)
     seed: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

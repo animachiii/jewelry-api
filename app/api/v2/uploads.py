@@ -21,6 +21,8 @@ from app.api.v2.schemas.uploads import (
     PresignedBackgroundUpload,
     PresignedMaskUpload,
     PresignedOperationUpload,
+    PresignedSecondaryMaskUpload,
+    PresignedSecondaryUpload,
     PresignUploadRequest,
     PresignUploadResponse,
 )
@@ -78,10 +80,13 @@ async def presign_uploads(
             )
 
         mask_upload = None
-        if body.operation == Operation.RECOLOR:
-            # A RECOLOR job is never valid without a mask, unlike a custom
-            # background photo — always issued, no request flag needed. See
-            # phases/phase-19-recolor.md Step 3.
+        if body.operation in (Operation.RECOLOR, Operation.MIX):
+            # A RECOLOR or MIX job is never valid without a mask, unlike a
+            # custom background photo — always issued, no request flag
+            # needed. For MIX this is the *primary* mask; see
+            # secondary_upload/secondary_mask_upload below for the other
+            # two MIX-only slots. See phases/phase-19-recolor.md Step 3 and
+            # phases/phase-20-mix.md Step 3.
             mask_storage_path = (
                 f"pending/{client.id}/{group_id}/{body.operation.value}/"
                 f"mask_{uuid.uuid4().hex[:8]}.png"
@@ -95,6 +100,40 @@ async def presign_uploads(
                 expires_at=expires_at,
             )
 
+        secondary_upload = None
+        secondary_mask_upload = None
+        if body.operation == Operation.MIX:
+            # MIX needs two full source/mask pairs — operation_upload/
+            # mask_upload above carry the *primary* pair, these two carry
+            # the *secondary* pair (image B and its mask). Always both, no
+            # extra request flag — a MIX job is never valid without all
+            # four slots. See phases/phase-20-mix.md Step 3.
+            secondary_storage_path = (
+                f"pending/{client.id}/{group_id}/{body.operation.value}/"
+                f"secondary_{uuid.uuid4().hex[:8]}.jpg"
+            )
+            secondary_result = storage_service.generate_upload_url(
+                settings.BUCKET_INPUTS, secondary_storage_path
+            )
+            secondary_upload = PresignedSecondaryUpload(
+                upload_url=secondary_result["signedUrl"],
+                storage_path=secondary_storage_path,
+                expires_at=expires_at,
+            )
+
+            secondary_mask_storage_path = (
+                f"pending/{client.id}/{group_id}/{body.operation.value}/"
+                f"secondary_mask_{uuid.uuid4().hex[:8]}.png"
+            )
+            secondary_mask_result = storage_service.generate_upload_url(
+                settings.BUCKET_INPUTS, secondary_mask_storage_path
+            )
+            secondary_mask_upload = PresignedSecondaryMaskUpload(
+                upload_url=secondary_mask_result["signedUrl"],
+                storage_path=secondary_mask_storage_path,
+                expires_at=expires_at,
+            )
+
         return PresignUploadResponse(
             angles=[],
             operation_upload=PresignedOperationUpload(
@@ -105,6 +144,8 @@ async def presign_uploads(
             ),
             background_upload=background_upload,
             mask_upload=mask_upload,
+            secondary_upload=secondary_upload,
+            secondary_mask_upload=secondary_mask_upload,
         )
 
     assert body.angles is not None  # enforced by the request schema's mode validator

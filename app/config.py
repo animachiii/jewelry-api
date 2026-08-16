@@ -102,6 +102,14 @@ class Settings(BaseSettings):
     MASK_MIN_COVERAGE_PCT: float = 0.5
     MASK_MAX_COVERAGE_PCT: float = 60.0
 
+    # --- MIX seam-band processing (Phase 20) ---
+    # Half-width, in pixels, of the ring drawn around the graft boundary
+    # (mask A's silhouette) after the deterministic rough-composite step —
+    # both the hard-edged magenta seam overlay sent to Gemini and, feathered
+    # by MASK_FEATHER_PX above, the post-call compositing alpha are built
+    # from this same ring. See app/services/mix_service.py.
+    MIX_SEAM_BAND_PX: int = 6
+
     # --- Observability ---
     SENTRY_DSN: str = ""
 

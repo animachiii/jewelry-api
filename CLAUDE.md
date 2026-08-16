@@ -68,6 +68,28 @@ compositing-correctness question, not a similarity-score one). See
 Recolor" section, and `docs/ai-integration.md`'s Mode E for the full
 contract.
 
+**Correction, 2026-08-16 (Phase 20):** a sixth operation family now exists:
+`POST /mix` (`MIX`) grafts a masked region from one uploaded piece
+("secondary") into a masked region of another ("primary"), producing one
+merged photo. Extends RECOLOR's mask-validation and generate-then-composite
+machinery across two independent source/mask pairs, plus a genuinely new
+step no prior operation needed: a deterministic rough-composite (crop
+region B via its mask, scale/align it into region A via A's mask — no
+provider call involved in placement) *before* any provider call, followed
+by a refinement call scoped only to a ring around the graft's seam, not the
+whole edited region — cross-image spatial reasoning is the weakest
+capability in play for any current-generation image model, so placement is
+never asked of Gemini. Like RECOLOR, **the client-facing output is not the
+provider's raw response** — it's the rough-composite (itself already a
+deterministic merge of two different pieces' photos) composited with the
+provider's response, so everything outside the seam band is byte-identical
+to the rough-composite. No QA gate, for a fourth, distinct reason from
+MATCH's and RECOLOR's. This is the third and last currently-planned v3
+feature phase — see `phases/phase-roadmap.md`'s "Deferred to v3" table. See
+`docs/business-rules.md` §16, `docs/api-routes.md`'s "Two-Piece Masked
+Merge" section, and `docs/ai-integration.md`'s Mode F for the full
+contract.
+
 **Actors:**
 
 | Actor | Can do |
