@@ -251,6 +251,127 @@
     <div class="call-error" id="bg-submit-error"></div>
   </section>
 
+  <section>
+    <h2>Companion-piece match (MATCH)</h2>
+    <p class="muted">
+      One uploaded style-reference photo in, 1-4 generated companion-piece variants
+      out — a different, matching item, not the same piece restaged. See
+      <code>docs/api-routes.md</code>'s "Companion-Piece Generation" section.
+    </p>
+    <p class="muted" style="color: var(--err)">
+      Calls the real pipeline — a real, billed Gemini call per variant. No QA gate;
+      ships straight to <code>COMPLETED</code>.
+    </p>
+    <div class="row">
+      <div class="field">
+        <label for="match-file">Style reference photo</label>
+        <input type="file" id="match-file" accept="image/jpeg,image/png,image/webp" />
+      </div>
+      <div class="field">
+        <label for="match-target-category">Target category</label>
+        <select id="match-target-category"></select>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="match-variant-count">Variant count (1-4)</label>
+        <input type="text" id="match-variant-count" value="1" />
+      </div>
+      <div class="field">
+        <label for="match-sku">SKU reference (optional)</label>
+        <input type="text" id="match-sku" placeholder="e.g. RING-0142" />
+      </div>
+    </div>
+    <div style="margin-top: 14px">
+      <button type="button" id="match-submit-btn">Presign, upload &amp; submit</button>
+    </div>
+    <div class="call-error" id="match-submit-error"></div>
+  </section>
+
+  <section>
+    <h2>Masked gemstone recolor (RECOLOR)</h2>
+    <p class="muted">
+      One uploaded source photo + one uploaded mask in, one recolored photo out —
+      everything outside the mask is byte-identical to the source. See
+      <code>docs/api-routes.md</code>'s "Masked Gemstone Recolor" section.
+    </p>
+    <p class="muted" style="color: var(--err)">
+      Calls the real pipeline — a real, billed Gemini call. Mask must be a
+      single-channel 8-bit grayscale PNG, same dimensions as the source, binary
+      (0/255) values only, 0.5%-60% white coverage. No QA gate; ships straight to
+      <code>COMPLETED</code>.
+    </p>
+    <div class="row">
+      <div class="field">
+        <label for="recolor-file">Source photo</label>
+        <input type="file" id="recolor-file" accept="image/jpeg,image/png,image/webp" />
+      </div>
+      <div class="field">
+        <label for="recolor-mask-file">Mask (PNG, grayscale, binary)</label>
+        <input type="file" id="recolor-mask-file" accept="image/png" />
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="recolor-palette">Palette color</label>
+        <select id="recolor-palette"></select>
+      </div>
+      <div class="field">
+        <label for="recolor-sku">SKU reference (optional)</label>
+        <input type="text" id="recolor-sku" placeholder="e.g. RING-0142" />
+      </div>
+    </div>
+    <div style="margin-top: 14px">
+      <button type="button" id="recolor-submit-btn">Presign, upload &amp; submit</button>
+    </div>
+    <div class="call-error" id="recolor-submit-error"></div>
+  </section>
+
+  <section>
+    <h2>Two-piece masked merge (MIX)</h2>
+    <p class="muted">
+      Two uploaded source photos + one mask each in, one merged photo out — the
+      secondary photo's masked region is grafted into the primary photo's masked
+      region. See <code>docs/api-routes.md</code>'s "Two-Piece Masked Merge" section.
+    </p>
+    <p class="muted" style="color: var(--err)">
+      Calls the real pipeline — a real, billed Gemini call scoped to the graft
+      seam. Both masks follow RECOLOR's same PNG mask contract, each checked
+      against its own photo's dimensions. No QA gate; ships straight to
+      <code>COMPLETED</code>.
+    </p>
+    <div class="row">
+      <div class="field">
+        <label for="mix-primary-file">Primary photo (receives the graft)</label>
+        <input type="file" id="mix-primary-file" accept="image/jpeg,image/png,image/webp" />
+      </div>
+      <div class="field">
+        <label for="mix-primary-mask-file">Primary mask (PNG)</label>
+        <input type="file" id="mix-primary-mask-file" accept="image/png" />
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="mix-secondary-file">Secondary photo (grafted from)</label>
+        <input type="file" id="mix-secondary-file" accept="image/jpeg,image/png,image/webp" />
+      </div>
+      <div class="field">
+        <label for="mix-secondary-mask-file">Secondary mask (PNG)</label>
+        <input type="file" id="mix-secondary-mask-file" accept="image/png" />
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="mix-sku">SKU reference (optional)</label>
+        <input type="text" id="mix-sku" placeholder="e.g. RING-0142" />
+      </div>
+    </div>
+    <div style="margin-top: 14px">
+      <button type="button" id="mix-submit-btn">Presign, upload &amp; submit</button>
+    </div>
+    <div class="call-error" id="mix-submit-error"></div>
+  </section>
+
   <section class="job-panel" id="job-panel">
     <h2>Job <span id="job-id-label" class="muted"></span></h2>
     <p>
@@ -419,6 +540,34 @@
     });
     renderAngleInputs();
     renderPresetOptions();
+    renderMatchCategoryOptions();
+    renderPaletteOptions();
+  }
+
+  // --- MATCH: target-category options -----------------------------------
+
+  function renderMatchCategoryOptions() {
+    const select = $("match-target-category");
+    select.innerHTML = "";
+    (activeConfig.categories || []).forEach((cat) => {
+      const opt = document.createElement("option");
+      opt.value = cat.code;
+      opt.textContent = cat.name + " (" + cat.code + ")";
+      select.appendChild(opt);
+    });
+  }
+
+  // --- RECOLOR: palette options --------------------------------------
+
+  function renderPaletteOptions() {
+    const select = $("recolor-palette");
+    select.innerHTML = "";
+    ((activeConfig && activeConfig.palette) || []).forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = p.code;
+      opt.textContent = p.label + " (" + p.code + ")";
+      select.appendChild(opt);
+    });
   }
 
   // --- Background operations: preset list + operation toggle -----------
@@ -700,6 +849,197 @@
     }
   });
 
+  // --- MATCH: presign -> upload -> submit --------------------------------
+
+  async function uploadFile(uploadUrl, file) {
+    const putResp = await fetch(uploadUrl, {
+      method: "PUT",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file,
+    });
+    if (!putResp.ok) throw new Error("Upload failed: HTTP " + putResp.status);
+  }
+
+  $("match-submit-btn").addEventListener("click", async function () {
+    const errorEl = $("match-submit-error");
+    hideCallError(errorEl);
+    const btn = $("match-submit-btn");
+
+    const file = $("match-file").files[0];
+    if (!file) {
+      showCallError(errorEl, new Error("Choose a style reference photo first."));
+      return;
+    }
+    const targetCategory = $("match-target-category").value;
+    if (!targetCategory) {
+      showCallError(errorEl, new Error("No target category — check the connection/config above."));
+      return;
+    }
+    const variantCount = parseInt($("match-variant-count").value, 10) || 1;
+
+    btn.disabled = true;
+    try {
+      btn.textContent = "Requesting upload URL…";
+      const presignResp = await apiFetch("/api/v2/uploads/presign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operation: "MATCH" }),
+      });
+      const upload = presignResp.operation_upload;
+
+      btn.textContent = "Uploading photo…";
+      await uploadFile(upload.upload_url, file);
+
+      const body = {
+        storage_path: upload.storage_path,
+        target_category: targetCategory,
+        variant_count: variantCount,
+      };
+      const sku = $("match-sku").value.trim();
+      if (sku) body.sku_reference = sku;
+
+      btn.textContent = "Creating job…";
+      const result = await apiFetch("/api/v2/match", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": uuid4() },
+        body: JSON.stringify(body),
+      });
+
+      startTrackingJob(result.job_id);
+    } catch (err) {
+      showCallError(errorEl, err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Presign, upload & submit";
+    }
+  });
+
+  // --- RECOLOR: presign -> upload -> submit -------------------------------
+
+  $("recolor-submit-btn").addEventListener("click", async function () {
+    const errorEl = $("recolor-submit-error");
+    hideCallError(errorEl);
+    const btn = $("recolor-submit-btn");
+
+    const file = $("recolor-file").files[0];
+    const maskFile = $("recolor-mask-file").files[0];
+    if (!file) {
+      showCallError(errorEl, new Error("Choose a source photo first."));
+      return;
+    }
+    if (!maskFile) {
+      showCallError(errorEl, new Error("Choose a mask file first."));
+      return;
+    }
+    const paletteCode = $("recolor-palette").value;
+    if (!paletteCode) {
+      showCallError(errorEl, new Error("No palette color — check the connection/config above."));
+      return;
+    }
+
+    btn.disabled = true;
+    try {
+      btn.textContent = "Requesting upload URLs…";
+      const presignResp = await apiFetch("/api/v2/uploads/presign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operation: "RECOLOR" }),
+      });
+      const upload = presignResp.operation_upload;
+      const maskUpload = presignResp.mask_upload;
+
+      btn.textContent = "Uploading photo…";
+      await uploadFile(upload.upload_url, file);
+      btn.textContent = "Uploading mask…";
+      await uploadFile(maskUpload.upload_url, maskFile);
+
+      const body = {
+        storage_path: upload.storage_path,
+        mask_storage_path: maskUpload.storage_path,
+        palette_code: paletteCode,
+      };
+      const sku = $("recolor-sku").value.trim();
+      if (sku) body.sku_reference = sku;
+
+      btn.textContent = "Creating job…";
+      const result = await apiFetch("/api/v2/recolor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": uuid4() },
+        body: JSON.stringify(body),
+      });
+
+      startTrackingJob(result.job_id);
+    } catch (err) {
+      showCallError(errorEl, err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Presign, upload & submit";
+    }
+  });
+
+  // --- MIX: presign -> upload -> submit ------------------------------
+
+  $("mix-submit-btn").addEventListener("click", async function () {
+    const errorEl = $("mix-submit-error");
+    hideCallError(errorEl);
+    const btn = $("mix-submit-btn");
+
+    const primaryFile = $("mix-primary-file").files[0];
+    const primaryMaskFile = $("mix-primary-mask-file").files[0];
+    const secondaryFile = $("mix-secondary-file").files[0];
+    const secondaryMaskFile = $("mix-secondary-mask-file").files[0];
+    if (!primaryFile || !primaryMaskFile || !secondaryFile || !secondaryMaskFile) {
+      showCallError(errorEl, new Error("All four files (primary photo/mask, secondary photo/mask) are required."));
+      return;
+    }
+
+    btn.disabled = true;
+    try {
+      btn.textContent = "Requesting upload URLs…";
+      const presignResp = await apiFetch("/api/v2/uploads/presign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operation: "MIX" }),
+      });
+      const primaryUpload = presignResp.operation_upload;
+      const primaryMaskUpload = presignResp.mask_upload;
+      const secondaryUpload = presignResp.secondary_upload;
+      const secondaryMaskUpload = presignResp.secondary_mask_upload;
+
+      btn.textContent = "Uploading primary photo…";
+      await uploadFile(primaryUpload.upload_url, primaryFile);
+      btn.textContent = "Uploading primary mask…";
+      await uploadFile(primaryMaskUpload.upload_url, primaryMaskFile);
+      btn.textContent = "Uploading secondary photo…";
+      await uploadFile(secondaryUpload.upload_url, secondaryFile);
+      btn.textContent = "Uploading secondary mask…";
+      await uploadFile(secondaryMaskUpload.upload_url, secondaryMaskFile);
+
+      const body = {
+        primary_storage_path: primaryUpload.storage_path,
+        primary_mask_storage_path: primaryMaskUpload.storage_path,
+        secondary_storage_path: secondaryUpload.storage_path,
+        secondary_mask_storage_path: secondaryMaskUpload.storage_path,
+      };
+      const sku = $("mix-sku").value.trim();
+      if (sku) body.sku_reference = sku;
+
+      btn.textContent = "Creating job…";
+      const result = await apiFetch("/api/v2/mix", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": uuid4() },
+        body: JSON.stringify(body),
+      });
+
+      startTrackingJob(result.job_id);
+    } catch (err) {
+      showCallError(errorEl, err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Presign, upload & submit";
+    }
+  });
+
   // --- Job tracking / polling -------------------------------------------
 
   let pollTimer = null;
@@ -749,18 +1089,23 @@
       job.requested_angles + " requested" + (job.sku_reference ? " · " + job.sku_reference : "");
 
     // Read `operation` first — an ANGLE_GENERATION job populates `angles`,
-    // a background job populates `results` instead (one element, no
-    // `angle` field of its own). See docs/api-routes.md.
+    // a MATCH job populates `variants` (1-4 elements, own `variant_index`
+    // field, no `angle`), and every other operation (background ops,
+    // RECOLOR, MIX) populates `results` (one element, no `angle` field of
+    // its own). See docs/api-routes.md.
     const grid = $("job-angles");
     grid.innerHTML = "";
-    const items = job.operation && job.operation !== "ANGLE_GENERATION" ? (job.results || []) : (job.angles || []);
+    let items;
+    if (!job.operation || job.operation === "ANGLE_GENERATION") items = job.angles || [];
+    else if (job.operation === "MATCH") items = job.variants || [];
+    else items = job.results || [];
     items.forEach((item) => grid.appendChild(renderResultCard(job.job_id, item)));
   }
 
   function renderResultCard(jobId, a) {
     const card = document.createElement("div");
     card.className = "angle-card";
-    const label = a.angle || "output";
+    const label = a.angle || (a.variant_index != null ? "variant " + a.variant_index : "output");
     let html = "<h3>" + label +
       (a.synthetic ? ' <span class="hint">(synthetic)</span>' : "") + "</h3>";
     html += '<span class="status-badge status-' + a.status + '">' + a.status + "</span>";
