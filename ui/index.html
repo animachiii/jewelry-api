@@ -124,6 +124,45 @@
   .muted { color: var(--muted); font-size: 13px; }
   .field-hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
   code { background: #f0ede7; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+
+  .mask-pad-canvas-wrap {
+    position: relative;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    background: #f0ede7;
+    max-width: 100%;
+    line-height: 0;
+  }
+  .mask-pad.disabled .mask-pad-canvas-wrap { opacity: 0.45; }
+  .mask-pad-photo { display: block; width: 100%; height: auto; }
+  .mask-pad-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    cursor: crosshair;
+  }
+  .mask-pad.disabled .mask-pad-canvas { cursor: not-allowed; pointer-events: none; }
+  .mask-pad-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+  }
+  .mask-pad-controls label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted);
+    margin: 0;
+  }
+  .mask-pad-controls input[type="range"] { width: 110px; }
+  .mask-pad-coverage { font-size: 12px; color: var(--muted); }
+  .mask-pad-coverage.warn { color: var(--warn); }
 </style>
 </head>
 <body>
@@ -307,8 +346,20 @@
         <input type="file" id="recolor-file" accept="image/jpeg,image/png,image/webp" />
       </div>
       <div class="field">
-        <label for="recolor-mask-file">Mask (PNG, grayscale, binary)</label>
-        <input type="file" id="recolor-mask-file" accept="image/png" />
+        <label>Mask — sketch the area to recolor</label>
+        <div class="mask-pad disabled" id="recolor-mask-pad">
+          <div class="mask-pad-canvas-wrap">
+            <img class="mask-pad-photo" alt="" />
+            <canvas class="mask-pad-canvas"></canvas>
+          </div>
+          <div class="mask-pad-controls">
+            <label>Brush <input type="range" class="mask-pad-brush" min="8" max="150" value="36" /></label>
+            <button type="button" class="small secondary mask-pad-clear">Clear</button>
+            <button type="button" class="small secondary mask-pad-undo">Undo</button>
+            <span class="mask-pad-coverage">Coverage: 0.00%</span>
+          </div>
+          <div class="field-hint">Choose a source photo first, then paint over the area to recolor.</div>
+        </div>
       </div>
     </div>
     <div class="row">
@@ -346,8 +397,20 @@
         <input type="file" id="mix-primary-file" accept="image/jpeg,image/png,image/webp" />
       </div>
       <div class="field">
-        <label for="mix-primary-mask-file">Primary mask (PNG)</label>
-        <input type="file" id="mix-primary-mask-file" accept="image/png" />
+        <label>Primary mask — sketch where the graft lands</label>
+        <div class="mask-pad disabled" id="mix-primary-mask-pad">
+          <div class="mask-pad-canvas-wrap">
+            <img class="mask-pad-photo" alt="" />
+            <canvas class="mask-pad-canvas"></canvas>
+          </div>
+          <div class="mask-pad-controls">
+            <label>Brush <input type="range" class="mask-pad-brush" min="8" max="150" value="36" /></label>
+            <button type="button" class="small secondary mask-pad-clear">Clear</button>
+            <button type="button" class="small secondary mask-pad-undo">Undo</button>
+            <span class="mask-pad-coverage">Coverage: 0.00%</span>
+          </div>
+          <div class="field-hint">Choose the primary photo first, then paint the region to receive the graft.</div>
+        </div>
       </div>
     </div>
     <div class="row">
@@ -356,8 +419,20 @@
         <input type="file" id="mix-secondary-file" accept="image/jpeg,image/png,image/webp" />
       </div>
       <div class="field">
-        <label for="mix-secondary-mask-file">Secondary mask (PNG)</label>
-        <input type="file" id="mix-secondary-mask-file" accept="image/png" />
+        <label>Secondary mask — sketch the region to graft</label>
+        <div class="mask-pad disabled" id="mix-secondary-mask-pad">
+          <div class="mask-pad-canvas-wrap">
+            <img class="mask-pad-photo" alt="" />
+            <canvas class="mask-pad-canvas"></canvas>
+          </div>
+          <div class="mask-pad-controls">
+            <label>Brush <input type="range" class="mask-pad-brush" min="8" max="150" value="36" /></label>
+            <button type="button" class="small secondary mask-pad-clear">Clear</button>
+            <button type="button" class="small secondary mask-pad-undo">Undo</button>
+            <span class="mask-pad-coverage">Coverage: 0.00%</span>
+          </div>
+          <div class="field-hint">Choose the secondary photo first, then paint the region to cut from it.</div>
+        </div>
       </div>
     </div>
     <div class="row">
@@ -860,6 +935,268 @@
     if (!putResp.ok) throw new Error("Upload failed: HTTP " + putResp.status);
   }
 
+  // --- Mask sketch pads (RECOLOR + MIX) ----------------------------------
+  //
+  // Replaces a separate mask-file upload with in-browser doodling directly
+  // on the source photo, WhatsApp/Gemini-sketch style. The photo the client
+  // actually uploads is the untouched File the user picked in the adjacent
+  // file input — the canvas here only ever produces the mask, so sketching
+  // never touches the real reference image's own bytes.
+  //
+  // The mask itself must satisfy mask_validation.py's contract exactly:
+  // PNG, PIL mode "L" (single-channel 8-bit grayscale, no alpha), binary
+  // 0/255 values, dimensions matching the source. canvas.toBlob('image/png')
+  // always emits RGB/RGBA — the server rejects that outright (mode != "L")
+  // — so masks are hand-encoded below via a minimal PNG writer using the
+  // browser's built-in CompressionStream for the zlib-wrapped IDAT stream.
+  //
+  // Server-documented defaults, mirrored here only as a soft client-side
+  // hint — the server remains the authority (docs/business-rules.md §15).
+  const MASK_MIN_COVERAGE_PCT = 0.5;
+  const MASK_MAX_COVERAGE_PCT = 60.0;
+  const MASK_STROKE_COLOR = "rgba(232, 30, 200, 0.6)";
+  const MASK_ALPHA_THRESHOLD = 64; // out of 255 -- painted vs. untouched
+
+  const PNG_SIGNATURE = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+
+  function crc32(bytes) {
+    let crc = 0xffffffff;
+    for (let i = 0; i < bytes.length; i++) {
+      crc ^= bytes[i];
+      for (let k = 0; k < 8; k++) {
+        crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+      }
+    }
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  function u32be(n) {
+    return new Uint8Array([(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff]);
+  }
+
+  function concatBytes(chunks) {
+    const total = chunks.reduce((n, c) => n + c.length, 0);
+    const out = new Uint8Array(total);
+    let offset = 0;
+    chunks.forEach((c) => { out.set(c, offset); offset += c.length; });
+    return out;
+  }
+
+  function pngChunk(type, data) {
+    const typeBytes = new TextEncoder().encode(type);
+    const body = concatBytes([typeBytes, data]);
+    return concatBytes([u32be(data.length), body, u32be(crc32(body))]);
+  }
+
+  async function deflateZlib(bytes) {
+    if (typeof CompressionStream === "undefined") {
+      throw new Error(
+        "This browser has no CompressionStream support, needed to encode a " +
+        "mask PNG. Use a recent Chrome/Edge/Firefox or Safari 16.4+."
+      );
+    }
+    const cs = new CompressionStream("deflate"); // zlib-wrapped (RFC1950) -- what PNG's IDAT needs
+    const writer = cs.writable.getWriter();
+    writer.write(bytes);
+    writer.close();
+    const compressed = await new Response(cs.readable).arrayBuffer();
+    return new Uint8Array(compressed);
+  }
+
+  // Single-channel (color type 0), 8-bit, non-interlaced, filter-type-None
+  // per scanline -- masks are small and already binary, so real filtering
+  // buys nothing here.
+  async function encodeGrayscalePNG(width, height, grayBytes) {
+    const raw = new Uint8Array(height * (width + 1));
+    for (let y = 0; y < height; y++) {
+      const rowStart = y * (width + 1);
+      raw[rowStart] = 0; // filter type: None
+      raw.set(grayBytes.subarray(y * width, (y + 1) * width), rowStart + 1);
+    }
+    const idatData = await deflateZlib(raw);
+    const ihdr = concatBytes([
+      u32be(width),
+      u32be(height),
+      new Uint8Array([8, 0, 0, 0, 0]), // bit depth 8, color type 0, default compression/filter/interlace
+    ]);
+    const png = concatBytes([
+      PNG_SIGNATURE,
+      pngChunk("IHDR", ihdr),
+      pngChunk("IDAT", idatData),
+      pngChunk("IEND", new Uint8Array(0)),
+    ]);
+    return new Blob([png], { type: "image/png" });
+  }
+
+  // One MaskPad per photo/mask pair. `photoInputEl` is the existing source-
+  // photo file input; MaskPad listens for its own `change` event and
+  // (re)initializes the canvas to that photo's exact natural pixel
+  // dimensions whenever a new file is chosen -- this is what guarantees the
+  // exported mask's dimensions always match the source, satisfying the mask
+  // contract's dimension-lock rule without the caller doing anything.
+  function createMaskPad(padEl, photoInputEl) {
+    const photoImg = padEl.querySelector(".mask-pad-photo");
+    const canvas = padEl.querySelector(".mask-pad-canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const brushInput = padEl.querySelector(".mask-pad-brush");
+    const clearBtn = padEl.querySelector(".mask-pad-clear");
+    const undoBtn = padEl.querySelector(".mask-pad-undo");
+    const coverageEl = padEl.querySelector(".mask-pad-coverage");
+
+    let naturalWidth = 0;
+    let naturalHeight = 0;
+    let strokes = []; // [{radius, points: [{x, y}, ...]}, ...] -- canvas-space px
+    let currentStroke = null;
+    let drawing = false;
+    let lastCoveragePct = 0;
+    let objectUrl = null;
+
+    function clearCanvas() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    function drawDot(pt, radius) {
+      ctx.fillStyle = MASK_STROKE_COLOR;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawSegment(p0, p1, radius) {
+      ctx.strokeStyle = MASK_STROKE_COLOR;
+      ctx.lineWidth = radius * 2;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.stroke();
+    }
+
+    // Canonical redraw from the strokes list -- used by Undo/Clear, where
+    // alpha-blended overlapping strokes can't otherwise be un-composited.
+    function replayAll() {
+      clearCanvas();
+      strokes.forEach((s) => {
+        drawDot(s.points[0], s.radius);
+        for (let i = 1; i < s.points.length; i++) drawSegment(s.points[i - 1], s.points[i], s.radius);
+      });
+      updateCoverage();
+    }
+
+    function updateCoverage() {
+      if (!naturalWidth) return;
+      const { coveragePct } = readMaskPixels();
+      lastCoveragePct = coveragePct;
+      coverageEl.textContent = "Coverage: " + coveragePct.toFixed(2) + "%";
+      const outOfBounds = coveragePct > 0 &&
+        (coveragePct < MASK_MIN_COVERAGE_PCT || coveragePct > MASK_MAX_COVERAGE_PCT);
+      coverageEl.classList.toggle("warn", outOfBounds);
+    }
+
+    // Single getImageData pass -> both the live coverage % and (on export)
+    // the actual grayscale byte array, thresholded on alpha so overlapping
+    // semi-transparent strokes and anti-aliased edges still resolve to a
+    // strictly binary 0/255 mask.
+    function readMaskPixels() {
+      const w = canvas.width, h = canvas.height;
+      const data = ctx.getImageData(0, 0, w, h).data;
+      const gray = new Uint8Array(w * h);
+      let white = 0;
+      for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+        if (data[i + 3] >= MASK_ALPHA_THRESHOLD) { gray[p] = 255; white++; }
+        else gray[p] = 0;
+      }
+      return { width: w, height: h, gray, coveragePct: (white / (w * h)) * 100 };
+    }
+
+    function brushRadiusCanvasPx() {
+      const rect = canvas.getBoundingClientRect();
+      const scale = rect.width ? canvas.width / rect.width : 1;
+      return (Number(brushInput.value) / 2) * scale;
+    }
+
+    function canvasPointFromEvent(evt) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      return { x: (evt.clientX - rect.left) * scaleX, y: (evt.clientY - rect.top) * scaleY };
+    }
+
+    function onPointerDown(evt) {
+      if (!naturalWidth) return;
+      evt.preventDefault();
+      canvas.setPointerCapture(evt.pointerId);
+      drawing = true;
+      const pt = canvasPointFromEvent(evt);
+      currentStroke = { radius: brushRadiusCanvasPx(), points: [pt] };
+      strokes.push(currentStroke);
+      drawDot(pt, currentStroke.radius);
+      updateCoverage();
+    }
+
+    function onPointerMove(evt) {
+      if (!drawing) return;
+      const pt = canvasPointFromEvent(evt);
+      const prev = currentStroke.points[currentStroke.points.length - 1];
+      currentStroke.points.push(pt);
+      drawSegment(prev, pt, currentStroke.radius);
+    }
+
+    function onPointerUp() {
+      if (!drawing) return;
+      drawing = false;
+      currentStroke = null;
+      updateCoverage();
+    }
+
+    canvas.addEventListener("pointerdown", onPointerDown);
+    canvas.addEventListener("pointermove", onPointerMove);
+    canvas.addEventListener("pointerup", onPointerUp);
+    canvas.addEventListener("pointercancel", onPointerUp);
+
+    clearBtn.addEventListener("click", () => { strokes = []; replayAll(); });
+    undoBtn.addEventListener("click", () => { strokes.pop(); replayAll(); });
+
+    function loadPhoto(file) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          naturalWidth = img.naturalWidth;
+          naturalHeight = img.naturalHeight;
+          canvas.width = naturalWidth;
+          canvas.height = naturalHeight;
+          photoImg.src = img.src;
+          strokes = [];
+          clearCanvas();
+          updateCoverage();
+          padEl.classList.remove("disabled");
+          resolve();
+        };
+        img.onerror = () => reject(new Error("Could not load the chosen photo for sketching."));
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        objectUrl = URL.createObjectURL(file);
+        img.src = objectUrl;
+      });
+    }
+
+    photoInputEl.addEventListener("change", () => {
+      const file = photoInputEl.files[0];
+      naturalWidth = 0;
+      padEl.classList.add("disabled");
+      if (file) loadPhoto(file);
+    });
+
+    return {
+      hasPhoto: () => naturalWidth > 0,
+      coveragePct: () => lastCoveragePct,
+      async getMaskBlob() {
+        const { width, height, gray } = readMaskPixels();
+        return encodeGrayscalePNG(width, height, gray);
+      },
+    };
+  }
+
   $("match-submit-btn").addEventListener("click", async function () {
     const errorEl = $("match-submit-error");
     hideCallError(errorEl);
@@ -916,19 +1253,20 @@
 
   // --- RECOLOR: presign -> upload -> submit -------------------------------
 
+  const recolorMaskPad = createMaskPad($("recolor-mask-pad"), $("recolor-file"));
+
   $("recolor-submit-btn").addEventListener("click", async function () {
     const errorEl = $("recolor-submit-error");
     hideCallError(errorEl);
     const btn = $("recolor-submit-btn");
 
     const file = $("recolor-file").files[0];
-    const maskFile = $("recolor-mask-file").files[0];
     if (!file) {
       showCallError(errorEl, new Error("Choose a source photo first."));
       return;
     }
-    if (!maskFile) {
-      showCallError(errorEl, new Error("Choose a mask file first."));
+    if (!recolorMaskPad.hasPhoto() || recolorMaskPad.coveragePct() <= 0) {
+      showCallError(errorEl, new Error("Sketch a mask over the area to recolor first."));
       return;
     }
     const paletteCode = $("recolor-palette").value;
@@ -950,8 +1288,10 @@
 
       btn.textContent = "Uploading photo…";
       await uploadFile(upload.upload_url, file);
+      btn.textContent = "Building mask…";
+      const maskBlob = await recolorMaskPad.getMaskBlob();
       btn.textContent = "Uploading mask…";
-      await uploadFile(maskUpload.upload_url, maskFile);
+      await uploadFile(maskUpload.upload_url, maskBlob);
 
       const body = {
         storage_path: upload.storage_path,
@@ -979,17 +1319,26 @@
 
   // --- MIX: presign -> upload -> submit ------------------------------
 
+  const mixPrimaryMaskPad = createMaskPad($("mix-primary-mask-pad"), $("mix-primary-file"));
+  const mixSecondaryMaskPad = createMaskPad($("mix-secondary-mask-pad"), $("mix-secondary-file"));
+
   $("mix-submit-btn").addEventListener("click", async function () {
     const errorEl = $("mix-submit-error");
     hideCallError(errorEl);
     const btn = $("mix-submit-btn");
 
     const primaryFile = $("mix-primary-file").files[0];
-    const primaryMaskFile = $("mix-primary-mask-file").files[0];
     const secondaryFile = $("mix-secondary-file").files[0];
-    const secondaryMaskFile = $("mix-secondary-mask-file").files[0];
-    if (!primaryFile || !primaryMaskFile || !secondaryFile || !secondaryMaskFile) {
-      showCallError(errorEl, new Error("All four files (primary photo/mask, secondary photo/mask) are required."));
+    if (!primaryFile || !secondaryFile) {
+      showCallError(errorEl, new Error("Both the primary and secondary photos are required."));
+      return;
+    }
+    if (!mixPrimaryMaskPad.hasPhoto() || mixPrimaryMaskPad.coveragePct() <= 0) {
+      showCallError(errorEl, new Error("Sketch the primary mask — the region to receive the graft."));
+      return;
+    }
+    if (!mixSecondaryMaskPad.hasPhoto() || mixSecondaryMaskPad.coveragePct() <= 0) {
+      showCallError(errorEl, new Error("Sketch the secondary mask — the region to graft from."));
       return;
     }
 
@@ -1008,12 +1357,16 @@
 
       btn.textContent = "Uploading primary photo…";
       await uploadFile(primaryUpload.upload_url, primaryFile);
+      btn.textContent = "Building primary mask…";
+      const primaryMaskBlob = await mixPrimaryMaskPad.getMaskBlob();
       btn.textContent = "Uploading primary mask…";
-      await uploadFile(primaryMaskUpload.upload_url, primaryMaskFile);
+      await uploadFile(primaryMaskUpload.upload_url, primaryMaskBlob);
       btn.textContent = "Uploading secondary photo…";
       await uploadFile(secondaryUpload.upload_url, secondaryFile);
+      btn.textContent = "Building secondary mask…";
+      const secondaryMaskBlob = await mixSecondaryMaskPad.getMaskBlob();
       btn.textContent = "Uploading secondary mask…";
-      await uploadFile(secondaryMaskUpload.upload_url, secondaryMaskFile);
+      await uploadFile(secondaryMaskUpload.upload_url, secondaryMaskBlob);
 
       const body = {
         primary_storage_path: primaryUpload.storage_path,
