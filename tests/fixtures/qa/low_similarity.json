@@ -5,10 +5,7 @@
       "content": {
         "parts": [
           {
-            "json": {
-              "similarity_score": 0.41,
-              "reasoning": "Prong count differs from every reference image."
-            }
+            "text": "{\"similarity_score\": 0.41, \"reasoning\": \"Prong count differs from every reference image.\"}"
           }
         ]
       }

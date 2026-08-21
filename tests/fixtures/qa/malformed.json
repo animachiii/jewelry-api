@@ -5,9 +5,7 @@
       "content": {
         "parts": [
           {
-            "json": {
-              "reasoning": "Missing the similarity_score field entirely."
-            }
+            "text": "{\"reasoning\": \"Missing the similarity_score field entirely.\"}"
           }
         ]
       }
