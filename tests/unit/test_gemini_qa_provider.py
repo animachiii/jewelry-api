@@ -59,7 +59,7 @@ def test_out_of_range_score_maps_to_internal(monkeypatch: pytest.MonkeyPatch) ->
         "candidates": [
             {
                 "finish_reason": "STOP",
-                "content": {"parts": [{"json": {"similarity_score": 1.5}}]},
+                "content": {"parts": [{"text": '{"similarity_score": 1.5}'}]},
             }
         ],
         "model_version": "gemini-2.5-flash-image-preview",

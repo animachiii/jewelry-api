@@ -7,8 +7,21 @@ app/providers/gemini.py). `score()` is the testable seam: tests monkeypatch
 `_call_api` to return a dict shaped like tests/fixtures/qa/*.json, or raise
 GeminiAPIError/TimeoutError, and assert on the resulting QaResult /
 ProviderError.
+
+**Found live 2026-08-21, same bug class as the base64 image-decoding bug**:
+`_parse_response` originally read `parts[0]["json"]`, a key the real SDK
+never produces — `google.genai.types.Part` has no `json` field, only `text`
+(a plain string) or `inline_data` (bytes). Every real background-operation
+QA call was silently failing with `qa_provider_error`/`INTERNAL` and
+fail-open-ing to `QA_REVIEW`/`FLAGGED`, `qa_score: None` — every job, not
+some. `tests/fixtures/qa/*.json` was hand-written against the same wrong
+assumption and passed CI the whole time, because `_call_api` is monkeypatched
+in every test and the real SDK never actually ran. Fixed by requesting
+`response_mime_type="application/json"` and parsing `parts[0]["text"]` as a
+JSON string.
 """
 
+import json
 from typing import Any
 
 from app.config import settings
@@ -49,6 +62,7 @@ class GeminiQaProvider(QaProvider):
             response = client.models.generate_content(
                 model=self.model_version,
                 contents=types.Content(role="user", parts=parts),
+                config=types.GenerateContentConfig(response_mime_type="application/json"),
             )
         except TimeoutError:
             raise
@@ -108,9 +122,10 @@ class GeminiQaProvider(QaProvider):
 
         try:
             parts = candidate["content"]["parts"]
-            payload = parts[0]["json"]
+            text = parts[0]["text"]
+            payload = json.loads(text)
             score = payload["similarity_score"]
-        except (KeyError, IndexError, TypeError) as exc:
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             raise ProviderError(
                 "Malformed Gemini QA response: missing similarity_score.",
                 failure_class=FailureClass.INTERNAL,
