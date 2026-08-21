@@ -1574,3 +1574,79 @@ def test_0018_is_a_noop_with_no_active_config_version(
 
     cfg = Config("alembic.ini")
     command.upgrade(cfg, "head")  # must not raise
+
+
+def test_0019_rewrites_background_removal_and_studio_white_prompts(
+    postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Client requirement: BACKGROUND_REMOVAL/STUDIO_WHITE output must be a bare
+    e-commerce product photo — jewellery only, no hands/tags/props. Migration 0019
+    rewrites both prompt strings in place (new version, not a mutation) without
+    touching any other operations/preset entry."""
+    async_url = postgres_container.get_connection_url()
+    monkeypatch.setattr("app.config.settings.DATABASE_URL", async_url)
+
+    async def _reset_schema() -> None:
+        engine = create_async_engine(async_url)
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+        await engine.dispose()
+
+    asyncio.run(_reset_schema())
+
+    cfg = Config("alembic.ini")
+    command.upgrade(cfg, "0006")
+    asyncio.run(_seed_active_config_version(async_url, "gemini-3.1-flash-image"))
+    command.upgrade(cfg, "0018")
+    before = asyncio.run(_active_config_version(async_url))
+    before_payload = json.loads(before["payload_text"])  # type: ignore[arg-type]
+    old_removal_prompt = before_payload["global"]["operations"]["BACKGROUND_REMOVAL"]["prompt"]
+    match_config_before = before_payload["global"]["operations"]["MATCH"]
+
+    command.upgrade(cfg, "0019")
+    active = asyncio.run(_active_config_version(async_url))
+    assert active["version_number"] == before["version_number"] + 1  # new row, not mutated
+    payload = json.loads(active["payload_text"])  # type: ignore[arg-type]
+    removal = payload["global"]["operations"]["BACKGROUND_REMOVAL"]
+    assert removal["prompt"] != old_removal_prompt
+    assert "hands" in removal["prompt"]
+    assert "price tags" in removal["prompt"]
+    assert "pure white" in removal["prompt"]
+    presets = payload["global"]["background_presets"]
+    studio_white = next(p for p in presets if p["code"] == "STUDIO_WHITE")
+    assert "hands" in studio_white["prompt"]
+    assert "pure white" in studio_white["prompt"]
+    # Untouched entries survive the merge — not a naive whole-block replace.
+    assert payload["global"]["operations"]["MATCH"] == match_config_before
+    assert payload["global"]["model_version"] == "gemini-3.1-flash-image"
+
+    command.downgrade(cfg, "0018")
+    reverted = asyncio.run(_active_config_version(async_url))
+    assert reverted["version_number"] == before["version_number"]
+    reverted_payload = json.loads(reverted["payload_text"])  # type: ignore[arg-type]
+    assert (
+        reverted_payload["global"]["operations"]["BACKGROUND_REMOVAL"]["prompt"]
+        == old_removal_prompt
+    )
+
+    command.upgrade(cfg, "head")
+
+
+def test_0019_is_a_noop_with_no_active_config_version(
+    postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async_url = postgres_container.get_connection_url()
+    monkeypatch.setattr("app.config.settings.DATABASE_URL", async_url)
+
+    async def _reset_schema() -> None:
+        engine = create_async_engine(async_url)
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+        await engine.dispose()
+
+    asyncio.run(_reset_schema())
+
+    cfg = Config("alembic.ini")
+    command.upgrade(cfg, "head")  # must not raise
