@@ -43,6 +43,17 @@ no real `GEMINI_API_KEY` exists in this environment, same gap every phase
 since 6 has hit. If a future session with a real key finds either doesn't
 hold up, that's a correction to docs/ai-integration.md's Mode F, not a
 silent code change.
+
+**Post-Phase-20 incident fix (2026-08-24):** a live RECOLOR request OOM-killed
+`jewelry-api` on Render's free tier (512MB) — root-caused to full-resolution
+PIL compositing with no size cap; see `app/config.py`'s `WORKING_MAX_EDGE`
+note and `app/services/recolor_service.py`'s own matching fix. MIX's
+exposure is worse in principle (four source images decoded at once in
+`_build_rough_composite` vs. RECOLOR's two), but only `_build_seam_overlay`
+could actually be downscaled here — see that function's own docstring for
+why `_build_rough_composite` could not be, without a larger refactor than
+this incident fix, and is flagged as MIX's own remaining memory hotspot
+rather than silently left unbounded.
 """
 
 import random
@@ -155,6 +166,22 @@ def _build_rough_composite(
     the paste alpha — so pixels inside the box but outside mask A's actual
     silhouette are left as source A's original pixels, not overwritten by
     the crop's rectangular corners.
+
+    **Deliberately not downscaled** — unlike `_build_seam_overlay` below,
+    this function's *output* (`rough_composite`) is not a throwaway input
+    to Gemini; it's the base both the seam overlay is built from *and* the
+    final compositing step composites back onto (`_composite_seam_result`),
+    so it must stay at source A's real, full original resolution the same
+    way `recolor_service._composite_result`'s inputs must. This means
+    `_build_rough_composite` decodes **four** full-resolution images at
+    once (source A, mask A, source B, mask B) — the single largest memory
+    consumer in this codebase, larger than anything RECOLOR's own
+    2026-08-24 incident fix addressed there. Bounding it would need
+    restructuring this function to build the crop/scale/paste at a reduced
+    working resolution and *separately* re-derive a full-resolution
+    `rough_composite` for the final output — a real refactor, out of scope
+    for this incident fix. Flagged here explicitly as MIX's own remaining
+    memory hotspot, not silently left unbounded.
     """
     source_a = Image.open(BytesIO(source_a_bytes)).convert("RGB")
     mask_a = Image.open(BytesIO(mask_a_bytes)).convert("L")
@@ -184,10 +211,26 @@ def _build_seam_overlay(rough_composite_bytes: bytes, seam_band_mask: "Image.Ima
     already established for why the overlay sent to Gemini needs a hard
     boundary, not a feathered one). This single image is what's sent to
     Gemini as the sole reference image.
+
+    Downscaled to `settings.WORKING_MAX_EDGE` first (2026-08-24 incident
+    fix, see this module's own docstring and app/config.py) — same
+    reasoning recolor_service._build_overlay already established: this
+    overlay is Gemini's input only, never the client-facing artifact.
+    `rough_composite_bytes` itself is untouched by this function (the
+    caller's own copy stays full resolution for
+    `_composite_seam_result`'s later use), so the byte-identical-outside-
+    the-seam-band guarantee is unaffected — only this one throwaway
+    working copy gets smaller.
     """
     rough = Image.open(BytesIO(rough_composite_bytes)).convert("RGB")
+    mask = seam_band_mask
+    if max(rough.size) > settings.WORKING_MAX_EDGE:
+        scale = settings.WORKING_MAX_EDGE / max(rough.size)
+        target_size = (round(rough.width * scale), round(rough.height * scale))
+        rough = rough.resize(target_size, Image.Resampling.LANCZOS)
+        mask = mask.resize(target_size, Image.Resampling.LANCZOS)
     magenta_fill = Image.new("RGB", rough.size, _MAGENTA)
-    overlay = Image.composite(magenta_fill, rough, seam_band_mask)
+    overlay = Image.composite(magenta_fill, rough, mask)
     buf = BytesIO()
     overlay.save(buf, format="PNG")
     return buf.getvalue()

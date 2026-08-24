@@ -471,6 +471,19 @@ environment, same gap every phase since 6 has hit. If the magenta-overlay approa
 doesn't hold up against real jewelry macro photography, that's a correction to
 `docs/ai-integration.md`'s Mode E and this rule, not a silent code change.
 
+**Post-Phase-20 incident (2026-08-24):** a real RECOLOR request on the live
+Render free-tier deployment pushed memory from a ~200MB baseline to 487MB
+(91% of the 512MB limit) in one sample, OOM-killing the container — root
+cause was `_build_overlay` decoding the client's full-resolution upload
+with no size cap (a real jewelry photo can be 4000px+ on the long edge).
+Fixed by capping the overlay's *working* resolution at
+`settings.WORKING_MAX_EDGE` (env var, default 2048px) before
+erosion/compositing — see `app/config.py`'s own note. This
+does not weaken the guarantee above: `_composite_result` still decodes the
+*original* `source_bytes`/`mask_bytes` at full resolution for the final
+output, so "byte-identical outside the mask" remains a full-resolution
+claim. Only the throwaway overlay sent to Gemini got smaller.
+
 **Retry.** `POST /jobs/{job_id}/retry` — see §5. A RECOLOR job always has exactly
 one sub-job, so Phase 18's all-or-nothing multi-sub-job generalization applies here
 as the trivial "set of size 1" case, same as it already does for background
@@ -555,6 +568,20 @@ environment, same gap every phase since 6 has hit. Both the non-aspect-preservin
 scale-to-fit and the seam-only refinement strategy are unvalidated against real
 jewelry macro photography; a correction belongs in `docs/ai-integration.md`'s
 Mode F and this rule, not silently in code.
+
+**Post-Phase-20 incident (2026-08-24):** same live Render OOM the RECOLOR §15
+note above describes, root-caused there to RECOLOR's own overlay-building step.
+MIX's `_build_seam_overlay` got the identical fix — downscaled to
+`settings.WORKING_MAX_EDGE` before the magenta seam-band fill, since it's also
+a throwaway input to Gemini. **`_build_rough_composite` deliberately did not**
+— its output is not throwaway, it's the base both the seam overlay is built
+from and the final compositing step composites back onto, so it must stay at
+source A's real, full resolution the same way RECOLOR's own final compositing
+step does. This leaves `_build_rough_composite` decoding **four** full-resolution
+images at once (source A, mask A, source B, mask B) as MIX's own remaining
+memory hotspot — larger in principle than anything this incident's RECOLOR fix
+addressed, flagged explicitly rather than silently left unbounded. See
+`app/services/mix_service.py::_build_rough_composite`'s own docstring.
 
 **Retry.** `POST /jobs/{job_id}/retry` — see §5. A MIX job always has exactly one
 sub-job, so Phase 18's all-or-nothing multi-sub-job generalization applies here as

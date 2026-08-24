@@ -12,9 +12,11 @@ marked region as intended.
 
 import io
 
+import pytest
 from PIL import Image
 
-from app.services.recolor_service import _build_overlay, _erode, _feather
+from app.config import settings
+from app.services.recolor_service import _build_overlay, _downscale_pair, _erode, _feather
 
 
 def _png_bytes(img: Image.Image) -> bytes:
@@ -95,3 +97,53 @@ def test_sloppy_mask_erosion_pulls_the_marked_region_off_a_simulated_prong() -> 
     assert overlay.getpixel((12, 20)) != (255, 0, 255)
     # The gemstone's own center must still be magenta.
     assert overlay.getpixel((20, 20)) == (255, 0, 255)
+
+
+# --- post-Phase-20 incident fix: WORKING_MAX_EDGE downscale (2026-08-24) ---
+
+
+def test_downscale_pair_shrinks_an_oversized_image_and_keeps_mask_aligned() -> None:
+    """A source above WORKING_MAX_EDGE on its long edge must come back at
+    or under the cap, and the mask must land at the exact same size — not
+    independently rounded — since erosion/compositing downstream assumes
+    image.size == mask.size.
+    """
+    big_edge = settings.WORKING_MAX_EDGE + 500
+    source = Image.new("RGB", (big_edge, big_edge // 2), color=(1, 2, 3))
+    mask = Image.new("L", (big_edge, big_edge // 2), color=0)
+
+    scaled_source, scaled_mask = _downscale_pair(source, mask, settings.WORKING_MAX_EDGE)
+
+    assert max(scaled_source.size) == settings.WORKING_MAX_EDGE
+    assert scaled_source.size == scaled_mask.size
+
+
+def test_downscale_pair_is_a_noop_under_the_cap() -> None:
+    source = Image.new("RGB", (100, 80), color=(1, 2, 3))
+    mask = Image.new("L", (100, 80), color=0)
+
+    scaled_source, scaled_mask = _downscale_pair(source, mask, settings.WORKING_MAX_EDGE)
+
+    assert scaled_source.size == (100, 80)
+    assert scaled_mask.size == (100, 80)
+
+
+def test_build_overlay_downscales_an_oversized_photo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real live incident this fixes (see app/config.py's WORKING_MAX_EDGE
+    note) was triggered by a real-sized photo, not a 4000px+ fixture in a
+    fast unit test — lower the cap for this test instead so the same code
+    path is exercised cheaply.
+    """
+    monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 50)
+    source = Image.new("RGB", (200, 100), color=(10, 10, 200))
+    mask = Image.new("L", (200, 100), color=0)
+    for y in range(40, 60):
+        for x in range(80, 120):
+            mask.putpixel((x, y), 255)
+
+    overlay_bytes = _build_overlay(_png_bytes(source), _png_bytes(mask))
+    overlay = Image.open(io.BytesIO(overlay_bytes)).convert("RGB")
+
+    assert max(overlay.size) == 50
+    # Aspect ratio preserved: 200x100 at long-edge cap 50 -> 50x25.
+    assert overlay.size == (50, 25)

@@ -78,6 +78,7 @@ Runner doesn't exist to verify against).
 | `MASK_FEATHER_PX` | No | Default `3` fine — RECOLOR compositing feather |
 | `MASK_MIN_COVERAGE_PCT` | No | Default `0.5` fine — RECOLOR mask contract |
 | `MASK_MAX_COVERAGE_PCT` | No | Default `60.0` fine — RECOLOR mask contract |
+| `WORKING_MAX_EDGE` | No | Default `2048` fine — caps RECOLOR/MIX pre-provider-call working resolution, see `app/config.py`'s note on the 2026-08-24 OOM this fixes |
 | `SENTRY_DSN` | **Yes**, if set | Empty is valid (no error reporting) until Phase 11 is built |
 
 Secrets referenced via App Runner's native Secrets Manager integration
