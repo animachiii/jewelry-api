@@ -179,6 +179,13 @@ doesn't reliably confine edits to the marked region on real jewelry macro
 photography, that correction belongs here and in
 `phases/phase-19-recolor.md`'s own reality-check section — not silently in code.
 
+**The overlay built here is downscaled to `settings.WORKING_MAX_EDGE` before
+it's sent to Gemini** (post-Phase-20 incident fix, 2026-08-24 — see
+`docs/business-rules.md` §15 and `app/config.py`'s own note). This is Gemini's
+input only, never the client-facing artifact, so it costs nothing
+correctness-wise; the final compositing step still uses the source at its real,
+full resolution.
+
 **Rate limiting (Phase 6, `app/services/rate_limiter.py`).** All provider
 calls pass through a **Redis fixed-window counter**
 (`provider:gemini:tokens:{minute-window}`) shared across every worker,
@@ -283,6 +290,14 @@ test, not a theoretical concern:** for a masked region narrower than roughly
 Gaussian feather can bleed through the graft's interior from both sides of the
 seam-band ring at once — see `app/services/mix_service.py::_seam_band_mask`'s own
 docstring and `docs/business-rules.md` §16.
+
+**The seam overlay built here is downscaled to `settings.WORKING_MAX_EDGE`
+before it's sent to Gemini, same fix as Mode E's** (post-Phase-20 incident,
+2026-08-24 — see `docs/business-rules.md` §16 and `app/config.py`'s own
+note). `_build_rough_composite` deliberately was **not** downscaled — its
+output is the base the final compositing step composites back onto, not a
+throwaway Gemini input — leaving it as MIX's own remaining memory hotspot,
+flagged explicitly rather than silently left unbounded.
 
 ---
 

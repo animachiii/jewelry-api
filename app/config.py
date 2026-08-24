@@ -110,6 +110,27 @@ class Settings(BaseSettings):
     # from this same ring. See app/services/mix_service.py.
     MIX_SEAM_BAND_PX: int = 6
 
+    # --- Image processing memory ceiling (post-Phase-20 incident) ---
+    # Live 2026-08-24 on the free-tier jewelry-api Render service: a single
+    # RECOLOR request pushed memory from a ~200MB baseline to 487MB (91% of
+    # the 512MB limit) in one sample, OOM-killing the container. Root cause:
+    # RECOLOR's overlay-building step (app/services/recolor_service.py::
+    # _build_overlay) and MIX's seam-overlay step (app/services/mix_service.py
+    # ::_build_seam_overlay) decoded the client's full-resolution upload —
+    # a real jewelry photo can be 4000px+ on the long edge, ~36MB per
+    # decoded RGB buffer — and held several such buffers simultaneously
+    # (source, mask, eroded mask, magenta fill, composite result). Neither
+    # RECOLOR's nor MIX's own compositing correctness needs the image sent
+    # to Gemini at full resolution — only generate-then-composite's *final*
+    # step does, and that step already stays at full resolution unmodified.
+    # This cap bounds *only* the pre-provider-call overlay-building path;
+    # see both service modules' own docstrings for what still runs at full
+    # resolution and why (MIX's `_build_rough_composite` in particular
+    # cannot be downscaled without an original-resolution refactor larger
+    # than this incident fix — flagged there explicitly, not silently left
+    # unbounded).
+    WORKING_MAX_EDGE: int = 2048
+
     # --- Observability ---
     SENTRY_DSN: str = ""
 

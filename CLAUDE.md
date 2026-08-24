@@ -90,6 +90,32 @@ feature phase — see `phases/phase-roadmap.md`'s "Deferred to v3" table. See
 Merge" section, and `docs/ai-integration.md`'s Mode F for the full
 contract.
 
+**Correction, 2026-08-24 — post-Phase-20 memory incident:** live on the
+Render free-tier `jewelry-api` deployment, a real RECOLOR request pushed
+memory from a ~200MB baseline to 487MB (91% of the 512MB limit) in a
+single sample, OOM-killing the container — confirmed via Render's own
+metrics API and the automatic "exceeded its memory limit" email, not
+inferred. Root cause: `recolor_service._build_overlay` and
+`mix_service._build_seam_overlay` both decoded the client's full-resolution
+upload with no size cap before compositing — a real jewelry photo can be
+4000px+ on the long edge, and each decoded RGB buffer at that size is
+tens of megabytes, with several held simultaneously (source, mask, eroded
+mask, magenta fill, composite result). Fixed with a new
+`settings.WORKING_MAX_EDGE` (default 2048px, `app/config.py`) applied to
+both throwaway pre-provider-call overlays — neither is the client-facing
+artifact, so downscaling them costs nothing correctness-wise; both
+operations' actual final compositing steps
+(`recolor_service._composite_result`, `mix_service._composite_seam_result`)
+are untouched and still operate at full original resolution, preserving
+the byte-identical-outside-the-mask/seam-band guarantee. **Not fixed, and
+flagged rather than silently left open:** `mix_service._build_rough_composite`
+decodes four full-resolution images at once (both sources, both masks) and
+could not be downscaled without a larger refactor — its output is not
+throwaway, it's the base the final composite is built on, unlike the two
+overlay functions this fix addressed. This is MIX's own remaining memory
+hotspot. See `docs/business-rules.md` §15/§16's own incident notes and
+`app/config.py`'s `WORKING_MAX_EDGE` comment for the full accounting.
+
 **Actors:**
 
 | Actor | Can do |

@@ -13,8 +13,10 @@ placement/seam-band *code* behaves as intended.
 
 import io
 
+import pytest
 from PIL import Image
 
+from app.config import settings
 from app.services.mix_service import (
     _build_rough_composite,
     _build_seam_overlay,
@@ -168,3 +170,48 @@ def test_erode_and_feather_are_available_for_reuse_shape() -> None:
     assert _erode(mask, px=0) is mask or list(_erode(mask, px=0).getdata()) == list(mask.getdata())
     feathered = _feather(mask, px=2)
     assert any(0 < v < 255 for v in feathered.getdata())
+
+
+# --- post-Phase-20 incident fix: WORKING_MAX_EDGE downscale (2026-08-24) ---
+
+
+def test_build_seam_overlay_downscales_an_oversized_rough_composite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirrors recolor_service's own equivalent test — the overlay sent to
+    Gemini is a throwaway input, so it's safe to shrink. Lower the cap
+    rather than using a real multi-thousand-pixel fixture, same reasoning
+    as recolor's own test.
+    """
+    monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 50)
+    rough = Image.new("RGB", (200, 100), color=(10, 10, 200))
+    seam_band = _box_mask((200, 100), (80, 40, 120, 60))
+
+    overlay_bytes = _build_seam_overlay(_png_bytes(rough), seam_band)
+    overlay = Image.open(io.BytesIO(overlay_bytes)).convert("RGB")
+
+    assert max(overlay.size) == 50
+    assert overlay.size == (50, 25)
+
+
+def test_build_rough_composite_output_stays_full_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for this module's own documented claim: unlike
+    `_build_seam_overlay`, `_build_rough_composite`'s output must NEVER be
+    downscaled — it's the base both the seam overlay is built from and the
+    final compositing step composites back onto, so it has to stay at
+    source A's real, full resolution regardless of WORKING_MAX_EDGE.
+    """
+    monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 50)
+    source_a = Image.new("RGB", (200, 100), color=(10, 10, 200))
+    mask_a = _box_mask((200, 100), (20, 20, 60, 60))
+    source_b = Image.new("RGB", (90, 90), color=(0, 255, 0))
+    mask_b = _box_mask((90, 90), (10, 10, 80, 80))
+
+    rough_bytes = _build_rough_composite(
+        _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
+    )
+    rough = Image.open(io.BytesIO(rough_bytes)).convert("RGB")
+
+    assert rough.size == (200, 100)

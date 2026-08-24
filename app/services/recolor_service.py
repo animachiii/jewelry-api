@@ -40,6 +40,15 @@ since 6 has hit. If a future session with a real key finds the magenta-
 overlay approach doesn't reliably confine edits to the marked region on
 real jewelry macro photography, that's a correction to
 docs/ai-integration.md's Mode E, not a silent code change.
+
+**Post-Phase-20 incident fix (2026-08-24):** `_build_overlay` now downscales
+its working copies to `settings.WORKING_MAX_EDGE` before erosion/compositing
+— see `app/config.py`'s own note on this setting for the live OOM this
+fixes. This is safe because the overlay is a throwaway input to Gemini, not
+the client-facing artifact — `_composite_result` still decodes the
+*original* `source_bytes`/`mask_bytes` at their real, full resolution, so
+the "byte-identical outside the mask" guarantee (point 2 above) is
+unaffected. Only the pre-call path got cheaper.
 """
 
 import random
@@ -108,14 +117,40 @@ def _feather(mask: "Image.Image", px: int) -> "Image.Image":
     return mask.filter(ImageFilter.GaussianBlur(px))
 
 
+def _downscale_pair(
+    image: "Image.Image", mask: "Image.Image", max_edge: int
+) -> tuple["Image.Image", "Image.Image"]:
+    """Resizes `image` and `mask` to the same target size, capped at
+    `max_edge` on the longer edge, preserving aspect ratio. Both are always
+    resized to the identical `target_size` tuple (not independently scaled)
+    so they stay pixel-aligned regardless of rounding — erosion/compositing
+    downstream assumes `image.size == mask.size`. A no-op if `image` is
+    already within the cap. See app/config.py's `WORKING_MAX_EDGE` note.
+    """
+    if max(image.size) <= max_edge:
+        return image, mask
+    scale = max_edge / max(image.size)
+    target_size = (round(image.width * scale), round(image.height * scale))
+    return image.resize(target_size, Image.Resampling.LANCZOS), mask.resize(
+        target_size, Image.Resampling.LANCZOS
+    )
+
+
 def _build_overlay(source_bytes: bytes, mask_bytes: bytes) -> bytes:
     """Composites a solid magenta fill over the source through the eroded
     mask — this single image is what's sent to Gemini as the sole
     reference image, alongside the prompt's "region marked in magenta"
     instruction. See this module's own docstring point 1.
+
+    Downscaled to `settings.WORKING_MAX_EDGE` first (2026-08-24 incident
+    fix, see this module's own docstring and app/config.py) — this overlay
+    is never the client-facing artifact, only Gemini's input, so shrinking
+    it costs nothing correctness-wise and bounds peak memory for a large
+    real-world photo.
     """
     source = Image.open(BytesIO(source_bytes)).convert("RGB")
     mask = Image.open(BytesIO(mask_bytes)).convert("L")
+    source, mask = _downscale_pair(source, mask, settings.WORKING_MAX_EDGE)
     eroded = _erode(mask, settings.MASK_ERODE_PX)
     magenta_fill = Image.new("RGB", source.size, _MAGENTA)
     overlay = Image.composite(magenta_fill, source, eroded)
@@ -133,13 +168,23 @@ def _composite_result(
     returned a different resolution — compositing requires pixel-aligned
     inputs, and the source's dimensions are what the client's mask was
     drawn against. See this module's own docstring point 2.
+
+    Deliberately **not** downscaled, unlike `_build_overlay` — the output
+    of this function is the client-facing artifact, and the
+    byte-identical-outside-the-mask guarantee is a full-original-resolution
+    claim. `Image.composite` is already PIL's own copy+paste, i.e. the most
+    memory-efficient primitive available for this; see app/config.py's
+    `WORKING_MAX_EDGE` note for what *is* bounded.
     """
     source = Image.open(BytesIO(source_bytes)).convert("RGB")
     provider_output = Image.open(BytesIO(provider_output_bytes)).convert("RGB")
     if provider_output.size != source.size:
         provider_output = provider_output.resize(source.size)
-    mask = Image.open(BytesIO(mask_bytes)).convert("L")
-    feathered = _feather(mask, settings.MASK_FEATHER_PX)
+    # No persistent `mask` local — the undilated mask has no further use
+    # after feathering, so this must stay full resolution (see docstring
+    # above) but shouldn't outlive its one use. See app/config.py's
+    # WORKING_MAX_EDGE note.
+    feathered = _feather(Image.open(BytesIO(mask_bytes)).convert("L"), settings.MASK_FEATHER_PX)
     composited = Image.composite(provider_output, source, feathered)
     buf = BytesIO()
     composited.save(buf, format="PNG")
