@@ -123,12 +123,13 @@ class Settings(BaseSettings):
     # RECOLOR's nor MIX's own compositing correctness needs the image sent
     # to Gemini at full resolution — only generate-then-composite's *final*
     # step does, and that step already stays at full resolution unmodified.
-    # This cap bounds *only* the pre-provider-call overlay-building path;
-    # see both service modules' own docstrings for what still runs at full
-    # resolution and why (MIX's `_build_rough_composite` in particular
-    # cannot be downscaled without an original-resolution refactor larger
-    # than this incident fix — flagged there explicitly, not silently left
-    # unbounded).
+    # This cap bounds the pre-provider-call overlay-building path in both
+    # services; see each module's own docstring for what still runs at full
+    # resolution and why (MIX's `_build_rough_composite` keeps source A/mask A
+    # at full resolution — required for the byte-identical-outside-the-seam
+    # guarantee — but as of the 2026-08-25 follow-up also applies this same
+    # cap to source B/mask B before cropping them into region A, since they
+    # were always going to be resized into A's bounding box anyway).
     WORKING_MAX_EDGE: int = 2048
 
     # --- Observability ---

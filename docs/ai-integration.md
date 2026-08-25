@@ -294,10 +294,17 @@ docstring and `docs/business-rules.md` §16.
 **The seam overlay built here is downscaled to `settings.WORKING_MAX_EDGE`
 before it's sent to Gemini, same fix as Mode E's** (post-Phase-20 incident,
 2026-08-24 — see `docs/business-rules.md` §16 and `app/config.py`'s own
-note). `_build_rough_composite` deliberately was **not** downscaled — its
-output is the base the final compositing step composites back onto, not a
-throwaway Gemini input — leaving it as MIX's own remaining memory hotspot,
-flagged explicitly rather than silently left unbounded.
+note). `_build_rough_composite`'s *output* was, and still is, **not**
+downscaled — it's the base the final compositing step composites back onto,
+not a throwaway Gemini input. At the time this left the function decoding
+four full-resolution images at once, flagged as MIX's own remaining memory
+hotspot. **2026-08-25 follow-up:** source B and mask B (the two inputs that
+get cropped-then-resized into region A's bounding box regardless) are now
+downscaled to `WORKING_MAX_EDGE` *before* the crop, and a redundant
+full-resolution `.copy()` of source A was removed — source A/mask A stay
+full resolution as before, but the function now holds two uncapped
+full-resolution buffers instead of four. See
+`app/services/mix_service.py::_build_rough_composite`'s own docstring.
 
 ---
 

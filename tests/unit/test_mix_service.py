@@ -215,3 +215,34 @@ def test_build_rough_composite_output_stays_full_resolution(
     rough = Image.open(io.BytesIO(rough_bytes)).convert("RGB")
 
     assert rough.size == (200, 100)
+
+
+def test_build_rough_composite_downscales_source_b_before_crop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-08-25 follow-up to the incident fix above: source B/mask B are
+    now bounded by WORKING_MAX_EDGE before the crop, since they're always
+    cropped-then-resized into region A's bbox regardless. Proves the
+    downscale-then-crop-then-resize pipeline still lands the graft in the
+    right place with the right color — this is the memory-saving half of
+    the fix; the other half (output stays full resolution) is pinned by
+    the test above.
+    """
+    monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 50)
+    source_a = Image.new("RGB", (40, 40), color=(10, 10, 200))
+    mask_a = _box_mask((40, 40), (10, 10, 20, 20))  # 10x10 region to receive the graft
+    # Source B is well over the 50px cap and will be downscaled before its
+    # own bbox/crop is computed.
+    source_b = Image.new("RGB", (300, 300), color=(200, 10, 10))
+    mask_b = _box_mask((300, 300), (50, 50, 150, 150))
+
+    composite_bytes = _build_rough_composite(
+        _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
+    )
+    composite = Image.open(io.BytesIO(composite_bytes)).convert("RGB")
+
+    assert composite.size == (40, 40)  # source A's own size, unaffected by the cap
+    # Inside mask A's bbox: still region B's color, despite B being downscaled first.
+    assert composite.getpixel((15, 15)) == (200, 10, 10)
+    # Outside mask A's bbox entirely: source A's own, untouched pixel.
+    assert composite.getpixel((35, 35)) == (10, 10, 200)
