@@ -47,13 +47,21 @@ silent code change.
 **Post-Phase-20 incident fix (2026-08-24):** a live RECOLOR request OOM-killed
 `jewelry-api` on Render's free tier (512MB) — root-caused to full-resolution
 PIL compositing with no size cap; see `app/config.py`'s `WORKING_MAX_EDGE`
-note and `app/services/recolor_service.py`'s own matching fix. MIX's
-exposure is worse in principle (four source images decoded at once in
-`_build_rough_composite` vs. RECOLOR's two), but only `_build_seam_overlay`
-could actually be downscaled here — see that function's own docstring for
-why `_build_rough_composite` could not be, without a larger refactor than
-this incident fix, and is flagged as MIX's own remaining memory hotspot
+note and `app/services/recolor_service.py`'s own matching fix. That first
+pass only covered `_build_seam_overlay` here — `_build_rough_composite`
+still decoded all four source images (source A, mask A, source B, mask B)
+at native resolution, flagged explicitly as MIX's own remaining hotspot
 rather than silently left unbounded.
+
+**2026-08-25 follow-up:** `_build_rough_composite` now downscales source B
+and mask B to `WORKING_MAX_EDGE` before the crop — they're always
+cropped-then-resized into region A's bounding box regardless, so decoding
+them at native resolution bought nothing. Source A and mask A still decode
+at full resolution (required — see `_build_rough_composite`'s own
+docstring), and the function no longer holds a redundant `.copy()` of
+source A alongside the original. Net effect: two of the four decodes are
+now bounded and the third full-resolution buffer (the old `.copy()`) is
+gone, down from four uncapped full-resolution images held at once to two.
 """
 
 import random
@@ -161,32 +169,47 @@ def _build_rough_composite(
     box, scales it to exactly fit mask A's bounding box (aspect ratio not
     preserved — a deliberate simplification, see phases/phase-20-mix.md
     Step 3's own note on why no ingest-time ratio limit exists yet), and
-    pastes it onto a copy of source A using mask A's own crop (already at
-    the target box's exact size, since a bounding box is defined by it) as
-    the paste alpha — so pixels inside the box but outside mask A's actual
-    silhouette are left as source A's original pixels, not overwritten by
-    the crop's rectangular corners.
+    pastes it onto source A using mask A's own crop (already at the target
+    box's exact size, since a bounding box is defined by it) as the paste
+    alpha — so pixels inside the box but outside mask A's actual silhouette
+    are left as source A's original pixels, not overwritten by the crop's
+    rectangular corners.
 
-    **Deliberately not downscaled** — unlike `_build_seam_overlay` below,
-    this function's *output* (`rough_composite`) is not a throwaway input
-    to Gemini; it's the base both the seam overlay is built from *and* the
-    final compositing step composites back onto (`_composite_seam_result`),
-    so it must stay at source A's real, full original resolution the same
-    way `recolor_service._composite_result`'s inputs must. This means
-    `_build_rough_composite` decodes **four** full-resolution images at
-    once (source A, mask A, source B, mask B) — the single largest memory
-    consumer in this codebase, larger than anything RECOLOR's own
-    2026-08-24 incident fix addressed there. Bounding it would need
-    restructuring this function to build the crop/scale/paste at a reduced
-    working resolution and *separately* re-derive a full-resolution
-    `rough_composite` for the final output — a real refactor, out of scope
-    for this incident fix. Flagged here explicitly as MIX's own remaining
-    memory hotspot, not silently left unbounded.
+    **Output stays at source A's real, full original resolution, always** —
+    unlike `_build_seam_overlay` below, `rough_composite` is not a throwaway
+    input to Gemini; it's the base both the seam overlay is built from *and*
+    the final compositing step composites back onto
+    (`_composite_seam_result`), the same reason
+    `recolor_service._composite_result`'s inputs must stay full resolution.
+    Pinned by `test_build_rough_composite_output_stays_full_resolution`.
+
+    **2026-08-25 follow-up to the 2026-08-24 incident fix: source B and mask
+    B are downscaled to `settings.WORKING_MAX_EDGE` before the crop,
+    correctness-neutral.** They're always cropped-then-resized into region
+    A's bounding box regardless (already a lossy, non-aspect-preserving
+    scale-to-fit — see above), so decoding them at native resolution only
+    to immediately throw most of that detail away in the resize buys
+    nothing. Source A and mask A are *not* touched here — they're what the
+    "stays full resolution" guarantee above is actually about, and
+    downscaling them would require the separate full-resolution
+    re-derivation this incident fix's own prior note flagged as a larger
+    refactor. This still halves the number of full-resolution decodes this
+    function holds at once (source A + mask A only, not all four), which
+    was the single largest memory consumer in this codebase. The paste
+    itself also now mutates `source_a` in place instead of pasting onto a
+    `.copy()` of it — the original is never read again afterward, so the
+    copy was a second full-resolution RGB buffer with no purpose.
     """
     source_a = Image.open(BytesIO(source_a_bytes)).convert("RGB")
     mask_a = Image.open(BytesIO(mask_a_bytes)).convert("L")
     source_b = Image.open(BytesIO(source_b_bytes)).convert("RGB")
     mask_b = Image.open(BytesIO(mask_b_bytes)).convert("L")
+
+    if max(source_b.size) > settings.WORKING_MAX_EDGE:
+        scale = settings.WORKING_MAX_EDGE / max(source_b.size)
+        working_size = (round(source_b.width * scale), round(source_b.height * scale))
+        source_b = source_b.resize(working_size, Image.Resampling.LANCZOS)
+        mask_b = mask_b.resize(working_size, Image.Resampling.LANCZOS)
 
     bbox_a = mask_a.getbbox()
     bbox_b = mask_b.getbbox()
@@ -198,10 +221,9 @@ def _build_rough_composite(
     scaled_b = cropped_b.resize(target_size)
     paste_alpha = mask_a.crop(bbox_a)
 
-    rough = source_a.copy()
-    rough.paste(scaled_b, (bbox_a[0], bbox_a[1]), paste_alpha)
+    source_a.paste(scaled_b, (bbox_a[0], bbox_a[1]), paste_alpha)
     buf = BytesIO()
-    rough.save(buf, format="PNG")
+    source_a.save(buf, format="PNG")
     return buf.getvalue()
 
 

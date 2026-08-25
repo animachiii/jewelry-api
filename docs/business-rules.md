@@ -573,14 +573,24 @@ Mode F and this rule, not silently in code.
 note above describes, root-caused there to RECOLOR's own overlay-building step.
 MIX's `_build_seam_overlay` got the identical fix — downscaled to
 `settings.WORKING_MAX_EDGE` before the magenta seam-band fill, since it's also
-a throwaway input to Gemini. **`_build_rough_composite` deliberately did not**
-— its output is not throwaway, it's the base both the seam overlay is built
-from and the final compositing step composites back onto, so it must stay at
-source A's real, full resolution the same way RECOLOR's own final compositing
-step does. This leaves `_build_rough_composite` decoding **four** full-resolution
-images at once (source A, mask A, source B, mask B) as MIX's own remaining
-memory hotspot — larger in principle than anything this incident's RECOLOR fix
-addressed, flagged explicitly rather than silently left unbounded. See
+a throwaway input to Gemini. **`_build_rough_composite`'s *output* still does
+not downscale** — it's the base both the seam overlay is built from and the
+final compositing step composites back onto, so it must stay at source A's
+real, full resolution the same way RECOLOR's own final compositing step does.
+At the time, this left `_build_rough_composite` decoding **four**
+full-resolution images at once (source A, mask A, source B, mask B), flagged
+as MIX's own remaining memory hotspot.
+
+**2026-08-25 follow-up, same function:** source B and mask B are now
+downscaled to `settings.WORKING_MAX_EDGE` *before* the crop — correctness-
+neutral, since both were always going to be cropped-then-resized into region
+A's bounding box regardless (already a lossy, non-aspect-preserving
+scale-to-fit). Source A and mask A are untouched, still full resolution, per
+the paragraph above. The function also no longer holds a redundant `.copy()`
+of source A alongside the original — the paste now mutates source A directly,
+since the original is never read again afterward. Net: two of the four
+decodes are now bounded and the extra full-resolution duplicate is gone,
+down from four uncapped full-resolution buffers to two. See
 `app/services/mix_service.py::_build_rough_composite`'s own docstring.
 
 **Retry.** `POST /jobs/{job_id}/retry` — see §5. A MIX job always has exactly one
