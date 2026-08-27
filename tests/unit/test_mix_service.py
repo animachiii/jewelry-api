@@ -81,7 +81,7 @@ def test_build_rough_composite_places_cropped_region_b_at_mask_a_bbox() -> None:
     source_b = Image.new("RGB", (40, 40), color=(200, 10, 10))
     mask_b = _box_mask((40, 40), (5, 5, 15, 15))  # 10x10 region to cut from B
 
-    composite_bytes = _build_rough_composite(
+    composite_bytes, _graft = _build_rough_composite(
         _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
     )
     composite = Image.open(io.BytesIO(composite_bytes)).convert("RGB")
@@ -98,7 +98,7 @@ def test_build_rough_composite_leaves_pixels_outside_mask_a_bbox_untouched() -> 
     source_b = Image.new("RGB", (40, 40), color=(200, 10, 10))
     mask_b = _box_mask((40, 40), (0, 0, 10, 10))
 
-    composite_bytes = _build_rough_composite(
+    composite_bytes, _graft = _build_rough_composite(
         _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
     )
     composite = Image.open(io.BytesIO(composite_bytes)).convert("RGB")
@@ -117,7 +117,7 @@ def test_build_rough_composite_handles_different_aspect_ratios_without_crashing(
     source_b = Image.new("RGB", (40, 40), color=(200, 10, 10))
     mask_b = _box_mask((40, 40), (15, 5, 25, 35))  # tall: 10x30
 
-    composite_bytes = _build_rough_composite(
+    composite_bytes, _graft = _build_rough_composite(
         _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
     )
     composite = Image.open(io.BytesIO(composite_bytes)).convert("RGB")
@@ -211,7 +211,7 @@ def test_build_rough_composite_output_is_capped_at_working_max_edge(
     source_b = Image.new("RGB", (90, 90), color=(0, 255, 0))
     mask_b = _box_mask((90, 90), (10, 10, 80, 80))
 
-    rough_bytes = _build_rough_composite(
+    rough_bytes, _graft = _build_rough_composite(
         _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
     )
     rough = Image.open(io.BytesIO(rough_bytes)).convert("RGB")
@@ -234,7 +234,7 @@ def test_build_rough_composite_leaves_a_small_image_untouched(
     source_b = Image.new("RGB", (90, 90), color=(0, 255, 0))
     mask_b = _box_mask((90, 90), (10, 10, 80, 80))
 
-    rough_bytes = _build_rough_composite(
+    rough_bytes, _graft = _build_rough_composite(
         _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
     )
     assert Image.open(io.BytesIO(rough_bytes)).size == (200, 100)
@@ -255,11 +255,11 @@ def test_downscaled_mask_stays_binary(monkeypatch: pytest.MonkeyPatch) -> None:
     assert set(downscaled.getdata()) <= {0, 255}
 
 
-def test_seam_band_matches_rough_composite_size(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The seam band is built in `process` from the primary mask while the
-    composite is built inside `_build_rough_composite`. If those two ever
-    disagree on size, the failure lands in `_composite_seam_result` — after
-    the billed Gemini call. Pin that they agree.
+def test_graft_mask_matches_rough_composite_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The graft mask feeds the seam band, which is finally composited
+    against the rough composite. If those disagree on size the failure lands
+    in `_composite_seam_result` — after the billed Gemini call. Pin that they
+    agree.
     """
     monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 50)
     source_a = Image.new("RGB", (200, 100), color=(10, 10, 200))
@@ -267,12 +267,78 @@ def test_seam_band_matches_rough_composite_size(monkeypatch: pytest.MonkeyPatch)
     source_b = Image.new("RGB", (90, 90), color=(0, 255, 0))
     mask_b = _box_mask((90, 90), (10, 10, 80, 80))
 
-    rough_bytes = _build_rough_composite(
+    rough_bytes, graft = _build_rough_composite(
         _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
     )
-    band = _seam_band_mask(_load_downscaled(_png_bytes(mask_a), "L"), settings.MIX_SEAM_BAND_PX)
+    band = _seam_band_mask(graft, settings.MIX_SEAM_BAND_PX)
 
-    assert band.size == Image.open(io.BytesIO(rough_bytes)).size
+    assert graft.size == Image.open(io.BytesIO(rough_bytes)).size
+    assert band.size == graft.size
+
+
+def test_graft_excludes_unpainted_parts_of_mask_b_bbox() -> None:
+    """Regression test for the 2026-08-28 defect found on job `fe7d6372`.
+
+    Mask B is two separate blobs, so 60%+ of their shared bounding box is
+    unpainted background. The old code grafted that whole rectangle, which
+    put mannequin-beige in the middle of the client's pendant. Only pixels
+    inside B's painted shape may travel.
+    """
+    source_a = Image.new("RGB", (80, 80), color=(10, 10, 200))
+    mask_a = _box_mask((80, 80), (20, 20, 60, 60))
+    # B: green subject on an unmistakable magenta "background" that must NOT
+    # be grafted. Two separate painted blobs, far apart, like the two gold
+    # bands in the real job.
+    source_b = Image.new("RGB", (80, 80), color=(255, 0, 255))
+    for y in range(10, 30):
+        for x in range(10, 25):
+            source_b.putpixel((x, y), (0, 255, 0))
+        for x in range(55, 70):
+            source_b.putpixel((x, y), (0, 255, 0))
+    mask_b = Image.new("L", (80, 80), 0)
+    for y in range(10, 30):
+        for x in range(10, 25):
+            mask_b.putpixel((x, y), 255)
+        for x in range(55, 70):
+            mask_b.putpixel((x, y), 255)
+
+    composite_bytes, graft = _build_rough_composite(
+        _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
+    )
+    composite = Image.open(io.BytesIO(composite_bytes)).convert("RGB")
+
+    # The magenta gap between B's two blobs must never appear in the output.
+    assert (255, 0, 255) not in set(composite.getdata()), (
+        "unpainted background from mask B's bounding box leaked into the graft"
+    )
+    # Something was still grafted, and only inside A's region.
+    assert graft.getbbox() is not None
+    gx0, gy0, gx1, gy1 = graft.getbbox()
+    assert gx0 >= 20 and gy0 >= 20 and gx1 <= 60 and gy1 <= 60
+
+
+def test_graft_preserves_aspect_ratio_of_region_b() -> None:
+    """A tall region grafted into a wide box must keep its proportions and be
+    centred, not stretched to fill — the second 2026-08-28 defect.
+    """
+    source_a = Image.new("RGB", (120, 120), color=(10, 10, 200))
+    mask_a = _box_mask((120, 120), (10, 50, 110, 70))  # wide box: 100x20
+    source_b = Image.new("RGB", (120, 120), color=(200, 10, 10))
+    mask_b = _box_mask((120, 120), (50, 10, 70, 110))  # tall region: 20x100
+
+    _bytes, graft = _build_rough_composite(
+        _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
+    )
+
+    gx0, gy0, gx1, gy1 = graft.getbbox()
+    gw, gh = gx1 - gx0, gy1 - gy0
+    # Source region is 20x100 (0.2). Fitted into a 100x20 box, the limiting
+    # dimension is height, so it should land ~4x20 -- still tall and narrow,
+    # NOT stretched to 100x20.
+    assert gh > gw, f"aspect inverted: graft is {gw}x{gh}, expected taller than wide"
+    assert abs((gw / gh) - 0.2) < 0.1, f"aspect not preserved: {gw}x{gh}"
+    # And centred horizontally in A's box.
+    assert abs(((gx0 + gx1) / 2) - 60) <= 2
 
 
 def test_build_rough_composite_downscales_source_b_before_crop(
@@ -294,7 +360,7 @@ def test_build_rough_composite_downscales_source_b_before_crop(
     source_b = Image.new("RGB", (300, 300), color=(200, 10, 10))
     mask_b = _box_mask((300, 300), (50, 50, 150, 150))
 
-    composite_bytes = _build_rough_composite(
+    composite_bytes, _graft = _build_rough_composite(
         _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
     )
     composite = Image.open(io.BytesIO(composite_bytes)).convert("RGB")

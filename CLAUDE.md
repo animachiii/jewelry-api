@@ -114,6 +114,25 @@ once (both sources, both masks) — its output is not throwaway, it's the
 base the final composite is built on, unlike the two overlay functions this
 fix addressed, so it needed separate treatment.
 
+**Correction, 2026-08-28 — MIX's rough-composite had two real defects, found
+on the first genuine client run that ever reached Gemini (job `fe7d6372`).**
+Both are now fixed in `mix_service._build_rough_composite`. (1) `mask_b` was
+used *only* to compute a bounding box and its actual shape discarded, so the
+raw rectangular crop was grafted — on the real job mask B was two curved
+bands whose shared bbox was just **39.5% painted**, meaning **60% of the
+grafted content was unpainted mannequin**, which landed as a beige blob in
+the middle of the client's pendant. (2) The scale-to-fit did not preserve
+aspect ratio, so a tall thin region squashed into a wide box distorted
+badly — `phases/phase-20-mix.md` called this "a deliberate simplification...
+unvalidated against real client pieces", and this was the validation. Now:
+aspect-preserving fit-inside, centred, pasted through the **intersection of
+both silhouettes**. Consequently `_build_rough_composite` returns a **graft
+mask** and the seam band is built from that rather than mask A — once the
+graft is an intersection, mask A is no longer its boundary and banding mask A
+would blend an edge that isn't there. **Still open:** MIX fits B's region
+into A's region, so it works best when the two masked shapes are roughly
+comparable; there is no ingest-time check for that.
+
 **Correction, 2026-08-27 — MIX output is now resolution-capped, and the two
 prior fixes are superseded.** Neither of the passes below was enough. A real
 client MIX job (`baf56f78`, two 3072x4096 / **12.6 MP** photos plus two masks)
