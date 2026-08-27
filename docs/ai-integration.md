@@ -250,10 +250,14 @@ spatial reasoning — correctly placing content from one photo's frame into anot
 Gemini to do placement *and* blending in one call risks the graft landing in the
 wrong position or at the wrong scale with no ground truth to check it against.
 
-1. **Before the call**, `rough_composite` is built deterministically (Pillow only),
-   then a seam-band ring (`dilate(mask_a, band_px) - erode(mask_a, band_px)`) is
-   burned into a magenta overlay on top of it — same hard-edged-overlay mechanism
-   Mode E established, applied to a ring instead of a filled region.
+1. **Before the call**, `rough_composite` is built deterministically (Pillow only) —
+   B's masked region scaled **aspect-preserving** into A's box and pasted through
+   the **intersection of both silhouettes** (2026-08-28 corrections; see
+   `docs/business-rules.md` §16's defect note) — then a seam-band ring
+   (`dilate(g, band_px) - erode(g, band_px)`, where `g` is the resulting **graft
+   mask**, not mask A) is burned into a magenta overlay on top of it, the same
+   hard-edged-overlay mechanism Mode E established, applied to a ring instead of a
+   filled region.
 2. **After the call**, the same seam-band mask, feathered by `MASK_FEATHER_PX`
    (Mode E's own existing setting, reused rather than duplicated), drives a
    server-side compositing step (`app/services/mix_service.py::_composite_seam_result`)

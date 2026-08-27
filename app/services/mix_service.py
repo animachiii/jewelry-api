@@ -203,17 +203,39 @@ def _load_downscaled(data: bytes, mode: str) -> "Image.Image":
 
 def _build_rough_composite(
     source_a_bytes: bytes, mask_a_bytes: bytes, source_b_bytes: bytes, mask_b_bytes: bytes
-) -> bytes:
+) -> tuple[bytes, "Image.Image"]:
     """Deterministic image assembly, no provider call involved — see this
-    module's own docstring point 1. Crops region B to mask B's bounding
-    box, scales it to exactly fit mask A's bounding box (aspect ratio not
-    preserved — a deliberate simplification, see phases/phase-20-mix.md
-    Step 3's own note on why no ingest-time ratio limit exists yet), and
-    pastes it onto source A using mask A's own crop (already at the target
-    box's exact size, since a bounding box is defined by it) as the paste
-    alpha — so pixels inside the box but outside mask A's actual silhouette
-    are left as source A's original pixels, not overwritten by the crop's
-    rectangular corners.
+    module's own docstring point 1. Crops region B to mask B's bounding box,
+    scales it **preserving aspect ratio** to fit inside mask A's bounding
+    box, centres it there, and pastes it through the intersection of **both**
+    silhouettes. Returns the composite plus the graft mask — the region that
+    actually changed, which the caller needs for the seam band.
+
+    **2026-08-28 — two real defects found on the first genuine client run
+    (job `fe7d6372`), both fixed here.**
+
+    *Defect 1: mask B's shape was discarded.* The old code used `mask_b` only
+    to compute `bbox_b`, then grafted the raw rectangular crop. Measured on
+    that job, mask B was two curved bands on opposite sides of the piece
+    whose shared bounding box was only **39.5% painted** — so **60% of what
+    got grafted was unpainted mannequin and background**, squashed into the
+    pendant silhouette. The output was a beige pendant-shaped blob with gold
+    fringing the edges. `mask_b` is now a paste alpha in its own right, so
+    only pixels the client actually painted travel across.
+
+    *Defect 2: the scale-to-fit was non-aspect-preserving.* Two long thin
+    bands stretched into a compact bird-shaped box distort badly no matter
+    how clean the masking is. `phases/phase-20-mix.md` Step 3 called this a
+    "deliberate simplification... unvalidated against real client pieces";
+    this was the validation, and it failed. The scale is now
+    `min(w_ratio, h_ratio)` with the result centred in A's box, so B keeps
+    its proportions and simply fits inside.
+
+    **Consequence the caller must respect:** the graft no longer necessarily
+    fills mask A. The real seam is the boundary of the returned graft mask,
+    NOT of mask A, so the seam band must be built from the returned mask —
+    building it from mask A would ask the provider to blend an edge that
+    isn't there while leaving the actual graft edge untouched.
 
     **All four inputs are decoded at `settings.WORKING_MAX_EDGE`, so
     `rough_composite` — and therefore MIX's final client-facing output — is
@@ -261,14 +283,40 @@ def _build_rough_composite(
     assert bbox_b is not None
 
     cropped_b = source_b.crop(bbox_b)
-    target_size = (bbox_a[2] - bbox_a[0], bbox_a[3] - bbox_a[1])
-    scaled_b = cropped_b.resize(target_size)
-    paste_alpha = mask_a.crop(bbox_a)
+    cropped_mask_b = mask_b.crop(bbox_b)
 
-    source_a.paste(scaled_b, (bbox_a[0], bbox_a[1]), paste_alpha)
+    box_w = bbox_a[2] - bbox_a[0]
+    box_h = bbox_a[3] - bbox_a[1]
+    src_w, src_h = cropped_b.size
+
+    # Aspect-preserving fit-inside, not stretch-to-fill (defect 2 above).
+    scale = min(box_w / src_w, box_h / src_h)
+    fit_w = max(1, round(src_w * scale))
+    fit_h = max(1, round(src_h * scale))
+    scaled_b = cropped_b.resize((fit_w, fit_h), Image.Resampling.LANCZOS)
+    # NEAREST keeps the mask binary, same reason _load_downscaled uses it.
+    scaled_mask_b = cropped_mask_b.resize((fit_w, fit_h), Image.Resampling.NEAREST)
+
+    # Centre the fitted region inside A's box. fit_* <= box_*, so this window
+    # is always inside bbox_a and therefore inside the image.
+    off_x = bbox_a[0] + (box_w - fit_w) // 2
+    off_y = bbox_a[1] + (box_h - fit_h) // 2
+
+    # The graft is the INTERSECTION of the two silhouettes: inside A's region
+    # (don't spill past where the client said the graft lands) and inside B's
+    # painted shape (don't drag along the unpainted rest of B's crop —
+    # defect 1 above). Both are binary, so multiply is a logical AND.
+    window = (off_x, off_y, off_x + fit_w, off_y + fit_h)
+    paste_alpha = ImageChops.multiply(mask_a.crop(window), scaled_mask_b)
+    source_a.paste(scaled_b, (off_x, off_y), paste_alpha)
+
+    # Full-frame record of what actually changed, for the seam band.
+    graft_mask = Image.new("L", source_a.size, 0)
+    graft_mask.paste(paste_alpha, (off_x, off_y))
+
     buf = BytesIO()
     source_a.save(buf, format="PNG")
-    return buf.getvalue()
+    return buf.getvalue(), graft_mask
 
 
 def _build_seam_overlay(rough_composite_bytes: bytes, seam_band_mask: "Image.Image") -> bytes:
@@ -397,17 +445,18 @@ async def process(session: AsyncSession, redis_client: Redis, sub_job_id: uuid.U
         secondary_mask_asset.bucket, secondary_mask_asset.storage_path
     )
 
-    rough_composite_bytes = _build_rough_composite(
+    # The graft mask comes back from the composite step rather than being
+    # rebuilt from the primary mask here. Two reasons, both load-bearing:
+    # it is already at the composite's own working resolution (so
+    # _composite_seam_result can never fail on a size mismatch after the
+    # billed provider call), and since 2026-08-28 the graft is the
+    # INTERSECTION of both silhouettes, which can be strictly smaller than
+    # the primary mask. Building the band from the primary mask would mark
+    # an edge that does not exist and miss the one that does.
+    rough_composite_bytes, graft_mask = _build_rough_composite(
         primary_bytes, primary_mask_bytes, secondary_bytes, secondary_mask_bytes
     )
-    # Must go through _load_downscaled, exactly as _build_rough_composite
-    # does, so the seam band comes out at the same size as the composite it
-    # will later be composited against (_composite_seam_result). Loading the
-    # mask natively here while the composite is downscaled would raise on
-    # size mismatch at the very end of the task, after the billed Gemini
-    # call — the most expensive possible place to fail.
-    primary_mask_image = _load_downscaled(primary_mask_bytes, "L")
-    seam_band = _seam_band_mask(primary_mask_image, settings.MIX_SEAM_BAND_PX)
+    seam_band = _seam_band_mask(graft_mask, settings.MIX_SEAM_BAND_PX)
     overlay_bytes = _build_seam_overlay(rough_composite_bytes, seam_band)
 
     provider = GeminiProvider(model_version=model_version)

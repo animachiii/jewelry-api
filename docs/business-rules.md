@@ -534,15 +534,21 @@ mask — the Gemini API has no mask parameter:
 **Deterministic rough-composite, then seam-scoped generate-then-composite.** Unlike
 every other operation, MIX's first real step is not a provider call at all:
 
-1. **Before any provider call:** region B is cropped to its mask's bounding box and
-   scaled (aspect ratio **not** preserved — a deliberate simplification, not yet
-   validated against real client pieces) to exactly fit region A's bounding box,
-   then pasted onto a copy of image A using mask A's own crop as the paste alpha.
-   This produces a fully deterministic `rough_composite` — no model call, no
-   hallucination risk on *placement*, since placement is Pillow math, not something
-   asked of Gemini.
+1. **Before any provider call:** region B is cropped to its mask's bounding box,
+   scaled **preserving aspect ratio** to fit inside region A's bounding box, centred
+   there, and pasted onto image A through the **intersection of both masks'
+   silhouettes** — so only pixels the client actually painted on B travel, and only
+   into where they painted on A. This produces a fully deterministic
+   `rough_composite` — no model call, no hallucination risk on *placement*, since
+   placement is Pillow math, not something asked of Gemini. **Both of those
+   properties are 2026-08-28 corrections to real defects; see the defect note at the
+   end of this section.**
 2. **The seam-band mask:** a ring `MIX_SEAM_BAND_PX` pixels wide (default 6)
-   straddling mask A's boundary — `dilate(mask_a, band_px) - erode(mask_a, band_px)`
+   straddling the **graft's** boundary — `dilate(g, band_px) - erode(g, band_px)`
+   where `g` is the graft mask returned by the composite step. It is deliberately
+   **not** built from mask A: since the graft is an intersection it can be strictly
+   smaller than mask A, and banding mask A would ask the provider to blend an edge
+   that does not exist while leaving the real graft edge untouched
    — marks only the visible graft edge, burned into a magenta overlay on
    `rough_composite` the same hard-edged way RECOLOR's overlay works. This is what's
    sent to Gemini, alongside a prompt asking it to blend only the marked seam.
@@ -623,6 +629,33 @@ the piece than it used to. And **`RECOLOR` was not changed** — §15's guarante
 is stated against the untouched original source, so `recolor_service._composite_result`
 still composites at full resolution and carries the same exposure on a
 12.6 MP upload. That is a known, unaddressed risk, not an oversight.
+
+**2026-08-28 — two defects found on the first genuine client run (job `fe7d6372`),
+both now fixed.** This section previously described the rough-composite as cropping
+B to its mask's *bounding box* and stretching it to *exactly fill* A's box, with the
+aspect distortion flagged as "a deliberate simplification, not yet validated against
+real client pieces." That validation has now happened and both halves failed:
+
+- **Mask B's shape was discarded.** It was used only to compute a bounding box; the
+  raw rectangle was grafted. On the real job, mask B was two curved bands on
+  opposite sides of the piece, so their shared bounding box was only **39.5%
+  painted** — **60% of the grafted content was unpainted mannequin and background**,
+  which landed in the middle of the client's pendant as a flat beige blob. Mask B is
+  now a paste alpha in its own right.
+- **The stretch-to-fill distorted badly.** Two long thin bands squashed into a
+  compact pendant silhouette cannot look right at any masking quality. The scale is
+  now `min(w_ratio, h_ratio)` with the result centred.
+
+The seam band consequently moved from mask A to the graft mask (see step 2 above) —
+once the graft is an intersection, mask A is no longer its boundary. Regression
+tests: `test_graft_excludes_unpainted_parts_of_mask_b_bbox`,
+`test_graft_preserves_aspect_ratio_of_region_b`.
+
+**Still open, and worth stating plainly:** MIX places content by fitting B's masked
+region into A's masked region. When the two shapes differ a lot the result is a
+scaled silhouette swap, not a semantic transplant — the operation works best when
+the two masked regions are roughly comparable in shape. There is still no
+ingest-time check for that (see the cross-mask validation note above).
 
 **Retry.** `POST /jobs/{job_id}/retry` — see §5. A MIX job always has exactly one
 sub-job, so Phase 18's all-or-nothing multi-sub-job generalization applies here as
