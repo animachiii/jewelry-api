@@ -28,6 +28,16 @@ class Settings(BaseSettings):
     BUCKET_INPUTS: str = "jewelry-inputs"
     BUCKET_OUTPUTS: str = "jewelry-outputs"
     SIGNED_URL_TTL_SECONDS: int = 3600
+    # 2026-08-28 — every Supabase Storage call goes through
+    # storage_service._with_retries. A transient httpx.TransportError (a real
+    # network blip, never a real HTTP error response from Supabase, which
+    # raises storage3.StorageException instead and is never retried) was
+    # 500-ing real requests in production and, more visibly, failing CI
+    # nondeterministically on unrelated PRs -- five times in one week, always
+    # a different test, always this same signature. See
+    # storage_service.py's own module docstring.
+    STORAGE_MAX_ATTEMPTS: int = 3
+    STORAGE_RETRY_BACKOFF_SECONDS: float = 0.5
     # Phase 4 — Celery beat schedule for app.workers.retention.expire_assets.
     RETENTION_SWEEP_CRON: str = "0 3 * * *"
     # Phase 16 Step 2 — Celery beat schedule for
