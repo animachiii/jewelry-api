@@ -467,6 +467,25 @@
   const JOB_TERMINAL = new Set(["COMPLETED", "PARTIAL_SUCCESS", "FAILED"]);
   const POLL_INTERVAL_MS = 4000; // GET /status sets Retry-After: 3 while non-terminal
 
+  // --- Poll budget (2026-08-27 incident) -------------------------------
+  // Polling used to stop only on a terminal status or a 404, so a tab left
+  // open on a job that never reaches a terminal status (an orphaned
+  // sub-job, a job lost to a container restart) polled every 4s FOREVER.
+  // Confirmed live in Render's logs: job BAF56F78 was still being polled
+  // ~36 hours after it was submitted, from tabs nobody was looking at, and
+  // three such tabs were running at once.
+  //
+  // On Render's free tier that is not merely wasteful -- the instance spins
+  // down after ~15 min idle, and a pile of abandoned tabs all firing at a
+  // cold-starting instance gets throttled at Render's *edge*, which returns
+  // a bare 429 with no error envelope. That 429 then lands on whatever
+  // request the user is actually trying to make, which is how a plain
+  // "submit a RECOLOR job" turned into "Request failed: HTTP 429" with
+  // nothing in the app's own logs (the request never reached uvicorn).
+  const POLL_MAX_CONSECUTIVE_ERRORS = 5; // give up rather than hammer a sick instance
+  const POLL_MAX_DURATION_MS = 15 * 60 * 1000; // a job this old is not coming back on its own
+  const POLL_BACKOFF_MAX_MS = 60000; // ceiling for the error backoff below
+
   const SEEDED_JOBS = [
     { id: "616451d0-9451-4563-8b0f-60697bee0234", scenario: "4/4 succeeded — COMPLETED" },
     { id: "b682df8b-6ccb-4738-a73c-335aef128e48", scenario: "3 ok, 1 FAILED — PARTIAL_SUCCESS" },
@@ -494,43 +513,91 @@
   function apiBase() { return baseUrlInput.value.replace(/\/+$/, ""); }
   function apiKey() { return apiKeyInput.value.trim(); }
 
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // Statuses that, when they arrive WITHOUT the API's error envelope, mean
+  // "Render's edge answered, not the app" -- a free instance cold-starting
+  // or being throttled. See the poll-budget comment above.
+  const COLD_START_RETRY_STATUSES = new Set([429, 502, 503, 504]);
+  const COLD_START_MAX_ATTEMPTS = 4;
+
   async function apiFetch(path, options) {
     options = options || {};
     const headers = Object.assign({}, options.headers || {}, { "X-API-Key": apiKey() });
-    let resp;
-    try {
-      resp = await fetch(apiBase() + path, Object.assign({}, options, { headers }));
-    } catch (networkErr) {
-      // fetch() itself throws for a dropped/reset connection -- e.g. the
-      // free-tier instance crashing mid-request. No HTTP response exists at
-      // all here, so there's no status/body to report -- say so plainly
-      // instead of leaving the caller with an empty message.
-      const err = new Error(
-        "No response from the server (connection dropped or timed out). " +
-        "The free-tier instance may have crashed under load -- check Render's dashboard."
-      );
-      err.status = null;
-      throw err;
-    }
-    if (!resp.ok) {
-      // Prefer the API's own error envelope; fall back to statusText; fall
-      // back again to the raw status code, since statusText can itself be
-      // empty for some proxied 5xx responses (observed live via Render's
-      // edge during an instance crash -- this used to render as a blank
-      // "Request failed: " with nothing after the colon).
-      let detail = resp.statusText || ("HTTP " + resp.status);
+
+    // Retrying is safe for every call this page makes: reads are GETs, and
+    // every job-creating POST carries an `Idempotency-Key` the CALLER
+    // generated once, before apiFetch ran -- so a replay returns the
+    // original job rather than creating a second one or billing twice
+    // (docs/business-rules.md §8). Do not move a uuid4() call inside this
+    // loop; that would defeat the dedup this retry depends on.
+    for (let attempt = 1; ; attempt++) {
+      let resp;
       try {
-        const body = await resp.json();
-        if (body && body.error) detail = body.error.code + ": " + body.error.message;
-      } catch (e) { /* not JSON */ }
-      const err = new Error(detail);
-      err.status = resp.status;
-      throw err;
+        resp = await fetch(apiBase() + path, Object.assign({}, options, { headers }));
+      } catch (networkErr) {
+        // fetch() itself throws for a dropped/reset connection -- e.g. the
+        // free-tier instance crashing mid-request. No HTTP response exists at
+        // all here, so there's no status/body to report -- say so plainly
+        // instead of leaving the caller with an empty message.
+        const err = new Error(
+          "No response from the server (connection dropped or timed out). " +
+          "The free-tier instance may have crashed under load -- check Render's dashboard."
+        );
+        err.status = null;
+        throw err;
+      }
+
+      if (!resp.ok) {
+        // Prefer the API's own error envelope; fall back to statusText; fall
+        // back again to the raw status code, since statusText can itself be
+        // empty for some proxied 5xx responses (observed live via Render's
+        // edge during an instance crash -- this used to render as a blank
+        // "Request failed: " with nothing after the colon). Note statusText
+        // is ALWAYS empty over HTTP/2, which is what Render serves.
+        let detail = resp.statusText || ("HTTP " + resp.status);
+        let hasEnvelope = false;
+        try {
+          const body = await resp.json();
+          if (body && body.error) {
+            detail = body.error.code + ": " + body.error.message;
+            hasEnvelope = true;
+          }
+        } catch (e) { /* not JSON */ }
+
+        // The envelope is the tell for who answered. A 429 from the app
+        // itself always carries one (RATE_LIMIT_EXCEEDED / QUOTA_EXCEEDED,
+        // app/core/errors.py) and is a deliberate answer that must be shown
+        // to the user, never papered over by retrying. A 429 with NO
+        // envelope never reached FastAPI at all -- that's Render's edge
+        // throttling a cold-starting instance, and waiting is exactly the
+        // right response. Same reasoning for a bare 502/503/504.
+        const isColdStart = !hasEnvelope && COLD_START_RETRY_STATUSES.has(resp.status);
+        if (isColdStart && attempt < COLD_START_MAX_ATTEMPTS) {
+          const retryAfter = Number(resp.headers.get("retry-after"));
+          const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+            ? Math.min(retryAfter * 1000, POLL_BACKOFF_MAX_MS)
+            : Math.min(1000 * Math.pow(2, attempt - 1), POLL_BACKOFF_MAX_MS);
+          await sleep(waitMs);
+          continue;
+        }
+        if (isColdStart) {
+          detail =
+            "The server is waking up or overloaded and did not respond after " +
+            COLD_START_MAX_ATTEMPTS + " attempts (HTTP " + resp.status + "). " +
+            "Free-tier instances sleep after ~15 min idle -- wait a moment and try again.";
+        }
+        const err = new Error(detail);
+        err.status = resp.status;
+        err.hasEnvelope = hasEnvelope;
+        throw err;
+      }
+
+      if (resp.status === 202 && resp.headers.get("content-length") === "0") return null;
+      if (resp.status === 204) return null;
+      const text = await resp.text();
+      return text ? JSON.parse(text) : null;
     }
-    if (resp.status === 202 && resp.headers.get("content-length") === "0") return null;
-    if (resp.status === 204) return null;
-    const text = await resp.text();
-    return text ? JSON.parse(text) : null;
   }
 
   function showCallError(el, err) {
@@ -1395,10 +1462,31 @@
 
   // --- Job tracking / polling -------------------------------------------
 
+  // setTimeout, NOT setInterval. setInterval fired every POLL_INTERVAL_MS
+  // regardless of whether the previous request had come back, so on a cold
+  // free instance (a first request after idle takes ~50s) a dozen requests
+  // for the same job stacked up in flight at once -- each one making the
+  // instance it was waiting on slower. Chaining the next poll off the end of
+  // the previous one keeps exactly one request per job in flight.
   let pollTimer = null;
+  let pollJobId = null;
+  let pollStartedAt = 0;
+  let pollConsecutiveErrors = 0;
+  let pollStopped = false;
+
+  function stopPolling(reason) {
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    pollStopped = true;
+    if (reason) $("job-status-badge").textContent = reason;
+  }
 
   function startTrackingJob(jobId) {
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    stopPolling(null);
+    pollStopped = false;
+    pollJobId = jobId;
+    pollStartedAt = Date.now();
+    pollConsecutiveErrors = 0;
+
     $("job-panel").classList.add("visible");
     $("job-id-label").textContent = jobId;
     $("job-panel").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1408,29 +1496,88 @@
     history.replaceState(null, "", url);
 
     pollJob(jobId);
-    pollTimer = setInterval(() => pollJob(jobId), POLL_INTERVAL_MS);
+  }
+
+  // Resume the loop for a job already on screen (a retry has just moved it
+  // back to PROCESSING). Resets the error count and the duration budget --
+  // this is genuinely fresh work, not a continuation of a run that may have
+  // already exhausted them -- but deliberately skips startTrackingJob's
+  // scroll-into-view and URL rewrite, which would be jarring mid-page.
+  function resumePolling(jobId) {
+    stopPolling(null);
+    pollStopped = false;
+    pollJobId = jobId;
+    pollStartedAt = Date.now();
+    pollConsecutiveErrors = 0;
+    pollJob(jobId);
+  }
+
+  function scheduleNextPoll(jobId, delayMs) {
+    if (pollStopped || pollJobId !== jobId) return;
+    if (Date.now() - pollStartedAt > POLL_MAX_DURATION_MS) {
+      stopPolling(
+        "stopped polling after " + Math.round(POLL_MAX_DURATION_MS / 60000) +
+        " min — reload the page to resume"
+      );
+      return;
+    }
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = setTimeout(() => pollJob(jobId), delayMs);
   }
 
   async function pollJob(jobId) {
+    if (pollStopped || pollJobId !== jobId) return;
+
+    // A tab nobody is looking at must not keep a free instance awake or
+    // add to the queue in front of a request someone IS waiting on. The
+    // loop stays alive (so switching back resumes immediately) but makes
+    // no network call while hidden.
+    if (document.hidden) {
+      scheduleNextPoll(jobId, POLL_INTERVAL_MS);
+      return;
+    }
+
     let job;
     try {
       job = await apiFetch("/api/v2/status/" + jobId);
     } catch (err) {
       if (err.status === 404) {
-        clearInterval(pollTimer);
-        pollTimer = null;
+        stopPolling("poll error: " + err.message);
+        return;
       }
-      $("job-status-badge").textContent = "poll error: " + err.message;
+      pollConsecutiveErrors++;
+      $("job-status-badge").textContent =
+        "poll error (" + pollConsecutiveErrors + "/" + POLL_MAX_CONSECUTIVE_ERRORS + "): " +
+        err.message;
+      if (pollConsecutiveErrors >= POLL_MAX_CONSECUTIVE_ERRORS) {
+        stopPolling("stopped polling after repeated errors — reload the page to resume");
+        return;
+      }
+      // Back off instead of retrying at full rate: whatever is wrong, a
+      // faster retry cannot fix it and makes a struggling instance worse.
+      scheduleNextPoll(
+        jobId,
+        Math.min(POLL_INTERVAL_MS * Math.pow(2, pollConsecutiveErrors), POLL_BACKOFF_MAX_MS)
+      );
       return;
     }
 
+    pollConsecutiveErrors = 0;
     renderJob(job);
 
-    if (JOB_TERMINAL.has(job.status) && pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
+    if (JOB_TERMINAL.has(job.status)) {
+      stopPolling(null);
+      return;
     }
+    scheduleNextPoll(jobId, POLL_INTERVAL_MS);
   }
+
+  // Browsers throttle timers in hidden tabs to roughly once a minute, so
+  // without this a tab brought back to the front could sit on stale data
+  // for up to a minute after the skip-while-hidden check above lets go.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && !pollStopped && pollJobId) pollJob(pollJobId);
+  });
 
   function renderJob(job) {
     const badge = $("job-status-badge");
@@ -1517,8 +1664,7 @@
         method: "POST",
         headers: { "Idempotency-Key": uuid4() },
       });
-      if (!pollTimer) pollTimer = setInterval(() => pollJob(jobId), POLL_INTERVAL_MS);
-      pollJob(jobId);
+      resumePolling(jobId);
     } catch (err) {
       btn.textContent = "Retry failed: " + err.message;
     }
