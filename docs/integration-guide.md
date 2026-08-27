@@ -99,6 +99,26 @@ signed URL expiry, error-code table — is identical to the angle flow below.
   itself a signal, but don't rely on that alone; check `status`.
 - A successful retry moves a terminal job back to `PROCESSING` — resume
   polling after calling `/retry`.
+- **Give the poll loop a budget, and never let one request overlap the
+  next.** "Poll until terminal" above is not the whole rule: a job can stop
+  advancing without ever reaching a terminal status (a worker lost to a
+  container restart leaves a sub-job orphaned — see the reconciliation sweep
+  in `docs/business-rules.md`). Cap the loop on both consecutive errors and
+  total elapsed time, and schedule the next poll only after the previous
+  response lands, rather than on a fixed interval — a fixed interval against
+  a slow instance stacks requests in flight and makes it slower. Pause
+  entirely while your view is backgrounded.
+- **A `429` with no error envelope is not a rate limit — it is
+  infrastructure.** Every deliberate `429` from this API carries the
+  standard envelope with `RATE_LIMIT_EXCEEDED` or `QUOTA_EXCEEDED` (see the
+  error table below) and a meaningful `Retry-After`. A bare `429`/`502`/`503`
+  with **no** JSON envelope never reached the application at all — it came
+  from the platform edge in front of it, typically while the instance was
+  cold-starting. Branch on the envelope's presence: retry the envelope-less
+  ones with exponential backoff, and surface the enveloped ones to the user
+  as the deliberate answers they are. This distinction cost a real debugging
+  session on 2026-08-27, when a bare edge `429` was read as the API's own
+  rate limiter and searched for in application logs it was never in.
 
 ## 4. Handling `PARTIAL_SUCCESS`
 
