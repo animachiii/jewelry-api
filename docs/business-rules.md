@@ -332,6 +332,22 @@ independently-tunable value from `qa_similarity_threshold` and expected higher
 Flagged items appear in `GET /qa/review-queue` with `operation` set and
 `angle`/`category_code` `null`.
 
+**The judge asks a different question here than it does for a synthetic angle
+(2026-08-28).** A background operation is *instructed* by migration `0019` to
+strip hands, tags, props and packaging and to produce a clean e-commerce
+product photo — so its output legitimately differs from its reference (the raw
+input snapshot) in background, lighting, crop, and often the piece's pose. The
+synthetic-angle judge counts exactly those differences as evidence of a
+different piece, and until this date both call sites shared it: live sub-job
+`6b3eda1e` scored **0.0** on a flawless output. Background operations now use
+`SUBJECT_PRESERVATION_JUDGE_PROMPT`, which names those differences as intended
+and scores piece identity alone — see `docs/ai-integration.md`'s Call Site 2
+and `app/providers/gemini_qa.py`. The `0.92` threshold is unchanged; the new
+prompt's anchors are shaped to keep it meaningful. Sub-jobs flagged by the
+old judge are cleared with `scripts/rescore_flagged_background.py`, which
+re-runs the judge without spending the client's `attempt_count` budget on a
+backend defect.
+
 **Retry.** `POST /jobs/{job_id}/retry` — see §5. Reuses `retry_service.execute_retry`
 and `job_service.check_retry_preconditions` unmodified; `409 ANGLE_JOB_RETRY_NOT_ALLOWED`
 on an `ANGLE_GENERATION` job.
