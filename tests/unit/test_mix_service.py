@@ -24,6 +24,7 @@ from app.services.mix_service import (
     _dilate,
     _erode,
     _feather,
+    _load_downscaled,
     _seam_band_mask,
 )
 
@@ -194,14 +195,15 @@ def test_build_seam_overlay_downscales_an_oversized_rough_composite(
     assert overlay.size == (50, 25)
 
 
-def test_build_rough_composite_output_stays_full_resolution(
+def test_build_rough_composite_output_is_capped_at_working_max_edge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression guard for this module's own documented claim: unlike
-    `_build_seam_overlay`, `_build_rough_composite`'s output must NEVER be
-    downscaled — it's the base both the seam overlay is built from and the
-    final compositing step composites back onto, so it has to stay at
-    source A's real, full resolution regardless of WORKING_MAX_EDGE.
+    """2026-08-27: this replaces an earlier test that asserted the OUTPUT
+    stayed at source A's full resolution. That guarantee was given up
+    deliberately — measured against the real 3072x4096 client upload the
+    full-res pipeline needed ~187MB against ~160MB of headroom on the 512MB
+    free instance and was OOM-killed before every single Gemini attempt.
+    Capping the whole working canvas is what makes MIX run at all here.
     """
     monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 50)
     source_a = Image.new("RGB", (200, 100), color=(10, 10, 200))
@@ -214,7 +216,63 @@ def test_build_rough_composite_output_stays_full_resolution(
     )
     rough = Image.open(io.BytesIO(rough_bytes)).convert("RGB")
 
-    assert rough.size == (200, 100)
+    # 200x100 scaled so the longest edge is 50 -> 50x25.
+    assert rough.size == (50, 25)
+    assert max(rough.size) == 50
+
+
+def test_build_rough_composite_leaves_a_small_image_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap is a ceiling, not a resize-everything rule — an image already
+    under WORKING_MAX_EDGE must come through at its own native size, or every
+    existing small-fixture test would be silently changing shape.
+    """
+    monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 2048)
+    source_a = Image.new("RGB", (200, 100), color=(10, 10, 200))
+    mask_a = _box_mask((200, 100), (20, 20, 60, 60))
+    source_b = Image.new("RGB", (90, 90), color=(0, 255, 0))
+    mask_b = _box_mask((90, 90), (10, 10, 80, 80))
+
+    rough_bytes = _build_rough_composite(
+        _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
+    )
+    assert Image.open(io.BytesIO(rough_bytes)).size == (200, 100)
+
+
+def test_downscaled_mask_stays_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_seam_band_mask`'s dilate-minus-erode and the paste alpha both assume
+    the 0/255 mask `mask_validation` guarantees on ingest. Downscaling with a
+    smooth filter would introduce intermediate values and quietly blur the
+    seam ring, so masks must resample with NEAREST.
+    """
+    monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 64)
+    mask = _box_mask((256, 256), (64, 64, 192, 192))
+
+    downscaled = _load_downscaled(_png_bytes(mask), "L")
+
+    assert downscaled.size == (64, 64)
+    assert set(downscaled.getdata()) <= {0, 255}
+
+
+def test_seam_band_matches_rough_composite_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The seam band is built in `process` from the primary mask while the
+    composite is built inside `_build_rough_composite`. If those two ever
+    disagree on size, the failure lands in `_composite_seam_result` — after
+    the billed Gemini call. Pin that they agree.
+    """
+    monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 50)
+    source_a = Image.new("RGB", (200, 100), color=(10, 10, 200))
+    mask_a = _box_mask((200, 100), (20, 20, 60, 60))
+    source_b = Image.new("RGB", (90, 90), color=(0, 255, 0))
+    mask_b = _box_mask((90, 90), (10, 10, 80, 80))
+
+    rough_bytes = _build_rough_composite(
+        _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
+    )
+    band = _seam_band_mask(_load_downscaled(_png_bytes(mask_a), "L"), settings.MIX_SEAM_BAND_PX)
+
+    assert band.size == Image.open(io.BytesIO(rough_bytes)).size
 
 
 def test_build_rough_composite_downscales_source_b_before_crop(

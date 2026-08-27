@@ -124,12 +124,19 @@ class Settings(BaseSettings):
     # to Gemini at full resolution — only generate-then-composite's *final*
     # step does, and that step already stays at full resolution unmodified.
     # This cap bounds the pre-provider-call overlay-building path in both
-    # services; see each module's own docstring for what still runs at full
-    # resolution and why (MIX's `_build_rough_composite` keeps source A/mask A
-    # at full resolution — required for the byte-identical-outside-the-seam
-    # guarantee — but as of the 2026-08-25 follow-up also applies this same
-    # cap to source B/mask B before cropping them into region A, since they
-    # were always going to be resized into A's bounding box anyway).
+    # services. **As of 2026-08-27 it also bounds MIX's entire working canvas**
+    # (app/services/mix_service.py::_load_downscaled), so a MIX job's
+    # client-facing output is capped at this edge rather than the primary
+    # photo's native size. The two earlier, narrower passes (2026-08-24,
+    # 2026-08-25) were both measured insufficient on a real 12.6MP upload:
+    # ~187MB needed against ~160MB of headroom, OOM-killed before every single
+    # Gemini attempt. Capping the canvas took that to ~74MB.
+    # Raising this value therefore raises MIX's output resolution AND its
+    # memory ceiling together — do not raise it without re-measuring against
+    # the instance's real baseline. RECOLOR's *final* composite is deliberately
+    # NOT bounded by this (its guarantee is stated against the untouched
+    # original source) and still carries the same exposure on a large upload —
+    # see docs/business-rules.md §15/§16.
     WORKING_MAX_EDGE: int = 2048
 
     # --- Observability ---
