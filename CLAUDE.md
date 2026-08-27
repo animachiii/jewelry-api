@@ -114,6 +114,26 @@ once (both sources, both masks) — its output is not throwaway, it's the
 base the final composite is built on, unlike the two overlay functions this
 fix addressed, so it needed separate treatment.
 
+**Correction, 2026-08-27 — MIX output is now resolution-capped, and the two
+prior fixes are superseded.** Neither of the passes below was enough. A real
+client MIX job (`baf56f78`, two 3072x4096 / **12.6 MP** photos plus two masks)
+OOM-killed the container roughly three seconds in, on **every** attempt,
+before a single Gemini call — the live sub-job sat at `GENERATING` with
+`attempt_count` still `0`, and Celery's `acks_late=False` dropped the task on
+each restart, so the job hung at `GENERATING` rather than failing. Measured at
+that exact size: the pipeline needed **~187MB** against **~160MB** of headroom
+(512MB cap, 353MB baseline). Fix: `mix_service._load_downscaled` now decodes
+**all four** inputs at `WORKING_MAX_EDGE`, using Pillow's `draft()` for the
+JPEG fast path and NEAREST for masks (so they stay binary, which
+`_seam_band_mask` depends on). Measured result: **187MB -> 74MB**, output
+1536x2048. **This gives up the full-resolution output guarantee** — decided
+directly with the user, who chose it over restructuring for full resolution
+or paying for a larger instance. §16's byte-identical-outside-the-seam-band
+rule is unchanged in substance (it was always relative to `rough_composite`,
+never to an original photo). **`RECOLOR` was deliberately not changed and
+retains the same exposure** — its guarantee is stated against the untouched
+original source, so its final composite still runs at full resolution.
+
 **Correction, 2026-08-25 — MIX's remaining hotspot fixed:**
 `_build_rough_composite` now downscales source B and mask B to
 `WORKING_MAX_EDGE` before the crop — both were always going to be

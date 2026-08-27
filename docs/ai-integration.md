@@ -303,8 +303,22 @@ get cropped-then-resized into region A's bounding box regardless) are now
 downscaled to `WORKING_MAX_EDGE` *before* the crop, and a redundant
 full-resolution `.copy()` of source A was removed — source A/mask A stay
 full resolution as before, but the function now holds two uncapped
-full-resolution buffers instead of four. See
-`app/services/mix_service.py::_build_rough_composite`'s own docstring.
+full-resolution buffers instead of four.
+
+**2026-08-27 — superseded: MIX's whole working canvas is now capped.** Neither
+pass above was enough on a real 12.6 MP (3072x4096) client upload, which needed
+~187 MB against ~160 MB of headroom and was OOM-killed before every Gemini
+attempt (`attempt_count` never left `0`). All four inputs now decode at
+`WORKING_MAX_EDGE` via `_load_downscaled`, which uses Pillow's `draft()` to
+decode JPEGs straight at a reduced DCT scale rather than decoding 12.6 MP and
+discarding most of it. **Mode F's output is therefore capped at
+`WORKING_MAX_EDGE`, not the primary photo's native resolution** — a deliberate
+product tradeoff decided with the user, measured at 187 MB -> 74 MB peak.
+Masks resample with NEAREST specifically to stay binary, which
+`_seam_band_mask`'s dilate-minus-erode depends on. Mode E (RECOLOR) is
+unchanged and still composites at full resolution — same exposure, not yet
+addressed. See `app/services/mix_service.py::_build_rough_composite`'s own
+docstring and `docs/business-rules.md` §16.
 
 ---
 

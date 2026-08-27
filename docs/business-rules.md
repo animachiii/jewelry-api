@@ -593,6 +593,37 @@ decodes are now bounded and the extra full-resolution duplicate is gone,
 down from four uncapped full-resolution buffers to two. See
 `app/services/mix_service.py::_build_rough_composite`'s own docstring.
 
+**2026-08-27 — the full-resolution output guarantee was given up, deliberately.**
+Neither pass above was enough. Measured against the real client upload that
+broke it (3072x4096, **12.6 MP**, two photos plus two masks) the pipeline still
+needed **~187 MB** of working memory against **~160 MB** of headroom on the
+512 MB free instance, whose baseline was already 353 MB. Every attempt was
+OOM-killed roughly three seconds in, before a single Gemini call: the live
+sub-job sat at `GENERATING` with `attempt_count` still `0`, and because
+Celery runs `acks_late=False` the task was dropped on the container restart
+rather than retried, so the job hung at `GENERATING` indefinitely rather than
+failing. **All four inputs now decode at `settings.WORKING_MAX_EDGE`, so
+`rough_composite` — and therefore MIX's client-facing output — is capped at
+that edge (2048px by default) instead of the primary photo's native size.**
+Measured effect at 12.6 MP: peak working memory **187 MB -> 74 MB**, output
+1536x2048. Decided directly with the user, who chose this over restructuring
+for full resolution or moving to a larger instance.
+
+The byte-identical-outside-the-seam-band rule above is **unchanged in
+substance** — it was always stated relative to `rough_composite`, never to
+either original photo, and `rough_composite` is simply a smaller image now.
+What genuinely changed is output resolution, which is a real product
+tradeoff and is why it was a decision rather than a silent fix.
+
+Two consequences worth stating plainly rather than discovering later:
+`MIX_SEAM_BAND_PX` remains an absolute pixel count in *working* space (the
+band exists for the model to see, and that is measured in the pixels actually
+sent), so the small-region limitation above now bites at a larger fraction of
+the piece than it used to. And **`RECOLOR` was not changed** — §15's guarantee
+is stated against the untouched original source, so `recolor_service._composite_result`
+still composites at full resolution and carries the same exposure on a
+12.6 MP upload. That is a known, unaddressed risk, not an oversight.
+
 **Retry.** `POST /jobs/{job_id}/retry` — see §5. A MIX job always has exactly one
 sub-job, so Phase 18's all-or-nothing multi-sub-job generalization applies here as
 the trivial "set of size 1" case, same as it already does for RECOLOR and

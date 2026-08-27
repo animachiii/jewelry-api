@@ -161,6 +161,46 @@ def _seam_band_mask(mask_a: "Image.Image", band_px: int) -> "Image.Image":
     return ImageChops.subtract(dilated, eroded)
 
 
+def _working_size(width: int, height: int) -> tuple[int, int] | None:
+    """The size this pipeline actually operates at, or None when the image is
+    already small enough to use as-is. See `_load_downscaled`.
+    """
+    longest = max(width, height)
+    if longest <= settings.WORKING_MAX_EDGE:
+        return None
+    scale = settings.WORKING_MAX_EDGE / longest
+    return (round(width * scale), round(height * scale))
+
+
+def _load_downscaled(data: bytes, mode: str) -> "Image.Image":
+    """Decode an upload straight into MIX's working resolution.
+
+    `img.draft()` is the part that actually saves memory: for a JPEG it
+    decodes at a reduced DCT scale (1/2, 1/4, 1/8) rather than decoding all
+    12.6 MP and throwing most of it away on the next line. It is a no-op for
+    PNG (the masks), which still decode in full and are resized after -- the
+    masks are the cheap buffers here (1 byte/px, not 3), so that is fine.
+
+    Masks resample with NEAREST, deliberately, not LANCZOS: `mask_validation`
+    guarantees a binary 0/255 mask on ingest, `_seam_band_mask`'s
+    dilate-minus-erode assumes it, and a smooth filter would introduce
+    intermediate values that quietly blur the seam ring. Photos use LANCZOS,
+    where smoothness is what you want.
+    """
+    # `handle` stays separate from `img`: Image.open returns an ImageFile,
+    # and draft() is only available there -- it has to be called on the
+    # undecoded handle, before convert() forces the decode.
+    handle = Image.open(BytesIO(data))
+    target = _working_size(handle.width, handle.height)
+    if target is not None:
+        handle.draft(mode, target)  # JPEG fast path; no-op otherwise
+    img: Image.Image = handle.convert(mode)
+    if target is not None and img.size != target:
+        resample = Image.Resampling.NEAREST if mode == "L" else Image.Resampling.LANCZOS
+        img = img.resize(target, resample)
+    return img
+
+
 def _build_rough_composite(
     source_a_bytes: bytes, mask_a_bytes: bytes, source_b_bytes: bytes, mask_b_bytes: bytes
 ) -> bytes:
@@ -175,41 +215,45 @@ def _build_rough_composite(
     are left as source A's original pixels, not overwritten by the crop's
     rectangular corners.
 
-    **Output stays at source A's real, full original resolution, always** —
-    unlike `_build_seam_overlay` below, `rough_composite` is not a throwaway
-    input to Gemini; it's the base both the seam overlay is built from *and*
-    the final compositing step composites back onto
-    (`_composite_seam_result`), the same reason
-    `recolor_service._composite_result`'s inputs must stay full resolution.
-    Pinned by `test_build_rough_composite_output_stays_full_resolution`.
+    **All four inputs are decoded at `settings.WORKING_MAX_EDGE`, so
+    `rough_composite` — and therefore MIX's final client-facing output — is
+    capped at that edge rather than source A's native resolution**
+    (2026-08-27; decided directly with the user). Two earlier passes tried
+    to keep full resolution and both were insufficient: 2026-08-24 (PR #32)
+    capped only the throwaway Gemini overlay, and 2026-08-25 (PR #33)
+    additionally capped source/mask B while keeping A native. Measured
+    against the real client upload that broke it — 3072x4096, 12.6 MP, two
+    photos plus two masks — the pipeline still needed **~187 MB** of working
+    memory, against ~160 MB of headroom on the 512 MB free instance (the
+    baseline was already 353 MB). The container was SIGKILLed roughly three
+    seconds into the task, every time, before a single Gemini attempt: the
+    live sub-job sat at `GENERATING` with `attempt_count` still 0.
 
-    **2026-08-25 follow-up to the 2026-08-24 incident fix: source B and mask
-    B are downscaled to `settings.WORKING_MAX_EDGE` before the crop,
-    correctness-neutral.** They're always cropped-then-resized into region
-    A's bounding box regardless (already a lossy, non-aspect-preserving
-    scale-to-fit — see above), so decoding them at native resolution only
-    to immediately throw most of that detail away in the resize buys
-    nothing. Source A and mask A are *not* touched here — they're what the
-    "stays full resolution" guarantee above is actually about, and
-    downscaling them would require the separate full-resolution
-    re-derivation this incident fix's own prior note flagged as a larger
-    refactor. This still halves the number of full-resolution decodes this
-    function holds at once (source A + mask A only, not all four), which
-    was the single largest memory consumer in this codebase. The paste
-    itself also now mutates `source_a` in place instead of pasting onto a
-    `.copy()` of it — the original is never read again afterward, so the
-    copy was a second full-resolution RGB buffer with no purpose.
+    Capping the whole working canvas takes 12.6 MP to ~3.1 MP, roughly a 4x
+    cut in every buffer, which is what makes MIX run at all on this instance.
+    The byte-identical-outside-the-seam-band guarantee is unchanged in
+    substance — it was always stated relative to `rough_composite`, not to
+    either original photo (docs/business-rules.md §16), and `rough_composite`
+    is simply now a smaller image. **What genuinely changed is the output
+    resolution**, so this is a real product tradeoff, not a free win.
+
+    Note this does NOT alter `recolor_service`, whose own guarantee *is*
+    stated against the untouched original source and which therefore still
+    composites at full resolution — it has the same exposure on a 12.6 MP
+    upload and has not been addressed here.
+
+    `settings.MIX_SEAM_BAND_PX` stays an absolute pixel count in working
+    space rather than being scaled down with the canvas: the band exists so
+    the model can see a seam to blend, and its usefulness is measured in the
+    pixels of the image actually sent. The consequence is that the
+    small-region limitation in `_seam_band_mask`'s docstring now applies in
+    working-space pixels, so it bites at a larger fraction of the piece than
+    it used to.
     """
-    source_a = Image.open(BytesIO(source_a_bytes)).convert("RGB")
-    mask_a = Image.open(BytesIO(mask_a_bytes)).convert("L")
-    source_b = Image.open(BytesIO(source_b_bytes)).convert("RGB")
-    mask_b = Image.open(BytesIO(mask_b_bytes)).convert("L")
-
-    if max(source_b.size) > settings.WORKING_MAX_EDGE:
-        scale = settings.WORKING_MAX_EDGE / max(source_b.size)
-        working_size = (round(source_b.width * scale), round(source_b.height * scale))
-        source_b = source_b.resize(working_size, Image.Resampling.LANCZOS)
-        mask_b = mask_b.resize(working_size, Image.Resampling.LANCZOS)
+    source_a = _load_downscaled(source_a_bytes, "RGB")
+    mask_a = _load_downscaled(mask_a_bytes, "L")
+    source_b = _load_downscaled(source_b_bytes, "RGB")
+    mask_b = _load_downscaled(mask_b_bytes, "L")
 
     bbox_a = mask_a.getbbox()
     bbox_b = mask_b.getbbox()
@@ -270,6 +314,13 @@ def _composite_seam_result(
     already established.
     """
     rough = Image.open(BytesIO(rough_composite_bytes)).convert("RGB")
+    # Both must have come from _load_downscaled. Image.composite would raise
+    # on its own, but only with "images do not match" -- name the real cause,
+    # since reaching here means the billed provider call has already happened.
+    assert seam_band_mask.size == rough.size, (
+        f"seam band {seam_band_mask.size} != rough composite {rough.size} "
+        "-- both must be built at the same working resolution"
+    )
     provider_output = Image.open(BytesIO(provider_output_bytes)).convert("RGB")
     if provider_output.size != rough.size:
         provider_output = provider_output.resize(rough.size)
@@ -349,7 +400,13 @@ async def process(session: AsyncSession, redis_client: Redis, sub_job_id: uuid.U
     rough_composite_bytes = _build_rough_composite(
         primary_bytes, primary_mask_bytes, secondary_bytes, secondary_mask_bytes
     )
-    primary_mask_image = Image.open(BytesIO(primary_mask_bytes)).convert("L")
+    # Must go through _load_downscaled, exactly as _build_rough_composite
+    # does, so the seam band comes out at the same size as the composite it
+    # will later be composited against (_composite_seam_result). Loading the
+    # mask natively here while the composite is downscaled would raise on
+    # size mismatch at the very end of the task, after the billed Gemini
+    # call — the most expensive possible place to fail.
+    primary_mask_image = _load_downscaled(primary_mask_bytes, "L")
     seam_band = _seam_band_mask(primary_mask_image, settings.MIX_SEAM_BAND_PX)
     overlay_bytes = _build_seam_overlay(rough_composite_bytes, seam_band)
 

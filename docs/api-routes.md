@@ -475,7 +475,12 @@ operations.
 instead of `angles`/`variants` (see that route's docs above). `image_url` is the
 **composited** output — everything outside the seam band is byte-identical to the
 deterministic rough-composite (not either original source photo directly — see
-`docs/business-rules.md` §16). `POST /api/v2/jobs/{job_id}/retry` works unchanged:
+`docs/business-rules.md` §16). **The MIX output image is capped at
+`WORKING_MAX_EDGE` (2048px on the long edge, 2026-08-27), so it will usually be
+smaller than the primary photo the client uploaded** — clients must not assume
+the output matches the input's dimensions. This is a memory constraint of the
+current deployment, not a property of the operation; see `docs/business-rules.md`
+§16. `POST /api/v2/jobs/{job_id}/retry` works unchanged:
 a MIX job always has exactly one sub-job, so Phase 18's all-or-nothing
 generalization applies as the trivial single-sub-job case, same as RECOLOR and
 background operations.
