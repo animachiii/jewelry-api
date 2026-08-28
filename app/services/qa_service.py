@@ -391,3 +391,59 @@ async def submit_qa_decision(session: AsyncSession, sub_job_id: uuid.UUID, decis
     await recompute_parent_status(session, job)
 
     return sub_job
+
+
+async def rescore_flagged_background_operations(
+    session: AsyncSession, *, unscored_only: bool
+) -> list[uuid.UUID]:
+    """Re-runs the QA judge over background-operation sub-jobs that a broken
+    judge flagged. Returns the sub-job IDs to dispatch — the caller owns the
+    commit and the dispatch, same split app/api/v2/retry.py already uses, so
+    a `qa.score_background` task can never read a row before the transaction
+    that recorded its request has landed.
+
+    Two separate defects left sub-jobs sitting in the human review queue
+    having never been judged on their merits:
+
+    1. **2026-08-13 -> 2026-08-21** — `GeminiQaProvider._parse_response` read
+       a `parts[0]["json"]` key the real SDK never produces, so every real QA
+       call raised INTERNAL and fail-open-flagged with `qa_score: NULL`.
+       Fixed by commit 130f310. Live count on 2026-08-28: 17 sub-jobs,
+       spanning two client_ids.
+    2. **through 2026-08-27** — background operations were judged by the
+       synthetic-angle piece-identity prompt, which scores an intended
+       pose/crop/background change as "a materially different piece". Fixed
+       by SUBJECT_PRESERVATION_JUDGE_PROMPT above.
+
+    Neither set clears itself: nothing re-runs a judge on an already-flagged
+    sub-job, and a human working the queue would be adjudicating outputs the
+    system never had an opinion about.
+
+    **`attempt_count` is deliberately left untouched**, unlike
+    retry_service.execute_qa_retry. These rows were flagged by a backend
+    defect, not by a bad output, and 6 of the 17 already sit at 2 of
+    MAX_RETRY_ATTEMPTS; spending a client's retry budget to clean up after
+    our own bug would leave them one attempt on an output nobody ever
+    judged. A QA_RESCORE_REQUESTED event is recorded per sub-job instead —
+    the audit trail is the part worth keeping, not the counter.
+    """
+    rows = await jobs_repo.get_flagged_background_operations(session, unscored_only=unscored_only)
+
+    for sub_job, job in rows:
+        job_events_repo.record_event(
+            session,
+            job.id,
+            "QA_RESCORE_REQUESTED",
+            sub_job_id=sub_job.id,
+            from_status=sub_job.status.value,
+            to_status=sub_job.status.value,
+            detail={
+                "angle": None,
+                "reason": "operator re-score after judge fix; attempt_count untouched",
+                "previous_qa_score": (
+                    None if sub_job.qa_score is None else float(sub_job.qa_score)
+                ),
+            },
+        )
+
+    return [sub_job.id for sub_job, _job in rows]

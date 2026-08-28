@@ -529,6 +529,36 @@ Approve or reject a flagged output. Approval moves the sub-job to `COMPLETED`; r
 moves it to `REJECTED` with `failure_class: QA_REJECTED`. Both recompute parent status.
 **Ops-only scope.**
 
+### `POST /api/v2/internal/qa/rescore-flagged-background`
+Re-runs the QA judge over background-operation sub-jobs that a broken judge flagged.
+**Ops-only scope.** Added 2026-08-28 — see `docs/business-rules.md` §13 and
+`app/services/qa_service.py::rescore_flagged_background_operations` for the two
+defects that left them there.
+
+Query param `unscored_only` (default `true`) restricts to `qa_score IS NULL` — the
+population the 2026-08-21 `_parse_response` bug left, which never got a real judge
+verdict at all. Pass `false` to also re-score items the old shared judge prompt
+scored below threshold. A genuinely low-scoring output is a real human-review item,
+which is why the narrower set is the default.
+
+Returns `202` with `{ "dispatched": int, "unscored_only": bool, "sub_job_ids": [...] }`.
+Scoring is asynchronous: each outcome lands on that sub-job's own `QA_SCORED` event
+(carrying the judge's `reasoning`), and anything that now passes leaves
+`GET /qa/review-queue` on its own. A second call re-dispatches only what is *still*
+flagged, so it is safe to repeat.
+
+**`attempt_count` is deliberately not incremented**, unlike
+`POST /jobs/{job_id}/retry`. These sub-jobs were flagged by a backend defect, not by
+a bad output; spending a client's retry budget to clean up after one would leave
+them fewer attempts on an output nobody ever judged.
+
+This is an ops route rather than a `scripts/` one-off on purpose. The equivalent
+local script published its Celery tasks to whatever `CELERY_BROKER_URL` the
+operator's own `.env` named while writing audit rows to production Postgres — on
+2026-08-28 that silently sent 17 re-scores into a localhost broker and reported
+success. An operator action on live data belongs where the broker, the Gemini key
+and the database cannot disagree.
+
 ---
 
 ## Auth scopes
