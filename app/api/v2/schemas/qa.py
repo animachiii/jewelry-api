@@ -38,3 +38,16 @@ class QaReviewItem(BaseModel):
 
 class QaReviewQueueResponse(BaseModel):
     items: list[QaReviewItem]
+
+
+class QaRescoreResponse(BaseModel):
+    """POST /internal/qa/rescore-flagged-background — ops-only.
+
+    `sub_job_ids` is echoed back rather than just a count so the operator has
+    the exact set to check afterwards; the re-score is asynchronous and the
+    outcomes land on each sub-job's own QA_SCORED event.
+    """
+
+    dispatched: int
+    unscored_only: bool
+    sub_job_ids: list[str]

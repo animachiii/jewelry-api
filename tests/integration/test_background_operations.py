@@ -1332,3 +1332,133 @@ async def test_background_scoring_asks_the_subject_preservation_question(
 
     assert seen == [qa_module.SUBJECT_PRESERVATION_JUDGE_PROMPT]
     assert qa_module.PIECE_IDENTITY_JUDGE_PROMPT not in seen
+
+
+async def test_rescore_route_redispatches_flagged_background_sub_jobs(
+    client: AsyncClient,
+    api_client_key: str,
+    ops_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /internal/qa/rescore-flagged-background clears sub-jobs a broken
+    judge flagged: the re-score overwrites qa_score/qa_status, and one that
+    now passes leaves the review queue on its own.
+    """
+    _fake_qa_score(monkeypatch, "low_similarity.json")
+
+    storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
+    create_resp = await client.post(
+        "/api/v2/background/remove",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "rescore-route-1"},
+        json={"storage_path": storage_path},
+    )
+    job_id = uuid.UUID(create_resp.json()["job_id"])
+    sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
+    assert sub_job.qa_status == QAStatus.FLAGGED
+
+    # The judge now agrees the piece was preserved.
+    _fake_qa_score(monkeypatch, "high_similarity.json")
+    resp = await client.post(
+        "/api/v2/internal/qa/rescore-flagged-background?unscored_only=false",
+        headers={"X-API-Key": ops_key},
+    )
+
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert str(sub_job.id) in body["sub_job_ids"]
+    assert body["dispatched"] == len(body["sub_job_ids"])
+    assert body["unscored_only"] is False
+
+    await db_session.refresh(sub_job)
+    assert sub_job.qa_status == QAStatus.PASSED
+    assert sub_job.status == SubJobStatus.COMPLETED
+    assert float(sub_job.qa_score) == pytest.approx(0.94)
+
+    queue_resp = await client.get("/api/v2/qa/review-queue", headers={"X-API-Key": ops_key})
+    assert str(sub_job.id) not in {item["sub_job_id"] for item in queue_resp.json()["items"]}
+
+
+async def test_rescore_route_does_not_spend_the_client_s_retry_budget(
+    client: AsyncClient,
+    api_client_key: str,
+    ops_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The distinction from POST /jobs/{job_id}/retry. These rows were
+    flagged by a backend defect, so cleaning up after it must not consume
+    attempts the client is entitled to on a genuinely bad output.
+    """
+    from app.db.models.job_events import JobEvent
+
+    _fake_qa_score(monkeypatch, "low_similarity.json")
+
+    storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
+    create_resp = await client.post(
+        "/api/v2/background/remove",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "rescore-route-2"},
+        json={"storage_path": storage_path},
+    )
+    job_id = uuid.UUID(create_resp.json()["job_id"])
+    sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
+    before = sub_job.attempt_count
+
+    await client.post(
+        "/api/v2/internal/qa/rescore-flagged-background?unscored_only=false",
+        headers={"X-API-Key": ops_key},
+    )
+
+    await db_session.refresh(sub_job)
+    assert sub_job.attempt_count == before
+
+    event = (
+        await db_session.execute(
+            select(JobEvent).where(
+                JobEvent.job_id == job_id, JobEvent.event_type == "QA_RESCORE_REQUESTED"
+            )
+        )
+    ).scalar_one()
+    assert event.sub_job_id == sub_job.id
+    assert event.detail["previous_qa_score"] == pytest.approx(0.41)
+
+
+async def test_rescore_route_unscored_only_skips_genuinely_scored_items(
+    client: AsyncClient,
+    api_client_key: str,
+    ops_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`unscored_only=true` (the default) targets only the population the
+    2026-08-21 parse bug left behind — sub-jobs that never got a real judge
+    verdict at all, `qa_score IS NULL`. A sub-job the judge genuinely scored
+    below threshold is a real human-review item and must not be swept up.
+    """
+    _fake_qa_score(monkeypatch, "low_similarity.json")
+
+    storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
+    create_resp = await client.post(
+        "/api/v2/background/remove",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "rescore-route-3"},
+        json={"storage_path": storage_path},
+    )
+    job_id = uuid.UUID(create_resp.json()["job_id"])
+    sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
+    assert sub_job.qa_score is not None  # genuinely scored 0.41, not a NULL
+
+    resp = await client.post(
+        "/api/v2/internal/qa/rescore-flagged-background",
+        headers={"X-API-Key": ops_key},
+    )
+
+    assert resp.status_code == 202, resp.text
+    assert str(sub_job.id) not in resp.json()["sub_job_ids"]
+
+
+async def test_rescore_route_requires_ops_scope(client: AsyncClient, api_client_key: str) -> None:
+    resp = await client.post(
+        "/api/v2/internal/qa/rescore-flagged-background",
+        headers={"X-API-Key": api_client_key},
+    )
+    assert resp.status_code == 403

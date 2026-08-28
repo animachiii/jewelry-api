@@ -1346,6 +1346,33 @@
         "title": "QaDecisionRequest",
         "type": "object"
       },
+      "QaRescoreResponse": {
+        "description": "POST /internal/qa/rescore-flagged-background \u2014 ops-only.\n\n`sub_job_ids` is echoed back rather than just a count so the operator has\nthe exact set to check afterwards; the re-score is asynchronous and the\noutcomes land on each sub-job's own QA_SCORED event.",
+        "properties": {
+          "dispatched": {
+            "title": "Dispatched",
+            "type": "integer"
+          },
+          "sub_job_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Sub Job Ids",
+            "type": "array"
+          },
+          "unscored_only": {
+            "title": "Unscored Only",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dispatched",
+          "unscored_only",
+          "sub_job_ids"
+        ],
+        "title": "QaRescoreResponse",
+        "type": "object"
+      },
       "QaReviewItem": {
         "properties": {
           "angle": {
@@ -2079,6 +2106,72 @@
         "summary": "Sync Config",
         "tags": [
           "config"
+        ]
+      }
+    },
+    "/api/v2/internal/qa/rescore-flagged-background": {
+      "post": {
+        "description": "Re-runs the QA judge over background-operation sub-jobs flagged by a\nbroken judge \u2014 see qa_service.rescore_flagged_background_operations for\nwhich defects left them there and why attempt_count is left alone.\n\nLives here rather than in a `scripts/` one-off deliberately. The\nequivalent local script published its Celery tasks to whatever\nCELERY_BROKER_URL the operator's own .env happened to name, while\nwriting its audit rows to production Postgres \u2014 on 2026-08-28 that\nsilently sent 17 re-scores into a localhost broker and reported success.\nAn operator action on live data belongs in the deployed app, where the\nbroker, the Gemini key and the database cannot disagree with each other.\n`POST /internal/config/sync` is the established precedent for an\nops-only internal route that kicks off background work.\n\nIdempotent in the only sense that matters: a second call re-dispatches\nwhatever is *still* flagged, so anything the first call already cleared\nis simply not in the set.",
+        "operationId": "rescore_flagged_background_api_v2_internal_qa_rescore_flagged_background_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "unscored_only",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Unscored Only",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QaRescoreResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Invalid API key"
+          },
+          "403": {
+            "description": "Insufficient scope"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rescore Flagged Background",
+        "tags": [
+          "qa"
         ]
       }
     },
