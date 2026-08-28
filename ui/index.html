@@ -447,6 +447,41 @@
     <div class="call-error" id="mix-submit-error"></div>
   </section>
 
+  <section>
+    <h2>Ops — re-score flagged background QA</h2>
+    <p class="muted">
+      <code>POST /api/v2/internal/qa/rescore-flagged-background</code> — ops scope,
+      separate from the <code>client</code>-scope key above. Re-runs the QA judge over
+      background-operation sub-jobs a broken judge flagged; see
+      <code>docs/api-routes.md</code> and <code>docs/business-rules.md</code> §13.
+    </p>
+    <p class="muted" style="color: var(--err)">
+      Acts on live production rows. Does not touch <code>attempt_count</code> — this
+      is a re-score of the judge's own past mistake, not a client-initiated retry.
+    </p>
+    <div class="row">
+      <div class="field">
+        <label for="ops-api-key">Ops API key (X-API-Key, <code>ops</code> scope)</label>
+        <input type="password" id="ops-api-key" placeholder="paste your ops key" />
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>
+          <input type="checkbox" id="ops-rescore-unscored-only" checked />
+          Unscored only (<code>qa_score IS NULL</code> — the 2026-08-21 parse-bug
+          population; uncheck to also re-score items the old shared prompt scored
+          below threshold)
+        </label>
+      </div>
+    </div>
+    <div>
+      <button type="button" id="ops-rescore-btn">Re-score flagged background QA</button>
+    </div>
+    <div class="call-error" id="ops-rescore-error"></div>
+    <pre id="ops-rescore-result" style="display: none; margin-top: 12px; padding: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; white-space: pre-wrap; font-size: 13px;"></pre>
+  </section>
+
   <section class="job-panel" id="job-panel">
     <h2>Job <span id="job-id-label" class="muted"></span></h2>
     <p>
@@ -523,7 +558,12 @@
 
   async function apiFetch(path, options) {
     options = options || {};
-    const headers = Object.assign({}, options.headers || {}, { "X-API-Key": apiKey() });
+    // apiKeyOverride lets a caller use a different key than the page's own
+    // client-scope one -- the ops re-score tool is the only caller of this,
+    // since ops and client keys are never the same key.
+    const headers = Object.assign({}, options.headers || {}, {
+      "X-API-Key": options.apiKeyOverride || apiKey(),
+    });
 
     // Retrying is safe for every call this page makes: reads are GETs, and
     // every job-creating POST carries an `Idempotency-Key` the CALLER
@@ -1669,6 +1709,45 @@
       btn.textContent = "Retry failed: " + err.message;
     }
   }
+
+  // --- Ops: re-score flagged background QA -------------------------------
+
+  const opsApiKeyInput = $("ops-api-key");
+  opsApiKeyInput.value = localStorage.getItem("jgb_v2_ops_api_key") || "";
+  opsApiKeyInput.addEventListener("change", () => {
+    localStorage.setItem("jgb_v2_ops_api_key", opsApiKeyInput.value);
+  });
+
+  $("ops-rescore-btn").addEventListener("click", async function () {
+    const btn = this;
+    const errorEl = $("ops-rescore-error");
+    const resultEl = $("ops-rescore-result");
+    hideCallError(errorEl);
+    resultEl.style.display = "none";
+
+    const opsKey = opsApiKeyInput.value.trim();
+    if (!opsKey) {
+      showCallError(errorEl, new Error("Ops API key is required."));
+      return;
+    }
+    const unscoredOnly = $("ops-rescore-unscored-only").checked;
+
+    btn.disabled = true;
+    btn.textContent = "Re-scoring…";
+    try {
+      const path =
+        "/api/v2/internal/qa/rescore-flagged-background" +
+        (unscoredOnly ? "" : "?unscored_only=false");
+      const body = await apiFetch(path, { method: "POST", apiKeyOverride: opsKey });
+      resultEl.textContent = JSON.stringify(body, null, 2);
+      resultEl.style.display = "block";
+    } catch (err) {
+      showCallError(errorEl, err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Re-score flagged background QA";
+    }
+  });
 
   // --- Init ---------------------------------------------------------
 
