@@ -1231,3 +1231,104 @@ async def test_provider_timeout_classifies_transient_network(
     sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
     assert sub_job.status == SubJobStatus.FAILED
     assert sub_job.failure_class == FailureClass.TRANSIENT_NETWORK
+
+
+async def test_flagged_background_job_records_the_judge_s_reasoning(
+    client: AsyncClient,
+    api_client_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Added 2026-08-28. Before this, a flagged background operation left a
+    QA_SCORED event carrying only a score and a threshold, so "why was this
+    flagged?" could only be answered by re-downloading both images and
+    re-running the judge by hand — which is exactly what the client-reported
+    recurrence cost. The judge's own reasoning is now on the event.
+    """
+    from app.db.models.job_events import JobEvent
+
+    _fake_qa_score(monkeypatch, "low_similarity.json")
+
+    storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
+    create_resp = await client.post(
+        "/api/v2/background/remove",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "qa-reasoning-1"},
+        json={"storage_path": storage_path},
+    )
+    job_id = uuid.UUID(create_resp.json()["job_id"])
+
+    event = (
+        await db_session.execute(
+            select(JobEvent).where(JobEvent.job_id == job_id, JobEvent.event_type == "QA_SCORED")
+        )
+    ).scalar_one()
+
+    assert event.detail["outcome"] == "flagged"
+    assert event.detail["reasoning"] == "Prong count differs from every reference image."
+
+
+async def test_provider_error_records_the_failure_class_as_reasoning(
+    client: AsyncClient,
+    api_client_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NULL qa_score is the least self-explanatory outcome of the three —
+    it is what 17 stale review-queue rows looked like after the 2026-08-21
+    parse bug. The event now says which failure class caused it.
+    """
+    from app.db.models.job_events import JobEvent
+
+    _fake_qa_score(monkeypatch, "malformed.json")
+
+    storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
+    create_resp = await client.post(
+        "/api/v2/background/remove",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "qa-reasoning-2"},
+        json={"storage_path": storage_path},
+    )
+    job_id = uuid.UUID(create_resp.json()["job_id"])
+
+    event = (
+        await db_session.execute(
+            select(JobEvent).where(JobEvent.job_id == job_id, JobEvent.event_type == "QA_SCORED")
+        )
+    ).scalar_one()
+
+    assert event.detail["outcome"] == "provider_error"
+    assert "score" not in event.detail
+    assert event.detail["reasoning"].startswith("INTERNAL: ")
+
+
+async def test_background_scoring_asks_the_subject_preservation_question(
+    client: AsyncClient,
+    api_client_key: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The regression this whole change exists for: a background operation
+    must not be judged by the synthetic-angle piece-identity prompt. A
+    correct BACKGROUND_REMOVAL output legitimately differs from its input in
+    background, props, crop and pose, and the piece-identity judge scores
+    exactly those differences as "a materially different piece" (live
+    sub-job 6b3eda1e, 2026-08-27, scored 0.0 on a flawless output).
+    """
+    import app.providers.gemini_qa as qa_module
+
+    fixture = _load(_QA_FIXTURES, "high_similarity.json")
+    seen: list[str] = []
+
+    def _capture(self: object, output_image: bytes, reference_images: list[bytes], prompt: str):
+        seen.append(prompt)
+        return fixture
+
+    monkeypatch.setattr(qa_module.GeminiQaProvider, "_call_api", _capture)
+
+    storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
+    await client.post(
+        "/api/v2/background/remove",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "qa-prompt-1"},
+        json={"storage_path": storage_path},
+    )
+
+    assert seen == [qa_module.SUBJECT_PRESERVATION_JUDGE_PROMPT]
+    assert qa_module.PIECE_IDENTITY_JUDGE_PROMPT not in seen

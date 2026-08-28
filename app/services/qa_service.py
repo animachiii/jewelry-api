@@ -15,7 +15,11 @@ from app.db.repositories import assets as assets_repo
 from app.db.repositories import config_versions as config_versions_repo
 from app.db.repositories import job_events as job_events_repo
 from app.db.repositories import jobs as jobs_repo
-from app.providers.gemini_qa import GeminiQaProvider
+from app.providers.gemini_qa import (
+    PIECE_IDENTITY_JUDGE_PROMPT,
+    SUBJECT_PRESERVATION_JUDGE_PROMPT,
+    GeminiQaProvider,
+)
 from app.services import storage_service
 from app.services.generation_service import fetch_reference_images, recompute_parent_status
 from app.services.job_service import find_category
@@ -95,6 +99,7 @@ async def score_synthetic_angle(session: AsyncSession, sub_job_id: uuid.UUID) ->
         model_version=model_version,
         output_bytes=output_bytes,
         reference_images=reference_images,
+        judge_prompt=PIECE_IDENTITY_JUDGE_PROMPT,
     )
 
 
@@ -158,6 +163,7 @@ async def score_background_operation(session: AsyncSession, sub_job_id: uuid.UUI
         model_version=model_version,
         output_bytes=output_bytes,
         reference_images=reference_images,
+        judge_prompt=SUBJECT_PRESERVATION_JUDGE_PROMPT,
     )
 
 
@@ -170,19 +176,36 @@ async def _score_and_apply(
     model_version: str,
     output_bytes: bytes,
     reference_images: list[bytes],
+    judge_prompt: str,
 ) -> SubJob:
     """Shared by score_synthetic_angle and score_background_operation — the
     provider call, pass/fail branching, and event recording are identical;
-    only how threshold/model_version/reference_images get resolved differs.
+    only how threshold/model_version/reference_images/judge_prompt get
+    resolved differs.
+
+    `judge_prompt` is passed in rather than left to the provider: the two
+    call sites are asking genuinely different questions of the judge (piece
+    identity across a novel view vs. subject preservation across a
+    deliberate background edit), and sharing one prompt is what made
+    correct background outputs flag — see app/providers/gemini_qa.py.
     """
     provider = GeminiQaProvider(model_version=model_version)
 
     try:
-        result = provider.score(output_bytes, reference_images)
+        result = provider.score(output_bytes, reference_images, prompt=judge_prompt)
     except ProviderError as exc:
         _flag_for_review(sub_job, score=None)
         _record_qa_scored_event(
-            session, job, sub_job, score=None, threshold=threshold, outcome="provider_error"
+            session,
+            job,
+            sub_job,
+            score=None,
+            threshold=threshold,
+            outcome="provider_error",
+            # The failure class and message are the whole diagnostic
+            # content of a provider_error flag; without them a NULL
+            # qa_score is indistinguishable from any other NULL one.
+            reasoning=f"{exc.failure_class}: {exc.message}",
         )
         _log_provider_error(exc)
         return sub_job
@@ -192,13 +215,25 @@ async def _score_and_apply(
         sub_job.qa_status = QAStatus.PASSED
         sub_job.status = SubJobStatus.COMPLETED
         _record_qa_scored_event(
-            session, job, sub_job, score=result.score, threshold=threshold, outcome="passed"
+            session,
+            job,
+            sub_job,
+            score=result.score,
+            threshold=threshold,
+            outcome="passed",
+            reasoning=result.reasoning,
         )
         await recompute_parent_status(session, job)
     else:
         _flag_for_review(sub_job, score=result.score)
         _record_qa_scored_event(
-            session, job, sub_job, score=result.score, threshold=threshold, outcome="flagged"
+            session,
+            job,
+            sub_job,
+            score=result.score,
+            threshold=threshold,
+            outcome="flagged",
+            reasoning=result.reasoning,
         )
 
     return sub_job
@@ -226,6 +261,7 @@ def _record_qa_scored_event(
     score: float | None,
     threshold: float,
     outcome: str,
+    reasoning: str | None = None,
 ) -> None:
     detail: dict[str, Any] = {
         "threshold": threshold,
@@ -234,6 +270,8 @@ def _record_qa_scored_event(
     }
     if score is not None:
         detail["score"] = score
+    if reasoning is not None:
+        detail["reasoning"] = reasoning
     job_events_repo.record_event(
         session,
         job.id,

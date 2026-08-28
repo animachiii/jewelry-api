@@ -334,7 +334,30 @@ docstring and `docs/business-rules.md` §16.
 | **Where** | Celery `io` queue, `app/workers/qa.py::score_similarity` (angles) / `score_background` (Phase 15), dispatched by `app/workers/generation.py` / `app/workers/background.py` respectively, right after a `QA_REVIEW`-landing commit (same placement rule, Phase 9). |
 | **Model** | LLM-judged similarity via Gemini (`app/providers/gemini_qa.py::GeminiQaProvider`) — decided in Phase 9, per this doc's own prior note that it was the likely default. No dedicated embedding model was added; revisit only if the judge proves unreliable in practice. **Same class, unmodified, for both angles and background operations.** |
 | **Input** | Angles: reference image(s) for the category + the generated output. **Background operations (Phase 15):** the **input photo itself** as the sole reference + the generated output — `app/services/qa_service.py::score_background_operation`. The subject is meant to be identical; "same object, new background" is what's judged, not "novel view of the same object." |
-| **Output** | `qa_score` ∈ [0, 1] written to `sub_jobs`, plus `qa_status` |
+| **Prompt** | **Two prompts, one per call site, chosen by the caller (2026-08-28).** Angles get `PIECE_IDENTITY_JUDGE_PROMPT` ("is this the same piece"); background operations get `SUBJECT_PRESERVATION_JUDGE_PROMPT`, which explicitly lists background/props/hands/tags/crop/pose differences as **intended** and tells the judge to score piece identity alone. `QaProvider.score` takes `prompt` as a required keyword argument with **no default** — see the failure below. |
+| **Output** | `qa_score` ∈ [0, 1] written to `sub_jobs`, plus `qa_status`, plus the judge's own `reasoning` recorded on the `QA_SCORED` `job_events` row |
+
+**Why there are two prompts (live finding, 2026-08-28).** Until this date both
+call sites shared one prompt — the piece-identity one, written for Mode B's
+catalogue-reference matrix. Applied to a background operation, whose reference
+is the seller's raw input snapshot, it scores intended changes as evidence of a
+different piece. Live sub-job `6b3eda1e` (2026-08-27) turned a bracelet draped
+over a velvet pillow in someone's hand into a flawless open-bangle studio shot
+— exactly what migration `0019` instructs the generator to produce — and the
+judge scored it **0.0**. The better the generator obeyed `0019`, the more
+reliably the judge flagged it. Post-fix production scores were bimodal
+(`0.0, 0.1, 1.0, 1.0`), so `background_qa_similarity_threshold` was doing no
+calibration work at all; the new prompt's scoring anchors are deliberately
+top-heavy so `0.92` still reads as "the judge is confident this is the same
+piece" without the threshold itself changing.
+
+**The judge's `reasoning` is now persisted.** Both prompts have asked for it
+since Phase 9 and `_parse_response` discarded it, so "why was this flagged?"
+could only be answered by re-downloading both images and re-running the judge
+by hand. It now lands in the `QA_SCORED` event's `detail.reasoning` (bounded to
+500 chars); on a `provider_error` outcome that field carries the failure class
+and message instead, since a `NULL` `qa_score` is otherwise the least
+self-explanatory of the three outcomes.
 
 Threshold from `config.global.qa_similarity_threshold` for angles, default `0.82` — **a
 placeholder until calibrated against real client pieces.** Calibrate by

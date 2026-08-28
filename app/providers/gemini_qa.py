@@ -19,6 +19,15 @@ assumption and passed CI the whole time, because `_call_api` is monkeypatched
 in every test and the real SDK never actually ran. Fixed by requesting
 `response_mime_type="application/json"` and parsing `parts[0]["text"]` as a
 JSON string.
+
+**Second live finding, 2026-08-28** — once the parse bug above was fixed and
+real scores started coming back, background operations kept flagging anyway,
+because there was only ever *one* judge prompt and both call sites shared it.
+See SUBJECT_PRESERVATION_JUDGE_PROMPT below for the evidence. `score()` now
+takes the prompt as a required keyword argument so neither call site can
+silently inherit the other's question, and the judge's `reasoning` — asked
+for since Phase 9, parsed away and discarded ever since — is now returned on
+QaResult and recorded on the QA_SCORED event.
 """
 
 import json
@@ -30,7 +39,9 @@ from app.db.models.enums import FailureClass
 from app.providers.gemini import GeminiAPIError
 from app.providers.qa_base import QaProvider, QaResult
 
-_JUDGE_PROMPT = (
+_MAX_REASONING_CHARS = 500
+
+PIECE_IDENTITY_JUDGE_PROMPT = (
     "Compare the generated product image to the reference images of the same "
     "jewelry piece. Respond with JSON only: "
     '{"similarity_score": <float 0.0-1.0>, "reasoning": "<short explanation>"}. '
@@ -38,13 +49,76 @@ _JUDGE_PROMPT = (
     "means it depicts a materially different piece (wrong chain, prong count, "
     "facet geometry, etc)."
 )
+"""Synthetic-angle judge (Call Site 2, score_synthetic_angle). The reference
+images are clean catalogue shots from the category matrix, and the candidate
+is a novel view of that same piece, so "is this the same piece" is the whole
+question and framing is not in play.
+"""
+
+SUBJECT_PRESERVATION_JUDGE_PROMPT = (
+    "You are checking a jewellery background-editing job. The REFERENCE image "
+    "is the original photo a seller supplied — often a casual phone snapshot "
+    "with hands, fingers, display pillows, mannequins, price tags, packaging, "
+    "text overlays, and a cluttered shop background, sometimes at an awkward "
+    "angle with the piece folded, draped, or partly hidden. The CANDIDATE "
+    "image is the cleaned e-commerce product photo produced from it.\n"
+    "\n"
+    "The following differences are INTENDED and must NOT reduce the score:\n"
+    "- any change of background, backdrop, surface, shadow, or lighting\n"
+    "- removal of hands, fingers, mannequins, pillows, stands, props, "
+    "packaging, price tags, watermarks, or text\n"
+    "- any change of crop, zoom, framing, aspect ratio, or resolution\n"
+    "- any change of the piece's orientation, pose, or angle, including the "
+    "piece being straightened, unfolded, opened out, or laid flat so that it "
+    "is fully visible when the original showed it bunched up or occluded\n"
+    "- cleaner, brighter, or more even studio lighting and colour\n"
+    "\n"
+    "Judge ONLY whether the CANDIDATE shows the SAME PHYSICAL PIECE as the "
+    "REFERENCE: the same motif count and arrangement, the same stone layout "
+    "and stone colours, the same metal colour, the same structural design and "
+    "distinctive features. A part of the piece that was hidden in the "
+    "reference and is now visible is expected — judge the parts you can "
+    "compare, and do not penalise the piece for being more complete.\n"
+    "\n"
+    "Respond with JSON only: "
+    '{"similarity_score": <float 0.0-1.0>, "reasoning": "<short explanation>"}.\n'
+    "Scoring anchors:\n"
+    "- 1.0 — the same piece, differing only in the intended ways listed above\n"
+    "- 0.95 — the same piece, with trivial softening of fine detail from "
+    "re-rendering\n"
+    "- 0.6 — recognisably the same piece, but a real detail has changed "
+    "(a stone colour, a motif's shape)\n"
+    "- 0.3 — the piece has been visibly altered: motifs or stones added or "
+    "removed, metal colour changed, structure changed\n"
+    "- 0.0 — a different piece, or the piece is missing, unrecognisable, or "
+    "badly mangled in the candidate"
+)
+"""Background-operation judge (score_background_operation). Added 2026-08-28
+after production evidence that reusing PIECE_IDENTITY_JUDGE_PROMPT here
+flagged correct outputs: for a background operation the "reference" is the
+raw input snapshot, not a catalogue shot, and the operation is *instructed*
+by migration 0019 to strip hands/props/tags and produce a clean product
+photo. Sub-job 6b3eda1e (2026-08-27) turned a bracelet draped over a velvet
+pillow in someone's hand into a flawless open-bangle studio shot and was
+scored 0.0 — "materially different piece" — because the piece-identity judge
+counts pose and framing as identity. The better the generator obeyed 0019,
+the more reliably the judge flagged it.
+
+The anchors are deliberately top-heavy so that the existing
+`background_qa_similarity_threshold` (0.92, migration 0010) still reads as
+"the judge is confident this is the same piece": intended-only differences
+land at 0.95-1.0 and pass, while any genuine alteration of the piece drops
+to 0.6 or below and flags.
+"""
 
 
 class GeminiQaProvider(QaProvider):
     def __init__(self, model_version: str) -> None:
         self.model_version = model_version
 
-    def _call_api(self, output_image: bytes, reference_images: list[bytes]) -> dict[str, Any]:
+    def _call_api(
+        self, output_image: bytes, reference_images: list[bytes], prompt: str
+    ) -> dict[str, Any]:
         """Real call via the google-genai SDK. Raises GeminiAPIError for a
         non-2xx response, TimeoutError/ConnectionError for network
         failures — score() classifies both into a ProviderError.
@@ -53,8 +127,15 @@ class GeminiQaProvider(QaProvider):
         from google.genai import types
 
         client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        parts = [types.Part.from_text(text=_JUDGE_PROMPT)]
+        # The images are labelled inline rather than just concatenated:
+        # both prompts talk about a "candidate" and a "reference", and
+        # nothing in a bare sequence of image parts tells the judge which
+        # of them is which. Order is unchanged (candidate first, then
+        # references) — only the labels are new.
+        parts = [types.Part.from_text(text=prompt)]
+        parts.append(types.Part.from_text(text="CANDIDATE image (the generated output):"))
         parts.append(types.Part.from_bytes(data=output_image, mime_type="image/jpeg"))
+        parts.append(types.Part.from_text(text="REFERENCE image(s):"))
         for image_bytes in reference_images:
             parts.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
 
@@ -76,9 +157,9 @@ class GeminiQaProvider(QaProvider):
 
         return dict(response.model_dump(mode="json"))
 
-    def score(self, output_image: bytes, reference_images: list[bytes]) -> QaResult:
+    def score(self, output_image: bytes, reference_images: list[bytes], *, prompt: str) -> QaResult:
         try:
-            raw = self._call_api(output_image, reference_images)
+            raw = self._call_api(output_image, reference_images, prompt)
         except GeminiAPIError as exc:
             raise ProviderError(
                 exc.message, failure_class=self._classify_status(exc.status_code)
@@ -143,5 +224,18 @@ class GeminiQaProvider(QaProvider):
                 details={"raw": raw},
             )
 
+        # Both judge prompts ask for `reasoning` alongside the score, and
+        # it was parsed away and dropped until 2026-08-28 — which is why
+        # every "why was this flagged?" investigation had to start by
+        # re-downloading the images and re-running the judge by hand.
+        # Optional and best-effort: a missing or oddly-typed reasoning is
+        # not worth failing an otherwise valid score over. Bounded because
+        # it lands in a job_events detail blob.
+        reasoning = payload.get("reasoning") if isinstance(payload, dict) else None
+        if not isinstance(reasoning, str) or not reasoning.strip():
+            reasoning = None
+        else:
+            reasoning = reasoning.strip()[:_MAX_REASONING_CHARS]
+
         model_version = raw.get("model_version", self.model_version)
-        return QaResult(score=float(score), model_version=model_version)
+        return QaResult(score=float(score), model_version=model_version, reasoning=reasoning)
