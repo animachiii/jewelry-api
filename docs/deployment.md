@@ -79,6 +79,8 @@ useful in production.
 | `BUCKET_INPUTS` | Default `jewelry-inputs` is fine unless bucket names differ per environment |
 | `BUCKET_OUTPUTS` | Default `jewelry-outputs` is fine, same caveat |
 | `SIGNED_URL_TTL_SECONDS` | Default `3600` is fine |
+| `STORAGE_MAX_ATTEMPTS` | Default `3` is fine to start — bounds `storage_service._with_retries`, which retries only `httpx.TransportError` (never a real Supabase error response); see `app/services/storage_service.py`'s own module docstring on the CI/production flake this fixes |
+| `STORAGE_RETRY_BACKOFF_SECONDS` | Default `0.5` is fine to start — linear backoff multiplier between retried Storage calls |
 | `RETENTION_SWEEP_CRON` | Default is fine |
 | `WORKER_TASK_TIMEOUT_SECONDS` | Default `180` is fine — bounds a hung generation/background task via `asyncio.wait_for`, the mechanism that actually enforces this under `--pool=solo` (Phase 16 Step 1; Celery's own `task_time_limit`/`task_soft_time_limit`, set in `app/workers/celery_app.py`, are inert under solo — see that file's comment) |
 | `RECONCILIATION_SWEEP_CRON` | Default `*/15 * * * *` is fine — deliberately frequent; a stuck job is a client-visible symptom (Phase 16 Step 2) |

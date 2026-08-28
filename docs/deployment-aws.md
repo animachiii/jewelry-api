@@ -58,6 +58,8 @@ Runner doesn't exist to verify against).
 | `BUCKET_INPUTS` | No | Default `jewelry-inputs` fine |
 | `BUCKET_OUTPUTS` | No | Default `jewelry-outputs` fine |
 | `SIGNED_URL_TTL_SECONDS` | No | Default `3600` fine |
+| `STORAGE_MAX_ATTEMPTS` | No | New 2026-08-28 — default `3` fine. Bounds `storage_service._with_retries`, added after the identical transient-timeout signature failed CI five times in one week |
+| `STORAGE_RETRY_BACKOFF_SECONDS` | No | New 2026-08-28 — default `0.5` fine |
 | `RETENTION_SWEEP_CRON` | No | Default fine |
 | `RECONCILIATION_SWEEP_CRON` | No | New in Phase 16 — default `*/15 * * * *` fine. Chosen partly because Render's free tier restarts every 1-4 hours and can miss a daily cron entirely; App Runner's always-on instance doesn't have that problem, but there's no reason to make the sweep less frequent just because the platform changed — a stuck job is still a client-visible symptom |
 | `RECONCILIATION_STALE_AFTER_SECONDS` | No | New in Phase 16 — default `600` fine |
