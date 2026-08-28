@@ -72,6 +72,41 @@ async def count_created_today(session: AsyncSession, client_id: uuid.UUID) -> in
     return int(result.scalar_one())
 
 
+BACKGROUND_OPERATIONS = (Operation.BACKGROUND_REMOVAL, Operation.BACKGROUND_REPLACEMENT)
+
+
+async def get_flagged_background_operations(
+    session: AsyncSession, *, unscored_only: bool
+) -> list[tuple[SubJob, Job]]:
+    """Flagged background-operation sub-jobs, for the ops re-score route.
+
+    Narrower than get_flagged_qa_review in two ways it cannot express: it
+    joins the parent job (the caller needs `job.id` to record an event
+    against) and filters to the two background operations, since the
+    subject-preservation judge is the only one being re-run.
+
+    `unscored_only` restricts to `qa_score IS NULL` — the population left
+    by the 2026-08-21 `_parse_response` bug, which never got a real judge
+    verdict at all. Without it, sub-jobs that *were* scored by the old
+    shared judge prompt are included too; see
+    app/services/qa_service.py::rescore_flagged_background_operations.
+    """
+    stmt = (
+        select(SubJob, Job)
+        .join(Job, Job.id == SubJob.job_id)
+        .where(
+            SubJob.status == SubJobStatus.QA_REVIEW,
+            SubJob.qa_status == QAStatus.FLAGGED,
+            SubJob.angle.is_(None),
+            Job.operation.in_(BACKGROUND_OPERATIONS),
+        )
+        .order_by(Job.created_at)
+    )
+    if unscored_only:
+        stmt = stmt.where(SubJob.qa_score.is_(None))
+    return [(sub_job, job) for sub_job, job in (await session.execute(stmt)).all()]
+
+
 async def get_flagged_qa_review(session: AsyncSession) -> list[SubJob]:
     """Ops-wide, unscoped by client — see docs/api-routes.md GET
     /qa/review-queue (ops-only scope). Narrower than "all QA_REVIEW" —

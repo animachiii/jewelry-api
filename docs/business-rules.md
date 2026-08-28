@@ -344,9 +344,9 @@ different piece, and until this date both call sites shared it: live sub-job
 and scores piece identity alone — see `docs/ai-integration.md`'s Call Site 2
 and `app/providers/gemini_qa.py`. The `0.92` threshold is unchanged; the new
 prompt's anchors are shaped to keep it meaningful. Sub-jobs flagged by the
-old judge are cleared with `scripts/rescore_flagged_background.py`, which
-re-runs the judge without spending the client's `attempt_count` budget on a
-backend defect.
+old judge are cleared with `POST /api/v2/internal/qa/rescore-flagged-background`
+(ops scope), which re-runs the judge without spending the client's
+`attempt_count` budget on a backend defect.
 
 **Retry.** `POST /jobs/{job_id}/retry` — see §5. Reuses `retry_service.execute_retry`
 and `job_service.check_retry_preconditions` unmodified; `409 ANGLE_JOB_RETRY_NOT_ALLOWED`
