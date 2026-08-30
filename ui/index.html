@@ -379,25 +379,33 @@
   </section>
 
   <section>
-    <h2>Two-piece masked merge (MIX)</h2>
+    <h2>Two-piece combination (MIX)</h2>
     <p class="muted">
-      Two uploaded source photos + one mask each in, one merged photo out — the
-      secondary photo's masked region is grafted into the primary photo's masked
-      region. See <code>docs/api-routes.md</code>'s "Two-Piece Masked Merge" section.
+      Two photos + one mask each in, <strong>one newly designed piece</strong> out.
+      Paint the element you want from each photo; Gemini designs a single new
+      piece combining the two. Nothing is cut and pasted — the result is a
+      <strong>design concept</strong>, not a photo of either piece you uploaded.
+      See <code>docs/api-routes.md</code>'s "Two-Piece Combination" section.
     </p>
     <p class="muted" style="color: var(--err)">
-      Calls the real pipeline — a real, billed Gemini call scoped to the graft
-      seam. Both masks follow RECOLOR's same PNG mask contract, each checked
-      against its own photo's dimensions. No QA gate; ships straight to
-      <code>COMPLETED</code>.
+      Calls the real pipeline — a real, billed Gemini call. The output is
+      generated, so it may idealize details neither physical piece has: treat it
+      as a mockup, not a photograph of goods in hand. Both masks follow RECOLOR's
+      same PNG mask contract, each checked against its own photo's dimensions.
+      No QA gate; ships straight to <code>COMPLETED</code>.
+    </p>
+    <p class="muted">
+      <strong>Paint over the element, don't circle it.</strong> This is a brush,
+      not a lasso — drag across the whole pendant/band you mean. (A circle still
+      works now, but a filled region reads more clearly.)
     </p>
     <div class="row">
       <div class="field">
-        <label for="mix-primary-file">Primary photo (receives the graft)</label>
+        <label for="mix-primary-file">First photo</label>
         <input type="file" id="mix-primary-file" accept="image/jpeg,image/png,image/webp" />
       </div>
       <div class="field">
-        <label>Primary mask — sketch where the graft lands</label>
+        <label>Paint the element you want from this photo</label>
         <div class="mask-pad disabled" id="mix-primary-mask-pad">
           <div class="mask-pad-canvas-wrap">
             <img class="mask-pad-photo" alt="" />
@@ -409,17 +417,17 @@
             <button type="button" class="small secondary mask-pad-undo">Undo</button>
             <span class="mask-pad-coverage">Coverage: 0.00%</span>
           </div>
-          <div class="field-hint">Choose the primary photo first, then paint the region to receive the graft.</div>
+          <div class="field-hint">Choose the first photo, then paint over the element you want to use (marked magenta for the model).</div>
         </div>
       </div>
     </div>
     <div class="row">
       <div class="field">
-        <label for="mix-secondary-file">Secondary photo (grafted from)</label>
+        <label for="mix-secondary-file">Second photo</label>
         <input type="file" id="mix-secondary-file" accept="image/jpeg,image/png,image/webp" />
       </div>
       <div class="field">
-        <label>Secondary mask — sketch the region to graft</label>
+        <label>Paint the element you want from this photo</label>
         <div class="mask-pad disabled" id="mix-secondary-mask-pad">
           <div class="mask-pad-canvas-wrap">
             <img class="mask-pad-photo" alt="" />
@@ -1441,11 +1449,11 @@
       return;
     }
     if (!mixPrimaryMaskPad.hasPhoto() || mixPrimaryMaskPad.coveragePct() <= 0) {
-      showCallError(errorEl, new Error("Sketch the primary mask — the region to receive the graft."));
+      showCallError(errorEl, new Error("Paint the element you want from the first photo."));
       return;
     }
     if (!mixSecondaryMaskPad.hasPhoto() || mixSecondaryMaskPad.coveragePct() <= 0) {
-      showCallError(errorEl, new Error("Sketch the secondary mask — the region to graft from."));
+      showCallError(errorEl, new Error("Paint the element you want from the second photo."));
       return;
     }
 
