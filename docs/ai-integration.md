@@ -351,6 +351,32 @@ calibration work at all; the new prompt's scoring anchors are deliberately
 top-heavy so `0.92` still reads as "the judge is confident this is the same
 piece" without the threshold itself changing.
 
+**The judge ran on the image-generation model until 2026-08-30, and had no
+retry.** Two separate defects behind the same visible symptom — a good
+background output sitting in the review queue:
+
+- `QA_MODEL_ID` had existed since Phase 9 and this table has always named it
+  as the judge's pinning source, but **nothing ever read it**. Both scoring
+  paths passed `config.global.model_version` straight to `GeminiQaProvider`,
+  so the judge ran on whatever image-*generation* model the config pinned —
+  live, `gemini-3.1-flash-image`, asked to emit a JSON verdict. Wrong tool
+  for a text judgement, and image-generation is the most demand-constrained
+  capacity class Gemini serves. `qa_service._resolve_judge_model` now reads
+  `QA_MODEL_ID`, falling back to the config model when unset, so the knob
+  works without changing behaviour on deploy.
+- The judge call had **no retry at all**, while the generation call it gates
+  has had one since Phase 6 (`generation_service.MAX_ATTEMPTS`). A single
+  transient `503 UNAVAILABLE ... currently experiencing high demand` flagged
+  a sub-job outright with `qa_score: NULL` — job `d59aa8e9` (2026-08-30).
+  That silently contradicted `docs/business-rules.md` §4, which has always
+  listed "internal backoff, 3 attempts" for every transient class.
+  `qa_service._score_with_retries` now applies `QA_MAX_ATTEMPTS` (3) with
+  linear `QA_RETRY_BACKOFF_SECONDS` backoff to the retryable classes only.
+  Fail-open-to-a-human remains the outcome once attempts are exhausted —
+  it is now the last resort rather than the first response to a blip.
+  Retrying is safe and cheap here specifically because a QA call is
+  read-only and, per this section, **never billed**.
+
 **The judge's `reasoning` is now persisted.** Both prompts have asked for it
 since Phase 9 and `_parse_response` discarded it, so "why was this flagged?"
 could only be answered by re-downloading both images and re-running the judge
@@ -370,12 +396,20 @@ a **separate, independently-tunable** `config.global.background_qa_similarity_th
 uncalibrated, same gap.
 
 Below threshold → `QA_REVIEW` and the human queue (`qa_status: FLAGGED`).
-Above → `COMPLETED` (`qa_status: PASSED`). A QA provider failure (timeout,
-malformed response) is treated the same as below-threshold — `QA_REVIEW`
-+ `FLAGGED`, `qa_score: NULL` — never auto-`COMPLETED` and never
-auto-`REJECTED`. Fail open to a human, never to an unscored pass — see
-`phases/phase-9-qa-gate.md`'s reality-check section; this exact case wasn't
-specified anywhere before this phase. Both `score_similarity` and
+Above → `COMPLETED` (`qa_status: PASSED`).
+
+**A QA provider failure no longer flags (changed 2026-08-30, decided directly
+with the user — this reverses Phase 9's original rule).** Phase 9 treated a
+provider failure the same as below-threshold — `QA_REVIEW` + `FLAGGED`,
+`qa_score: NULL`, "fail open to a human, never to an unscored pass". That
+filled the queue with good outputs nobody had rejected. Now, after
+`QA_MAX_ATTEMPTS` is exhausted, the sub-job **completes** with
+`qa_status: NOT_APPLICABLE` (never `PASSED` — that would claim a judgement
+that never happened) and `qa_score: NULL`, and the event records
+`outcome: "provider_error_passed"`. A real verdict below threshold still
+flags. The accepted risk — a drifted output shipping unchecked during a
+judge outage — and the `QA_PASS_ON_PROVIDER_ERROR=false` escape hatch are
+both spelled out in `docs/business-rules.md` §7. Both `score_similarity` and
 `score_background` (Phase 15) share this exact branching logic via a
 private `qa_service._score_and_apply` helper — only how threshold/
 reference images are resolved differs between them.
@@ -411,7 +445,7 @@ usage data shows this matters.
 | Model | Pinned where | Changed how |
 | :--- | :--- | :--- |
 | Gemini image model | `config.global.model_version` (Sheets → config version) | New config version, deliberate |
-| QA embedding/judge model | `QA_MODEL_ID` env var | Deploy, deliberate |
+| QA embedding/judge model | `QA_MODEL_ID` env var, falling back to `config.global.model_version` when unset | Deploy, deliberate |
 
 Never call a floating alias. A silent upstream model update shifts the visual
 style of the entire catalog overnight, and without a recorded version you

@@ -90,7 +90,10 @@ useful in production.
 | `CELERY_RESULT_BACKEND` | Same — Upstash `rediss://` URL, same TLS note as the broker |
 | `REDIS_SOCKET_TIMEOUT_SECONDS` | Default `5` is fine — bounds a silently stalled Redis connection so it can't hang a worker forever (see `app/core/redis_client.py`) |
 | `IO_QUEUE_CONCURRENCY` | Default `20` is fine to start |
-| `QA_MODEL_ID` | Default empty is fine — not read by any code path yet (unused since Phase 9 decided the QA judge is Gemini, not a separate embedding model) |
+| `QA_MODEL_ID` | **Now read** (2026-08-30, `qa_service._resolve_judge_model`) — it had been dead config since Phase 9 despite `docs/ai-integration.md`'s pinning table always naming it. Empty falls back to the config version's `model_version`, which is an image *generation* model; set a text-capable model to stop judge-call 503s at the source |
+| `QA_MAX_ATTEMPTS` | Default `3`. Bounded retry around the judge call, mirroring the generation call's own. QA calls are never billed |
+| `QA_RETRY_BACKOFF_SECONDS` | Default `0.5`, linear |
+| `QA_PASS_ON_PROVIDER_ERROR` | Default `true` — an output the judge never evaluated COMPLETES (`qa_status: NOT_APPLICABLE`) instead of entering the review queue. `false` restores Phase 9's fail-closed behaviour. A real verdict below threshold flags either way. See `docs/business-rules.md` §7 for the accepted risk |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | (has a default, but Sheets sync needs a real value — see roadmap open decision #2, still open) |
 | `CONFIG_SHEET_ID` | Same caveat |
 | `CONFIG_SYNC_CRON` | Default is fine |
