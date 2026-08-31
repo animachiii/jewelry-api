@@ -38,6 +38,33 @@ class Settings(BaseSettings):
     # storage_service.py's own module docstring.
     STORAGE_MAX_ATTEMPTS: int = 3
     STORAGE_RETRY_BACKOFF_SECONDS: float = 0.5
+    # 2026-08-30 -- the QA judge call gets the same bounded in-process retry
+    # the generation call has had since Phase 6 (generation_service's
+    # MAX_ATTEMPTS/_RETRYABLE_CLASSES). It never did: one transient Gemini
+    # 503 flagged a sub-job for human review outright, with qa_score NULL.
+    # Found on live job d59aa8e9, whose judge call got "This model is
+    # currently experiencing high demand" and was flagged on the spot. QA
+    # calls are never billed (docs/ai-integration.md Call Site 2), so a
+    # retry here costs nothing but latency. See qa_service._score_and_apply.
+    QA_MAX_ATTEMPTS: int = 3
+    QA_RETRY_BACKOFF_SECONDS: float = 0.5
+    # 2026-08-30, decided directly with the user: when the judge never
+    # rendered a verdict at all (every attempt above exhausted on a
+    # transient provider failure), complete the sub-job instead of putting
+    # it in the human review queue. An unevaluated output is not a failed
+    # one, and a judge outage was otherwise filling the queue with good
+    # images nobody had actually rejected.
+    #
+    # This REVERSES Phase 9's "fail open to a human, never to an unscored
+    # pass" and relaxes CLAUDE.md Hard Rule 6 -- see docs/business-rules.md
+    # §7's own note. The accepted risk is explicit: while the judge is
+    # unreachable, a genuinely drifted output ships unchecked, because
+    # nothing distinguishes it from a good one without the judge. Set this
+    # false to restore the fail-closed behaviour without a code change.
+    #
+    # A real judge verdict below threshold still flags, always -- this
+    # setting only governs the "no verdict exists" case.
+    QA_PASS_ON_PROVIDER_ERROR: bool = True
     # Phase 4 — Celery beat schedule for app.workers.retention.expire_assets.
     RETENTION_SWEEP_CRON: str = "0 3 * * *"
     # Phase 16 Step 2 — Celery beat schedule for

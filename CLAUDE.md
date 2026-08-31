@@ -419,6 +419,17 @@ ui/
    every background-operation output (Phase 15) — unlike real-photo angles, a
    background operation has no unchecked path at all; success always enters
    `QA_REVIEW` first.
+   **Amended 2026-08-30, decided directly with the user:** one exception, and only
+   one — when the judge never rendered a verdict at all (every
+   `QA_MAX_ATTEMPTS` exhausted on a transient provider failure, or a
+   deterministic provider failure), the sub-job completes with
+   `qa_status: NOT_APPLICABLE` and `qa_score: NULL` rather than entering the human
+   queue. An unevaluated output is not a rejected one, and a judge outage was
+   filling the review queue with good images nobody had actually looked at. **A
+   real judge verdict below threshold still flags, always.** The accepted risk is
+   explicit: while the judge is unreachable a genuinely drifted output ships
+   unchecked. `QA_PASS_ON_PROVIDER_ERROR=false` restores the original rule without
+   a code change. See `docs/business-rules.md` §7.
 7. **Never accept a `/generate` request without checking the `Idempotency-Key`.**
    Duplicate submissions bill the client twice.
 8. **Never fail a job because Google Sheets was unreachable.** Fall back to the last

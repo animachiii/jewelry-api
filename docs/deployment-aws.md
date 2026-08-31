@@ -69,7 +69,10 @@ Runner doesn't exist to verify against).
 | `REDIS_SOCKET_TIMEOUT_SECONDS` | No | Default `5` fine |
 | `IO_QUEUE_CONCURRENCY` | No | **Not read by `render_start.sh`'s `--pool=solo` invocation** — same "declared but inert on this path" caveat `render.yaml` already carries (see `app/workers/celery_app.py`'s Phase 16 comment on why `task_time_limit`/`task_soft_time_limit` are also inert under solo). App Runner's larger instance size makes reintroducing prefork a reasonable follow-up, but that's a deliberate decision for whoever owns capacity tuning next, not a default to flip silently in this phase |
 | `WORKER_TASK_TIMEOUT_SECONDS` | No | New in Phase 16 — default `180` fine. This is what actually bounds a hung task now, via `asyncio.wait_for` — carries forward unchanged regardless of platform, since it's an application-level mechanism, not a Celery-pool one |
-| `QA_MODEL_ID` | No | Unused — no code path reads it yet, same note `docs/deployment.md` already carries |
+| `QA_MODEL_ID` | No | **Now read** (2026-08-30) — empty falls back to the config's image-generation `model_version`; set a text-capable model to stop judge-call 503s. See `docs/deployment.md` |
+| `QA_MAX_ATTEMPTS` | No | Default `3` — bounded retry around the judge call |
+| `QA_RETRY_BACKOFF_SECONDS` | No | Default `0.5`, linear |
+| `QA_PASS_ON_PROVIDER_ERROR` | No | Default `true` — unevaluated outputs complete rather than flag; see `docs/business-rules.md` §7 |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | **Yes** | Still needed for Sheets sync — roadmap open decision #2, still open |
 | `CONFIG_SHEET_ID` | No | Not secret, but environment-specific |
 | `CONFIG_SYNC_CRON` | No | Confirm the `0 * * * *` override that fixed the 2026-08-12 beat-schedule/OOM collision (documented in `render.yaml`) carries forward here too, rather than reverting to the `*/15 * * * *` code default |

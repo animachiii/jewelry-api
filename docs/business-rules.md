@@ -111,6 +111,14 @@ what the ERP shows.
 | `QA_REJECTED` | Similarity gate failed, or human rejected | No | No |
 | `INTERNAL` | Unhandled backend exception | No | Yes |
 
+**The QA judge call gets the same bounded backoff as the generation call**
+(`qa_service._score_with_retries`, `QA_MAX_ATTEMPTS`) — true only since
+2026-08-30. Before that the judge had no retry at all, so one transient
+provider 503 flagged an otherwise-good output for human review with
+`qa_score: NULL`; the table above always implied otherwise. A QA call is
+read-only and never billed (§10 has never described QA scoring as billed),
+so an extra attempt costs only latency.
+
 **"Fail-fast" applies to deterministic classes only.** Internal backoff on transient
 classes happens inside the sub-task and is invisible to the client — the sub-job does not
 enter `FAILED` until the backoff budget is exhausted. Retrying a network blip three times
@@ -173,6 +181,34 @@ Applies to `SYNTHETIC` sub-jobs only. Real-photo angles have no QA gate — see
 | `qa_score < threshold` | `qa_status: FLAGGED`, sub-job `QA_REVIEW`, enters human queue |
 | Human approves | `qa_status: PASSED`, sub-job `COMPLETED` |
 | Human rejects | `qa_status: FAILED`, sub-job `REJECTED`, `failure_class: QA_REJECTED` |
+| **Judge never rendered a verdict** | `qa_status: NOT_APPLICABLE`, `qa_score: NULL`, sub-job `COMPLETED` — see below |
+
+**The no-verdict row reverses Phase 9's original rule, deliberately (2026-08-30,
+decided directly with the user).** Phase 9 specified "fail open to a human, never
+to an unscored pass": a QA provider failure flagged the sub-job for review with
+`qa_score: NULL`. In practice that filled the queue with good outputs nobody had
+rejected — live job `d59aa8e9` was a clean, correctly isolated product photo whose
+judge call simply got `503 UNAVAILABLE ... currently experiencing high demand`.
+An unevaluated output is not a rejected one.
+
+Now, once `QA_MAX_ATTEMPTS` (§4) is exhausted, the sub-job **completes**.
+`qa_status` is `NOT_APPLICABLE`, never `PASSED` — `PASSED` would claim a
+judgement that never happened — and `qa_score` stays `NULL`, so every
+auto-completed output stays findable (`qa_status = 'NOT_APPLICABLE' AND
+status = 'COMPLETED'` on a background operation means exactly this case). The
+`QA_SCORED` event records `outcome: "provider_error_passed"`, deliberately
+distinct from the historical `"provider_error"` value, which always meant
+"flagged for a human" — reusing it would silently rewrite what older rows meant.
+
+**The accepted risk, stated plainly rather than buried:** while the judge is
+unreachable, a genuinely drifted or partly-eaten output ships unchecked, because
+without the judge nothing distinguishes it from a good one. This is the one
+unchecked path a background operation now has. `QA_PASS_ON_PROVIDER_ERROR=false`
+restores the fail-closed behaviour without a code change.
+
+**A real judge verdict below threshold still flags.** The setting governs only
+the "no verdict exists" case; if the gate auto-passed real rejections too it
+would mean nothing at all.
 
 Threshold comes from `config.global.qa_similarity_threshold`. Default `0.82`, to be
 calibrated against real client pieces in Phase 9 — treat the default as a placeholder.

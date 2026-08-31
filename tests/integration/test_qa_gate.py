@@ -159,20 +159,28 @@ async def test_score_below_threshold_stays_flagged_parent_processing(
     assert job.status.value == "PROCESSING"
 
 
-async def test_qa_provider_failure_flags_for_review_not_completed(
+async def test_qa_provider_failure_completes_by_default_since_2026_08_30(
     client: AsyncClient,
     api_client_key: str,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """_score_and_apply's provider-error branch is shared by
+    score_synthetic_angle and score_background_operation, so the
+    2026-08-30 QA_PASS_ON_PROVIDER_ERROR policy applies here too -- an
+    unevaluated synthetic angle now completes rather than entering the
+    human queue. See tests/integration/test_background_operations.py's
+    test_unevaluated_output_completes_instead_of_flagging for the full
+    rationale.
+    """
     _fake_gemini_generation_success(monkeypatch)
     _fake_qa_score(monkeypatch, "malformed.json")
 
     job_id = await _create_synthetic_job(client, api_client_key, "qa-provider-error")
 
     sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
-    assert sub_job.status.value == "QA_REVIEW"
-    assert sub_job.qa_status.value == "FLAGGED"
+    assert sub_job.status.value == "COMPLETED"
+    assert sub_job.qa_status.value == "NOT_APPLICABLE"
     assert sub_job.qa_score is None
 
 
