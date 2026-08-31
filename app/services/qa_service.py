@@ -3,11 +3,13 @@ path. See docs/business-rules.md §7, docs/ai-integration.md Call Site 2,
 and phases/phase-9-qa-gate.md.
 """
 
+import asyncio
 import uuid
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.errors import AppError, ErrorCode, ProviderError
 from app.db.models.enums import FailureClass, QAStatus, SubJobStatus
 from app.db.models.jobs import Job, SubJob
@@ -20,6 +22,7 @@ from app.providers.gemini_qa import (
     SUBJECT_PRESERVATION_JUDGE_PROMPT,
     GeminiQaProvider,
 )
+from app.providers.qa_base import QaResult
 from app.services import storage_service
 from app.services.generation_service import fetch_reference_images, recompute_parent_status
 from app.services.job_service import find_category
@@ -40,6 +43,20 @@ class SubJobNotFoundInternalError(Exception):
     generation_service.SubJobNotFoundError. Not an AppError: a Celery task
     has no HTTP response to shape.
     """
+
+
+# Deliberately a second constant rather than an import of
+# generation_service._RETRYABLE_CLASSES, following the same
+# "two independent constants that happen to share a value" precedent
+# job_service.MAX_RETRY_ATTEMPTS and generation_service.MAX_ATTEMPTS already
+# set (see CLAUDE.md's Phase 8 note). The generation call and the judge call
+# are separate provider calls with separate budgets; coupling them would
+# make tuning one silently retune the other.
+_RETRYABLE_QA_CLASSES = {
+    FailureClass.RATE_LIMITED,
+    FailureClass.TRANSIENT_PROVIDER,
+    FailureClass.TRANSIENT_NETWORK,
+}
 
 
 async def score_synthetic_angle(session: AsyncSession, sub_job_id: uuid.UUID) -> SubJob:
@@ -189,25 +206,53 @@ async def _score_and_apply(
     deliberate background edit), and sharing one prompt is what made
     correct background outputs flag — see app/providers/gemini_qa.py.
     """
-    provider = GeminiQaProvider(model_version=model_version)
+    provider = GeminiQaProvider(model_version=_resolve_judge_model(model_version))
 
     try:
-        result = provider.score(output_bytes, reference_images, prompt=judge_prompt)
+        result = await _score_with_retries(provider, output_bytes, reference_images, judge_prompt)
     except ProviderError as exc:
-        _flag_for_review(sub_job, score=None)
+        # The judge never rendered a verdict -- every attempt exhausted, or
+        # the failure was deterministic. This is "unevaluated", NOT
+        # "rejected": no opinion about the image exists either way.
+        #
+        # `qa_status` is NOT_APPLICABLE rather than PASSED even on the
+        # completing path, deliberately -- PASSED would claim a judgement
+        # that never happened, and `qa_score` stays NULL. Together they
+        # make every auto-completed output findable after the fact
+        # (`qa_status = 'NOT_APPLICABLE' AND status = 'COMPLETED'` on a
+        # background operation means exactly this case), which matters
+        # precisely because nothing checked these.
+        # Mutate first, then record -- _record_qa_scored_event reads
+        # sub_job.status at call time, so recording ahead of the write
+        # would stamp the event with the pre-transition status.
+        if settings.QA_PASS_ON_PROVIDER_ERROR:
+            sub_job.qa_status = QAStatus.NOT_APPLICABLE
+            sub_job.status = SubJobStatus.COMPLETED
+        else:
+            _flag_for_review(sub_job, score=None)
+
         _record_qa_scored_event(
             session,
             job,
             sub_job,
             score=None,
             threshold=threshold,
-            outcome="provider_error",
+            # A distinct outcome string, not the historical
+            # "provider_error": rows written before 2026-08-30 all mean
+            # "flagged for a human", and reusing the value would silently
+            # rewrite what they meant.
+            outcome=(
+                "provider_error_passed" if settings.QA_PASS_ON_PROVIDER_ERROR else "provider_error"
+            ),
             # The failure class and message are the whole diagnostic
-            # content of a provider_error flag; without them a NULL
+            # content of an unscored outcome; without them a NULL
             # qa_score is indistinguishable from any other NULL one.
             reasoning=f"{exc.failure_class}: {exc.message}",
         )
         _log_provider_error(exc)
+
+        if settings.QA_PASS_ON_PROVIDER_ERROR:
+            await recompute_parent_status(session, job)
         return sub_job
 
     if result.score >= threshold:
@@ -237,6 +282,92 @@ async def _score_and_apply(
         )
 
     return sub_job
+
+
+def _resolve_judge_model(config_model_version: str) -> str:
+    """The model the *judge* runs on, which is not necessarily the model
+    that generated the image.
+
+    `settings.QA_MODEL_ID` has existed since Phase 9 and
+    docs/ai-integration.md's model-pinning table has always named it as the
+    judge's pinning source -- but nothing ever read it. Both scoring paths
+    passed `config.global.model_version` straight through, so the judge ran
+    on whatever image-*generation* model the config pinned.
+
+    Live as of 2026-08-30 that is `gemini-3.1-flash-image`: an image
+    generation model, asked to return a JSON verdict. Two consequences, one
+    of them the reason this function exists. It is the wrong tool for a
+    text judgement, and image-generation capacity is the most
+    demand-constrained class Gemini serves -- job d59aa8e9's judge call came
+    back `503 UNAVAILABLE ... currently experiencing high demand`, which
+    fail-open-flagged a perfectly good output for human review.
+
+    Falls back to the config's model_version when QA_MODEL_ID is unset, so
+    this is a no-op until someone deliberately sets it -- no behaviour
+    change on deploy, and the knob the docs already promised now works.
+    """
+    return settings.QA_MODEL_ID or config_model_version
+
+
+async def _score_with_retries(
+    provider: GeminiQaProvider,
+    output_bytes: bytes,
+    reference_images: list[bytes],
+    judge_prompt: str,
+) -> QaResult:
+    """Bounded in-process retry around the judge call, for transient
+    provider failures only.
+
+    Until 2026-08-30 this call had no retry at all, while the *generation*
+    call it gates has had one since Phase 6
+    (generation_service.MAX_ATTEMPTS / _RETRYABLE_CLASSES). That asymmetry
+    meant a single transient Gemini 503 -- "This model is currently
+    experiencing high demand", a condition Gemini's own message calls
+    temporary -- flagged the sub-job for human review outright with
+    `qa_score: NULL`, indistinguishable to an operator from a genuinely
+    unjudgeable output. Found on live job d59aa8e9 (2026-08-30). It also
+    silently contradicted docs/business-rules.md §4, which has always
+    listed "internal backoff, 3 attempts" for every transient class.
+
+    Retrying is safe and cheap here in a way it is not everywhere: the
+    judge call is read-only (it downloads bytes and returns a score, it
+    mutates nothing) and QA calls are never billed -- no `cost_events` row
+    is written for one, unlike a generation call (docs/ai-integration.md
+    Call Site 2). So the only cost of an extra attempt is latency.
+
+    Fail-open-to-a-human is still the final outcome once attempts are
+    exhausted, exactly as phases/phase-9-qa-gate.md requires -- this makes
+    that the last resort rather than the first response to a blip.
+    Deterministic classes (INTERNAL, SAFETY_REFUSAL, INVALID_INPUT) are
+    never retried: re-asking an identical question gets an identical
+    answer, so a retry would only delay the human handoff.
+    """
+    last_error: ProviderError | None = None
+    for attempt in range(1, settings.QA_MAX_ATTEMPTS + 1):
+        try:
+            return provider.score(output_bytes, reference_images, prompt=judge_prompt)
+        except ProviderError as exc:
+            last_error = exc
+            if exc.failure_class not in _RETRYABLE_QA_CLASSES:
+                raise
+            if attempt == settings.QA_MAX_ATTEMPTS:
+                raise
+            import structlog
+
+            # docs/conventions.md's logging table names "transient retry"
+            # as a warning-level example.
+            structlog.get_logger().warning(
+                "qa_transient_retry",
+                attempt=attempt,
+                max_attempts=settings.QA_MAX_ATTEMPTS,
+                failure_class=exc.failure_class,
+                message=exc.message,
+            )
+            await asyncio.sleep(settings.QA_RETRY_BACKOFF_SECONDS * attempt)
+    # Unreachable: the loop always returns or raises on the final attempt.
+    # Satisfies mypy --strict, which cannot see that.
+    assert last_error is not None
+    raise last_error
 
 
 def _flag_for_review(sub_job: SubJob, score: float | None) -> None:

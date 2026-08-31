@@ -959,12 +959,18 @@ async def test_below_threshold_qa_score_lands_in_qa_review_and_review_queue(
     assert str(sub_job.id) in {item["sub_job_id"] for item in queue_resp.json()["items"]}
 
 
-async def test_qa_provider_failure_flags_for_review_never_completed(
+async def test_qa_provider_failure_completes_by_default_since_2026_08_30(
     client: AsyncClient,
     api_client_key: str,
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Superseded by the QA_PASS_ON_PROVIDER_ERROR policy change -- see
+    test_unevaluated_output_completes_instead_of_flagging for the full
+    rationale and test_fail_closed_is_restorable_without_a_code_change for
+    this test's own pre-2026-08-30 behaviour, still reachable via the
+    setting.
+    """
     _fake_qa_score(monkeypatch, "malformed.json")
 
     storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
@@ -976,8 +982,8 @@ async def test_qa_provider_failure_flags_for_review_never_completed(
     job_id = uuid.UUID(create_resp.json()["job_id"])
 
     sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
-    assert sub_job.status == SubJobStatus.QA_REVIEW
-    assert sub_job.qa_status == QAStatus.FLAGGED
+    assert sub_job.status == SubJobStatus.COMPLETED
+    assert sub_job.qa_status == QAStatus.NOT_APPLICABLE
     assert sub_job.qa_score is None
 
 
@@ -1085,7 +1091,17 @@ async def test_retry_qa_only_on_provider_error_flag_also_works(
 ) -> None:
     """qa_score: NULL (the judge call itself failed, not a low score) must
     be just as retryable — this is the exact shape of the real 2026-08-13
-    incident that motivated this feature."""
+    incident that motivated this feature.
+
+    Only reachable under QA_PASS_ON_PROVIDER_ERROR=false: since 2026-08-30
+    a provider failure completes the sub-job by default instead of flagging
+    it (see test_unevaluated_output_completes_instead_of_flagging), so
+    there is nothing left in QA_REVIEW for this retry route to act on
+    unless the fail-closed setting is restored.
+    """
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "QA_PASS_ON_PROVIDER_ERROR", False)
     _fake_qa_score(monkeypatch, "malformed.json")
 
     storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
@@ -1273,9 +1289,15 @@ async def test_provider_error_records_the_failure_class_as_reasoning(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A NULL qa_score is the least self-explanatory outcome of the three —
-    it is what 17 stale review-queue rows looked like after the 2026-08-21
-    parse bug. The event now says which failure class caused it.
+    """A NULL qa_score is the least self-explanatory outcome — it is what 17
+    stale review-queue rows looked like after the 2026-08-21 parse bug. The
+    event says which failure class caused it, whichever disposition the
+    2026-08-30 QA_PASS_ON_PROVIDER_ERROR policy then applies.
+
+    The `outcome` string is asserted against the setting rather than
+    hardcoded, because that value is the *only* thing distinguishing a
+    pre-2026-08-30 "flagged for a human" row from a post-change
+    "auto-completed, never judged" one in the audit log.
     """
     from app.db.models.job_events import JobEvent
 
@@ -1295,7 +1317,12 @@ async def test_provider_error_records_the_failure_class_as_reasoning(
         )
     ).scalar_one()
 
-    assert event.detail["outcome"] == "provider_error"
+    from app.config import settings as app_settings
+
+    expected = (
+        "provider_error_passed" if app_settings.QA_PASS_ON_PROVIDER_ERROR else "provider_error"
+    )
+    assert event.detail["outcome"] == expected
     assert "score" not in event.detail
     assert event.detail["reasoning"].startswith("INTERNAL: ")
 
@@ -1462,3 +1489,161 @@ async def test_rescore_route_requires_ops_scope(client: AsyncClient, api_client_
         headers={"X-API-Key": api_client_key},
     )
     assert resp.status_code == 403
+
+
+async def test_transient_qa_failure_is_retried_before_flagging(
+    client: AsyncClient,
+    api_client_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live job d59aa8e9 (2026-08-30) hit a Gemini 503 -- "This model is
+    currently experiencing high demand" -- on its judge call and was flagged
+    for human review on the spot, qa_score NULL, while the *generation* call
+    that same job made would have retried the identical class three times.
+    A transient blip must not cost a human review cycle.
+    """
+    import app.providers.gemini_qa as qa_module
+    from app.core.errors import ProviderError
+    from app.db.models.enums import FailureClass
+
+    # Patched at _call_api, not score() -- score() must return a QaResult on
+    # success, and score() itself is exactly the thing under test (it owns
+    # the retry loop via _score_with_retries).
+    calls = {"n": 0}
+    fixture = _load(_QA_FIXTURES, "high_similarity.json")
+
+    def _flaky(self: object, *a: object, **k: object) -> dict:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ProviderError(
+                "503 UNAVAILABLE. This model is currently experiencing high demand.",
+                failure_class=FailureClass.TRANSIENT_PROVIDER,
+            )
+        return fixture
+
+    monkeypatch.setattr(qa_module.GeminiQaProvider, "_call_api", _flaky)
+
+    storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
+    create_resp = await client.post(
+        "/api/v2/background/remove",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "qa-transient-1"},
+        json={"storage_path": storage_path},
+    )
+    job_id = uuid.UUID(create_resp.json()["job_id"])
+
+    sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
+
+    assert calls["n"] == 2, "the judge call should have been retried after the 503"
+    assert sub_job.qa_status == QAStatus.PASSED
+    assert sub_job.status == SubJobStatus.COMPLETED
+    assert sub_job.qa_score is not None
+
+
+async def test_unevaluated_output_completes_instead_of_flagging(
+    client: AsyncClient,
+    api_client_key: str,
+    ops_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-08-30 policy change, decided directly with the user: when the
+    judge never rendered a verdict (live job d59aa8e9 -- Gemini 503,
+    "currently experiencing high demand"), the output is *unevaluated*, not
+    rejected, and no longer lands in the human review queue.
+
+    Reverses Phase 9's fail-open-to-a-human rule for this one case; see
+    settings.QA_PASS_ON_PROVIDER_ERROR and docs/business-rules.md §7.
+    """
+    from app.db.models.job_events import JobEvent
+
+    _fake_qa_score(monkeypatch, "malformed.json")  # -> ProviderError(INTERNAL)
+
+    storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
+    create_resp = await client.post(
+        "/api/v2/background/remove",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "qa-unevaluated-pass-1"},
+        json={"storage_path": storage_path},
+    )
+    job_id = uuid.UUID(create_resp.json()["job_id"])
+
+    sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
+    assert sub_job.status == SubJobStatus.COMPLETED
+    # NOT_APPLICABLE, never PASSED -- PASSED would claim a judgement that
+    # never happened. qa_score stays NULL for the same reason.
+    assert sub_job.qa_status == QAStatus.NOT_APPLICABLE
+    assert sub_job.qa_score is None
+
+    job = (await db_session.execute(select(Job).where(Job.id == job_id))).scalar_one()
+    assert job.status == JobStatus.COMPLETED
+
+    # Auditable after the fact, and distinct from the historical
+    # "provider_error" rows that meant "flagged for a human".
+    event = (
+        await db_session.execute(
+            select(JobEvent).where(JobEvent.job_id == job_id, JobEvent.event_type == "QA_SCORED")
+        )
+    ).scalar_one()
+    assert event.detail["outcome"] == "provider_error_passed"
+    assert event.detail["reasoning"].startswith("INTERNAL: ")
+    assert event.to_status == SubJobStatus.COMPLETED.value
+
+    queue_resp = await client.get("/api/v2/qa/review-queue", headers={"X-API-Key": ops_key})
+    assert str(sub_job.id) not in {item["sub_job_id"] for item in queue_resp.json()["items"]}
+
+
+async def test_a_real_low_score_still_flags_for_review(
+    client: AsyncClient,
+    api_client_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The boundary of the policy change above. QA_PASS_ON_PROVIDER_ERROR
+    governs only the "no verdict exists" case; a judge that actually looked
+    and scored below threshold is a real rejection and must still reach a
+    human, or the gate would mean nothing.
+    """
+    _fake_qa_score(monkeypatch, "low_similarity.json")  # real score, 0.41
+
+    storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
+    create_resp = await client.post(
+        "/api/v2/background/remove",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "qa-low-still-flags-1"},
+        json={"storage_path": storage_path},
+    )
+    job_id = uuid.UUID(create_resp.json()["job_id"])
+
+    sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
+    assert sub_job.status == SubJobStatus.QA_REVIEW
+    assert sub_job.qa_status == QAStatus.FLAGGED
+    assert float(sub_job.qa_score) == pytest.approx(0.41)
+
+
+async def test_fail_closed_is_restorable_without_a_code_change(
+    client: AsyncClient,
+    api_client_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The accepted risk of the new default is that a judge outage ships
+    everything unchecked. QA_PASS_ON_PROVIDER_ERROR=false restores Phase 9's
+    original fail-open-to-a-human behaviour exactly, so the reversal is one
+    env var, not a redeploy of different code.
+    """
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "QA_PASS_ON_PROVIDER_ERROR", False)
+    _fake_qa_score(monkeypatch, "malformed.json")
+
+    storage_path = await _presign_and_upload_operation(client, api_client_key, "BACKGROUND_REMOVAL")
+    create_resp = await client.post(
+        "/api/v2/background/remove",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "qa-fail-closed-1"},
+        json={"storage_path": storage_path},
+    )
+    job_id = uuid.UUID(create_resp.json()["job_id"])
+
+    sub_job = (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalar_one()
+    assert sub_job.status == SubJobStatus.QA_REVIEW
+    assert sub_job.qa_status == QAStatus.FLAGGED
+    assert sub_job.qa_score is None
