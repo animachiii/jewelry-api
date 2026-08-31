@@ -34,6 +34,23 @@ Status values: `Not started` · `In progress` · `Complete`
 
 | 20 | MIX (Two-Piece Masked Merge) | Third and, per the roadmap's own "Deferred to v3" table, last currently-named v3 feature. Two uploaded source photos + two masks in, one merged photo out — extends RECOLOR's mask-validation and generate-then-composite machinery across two independent source/mask pairs, plus a deterministic rough-composite (crop/scale/paste region B into region A's bounding box, no provider call) before a refinement call scoped only to the visible seam. | Sequential after 19 | No | `phase-20-mix.md` | **Complete** — verified against testcontainers Postgres + real local Redis + real Supabase Storage, fixture-driven Gemini (no real `GEMINI_API_KEY` exists in this environment, same gap every prior phase hit). Schema (`0017`: `MIX` enum value, `sub_jobs.secondary_input_asset_id`/`secondary_mask_asset_id` — deliberately adds **no** new `asset_kind_t` value, reusing `INPUT`/`MASK`, and does not touch `ux_sub_jobs_job_single`, same posture `0015` established for RECOLOR), config (`0018`, merges `MIX` into the existing `operations` block — no new top-level `global` key, the smallest config addition of any v3 phase), four-slot presign (`secondary_upload`/`secondary_mask_upload` alongside RECOLOR's existing `operation_upload`/`mask_upload`), route, worker, and status all built and tested; ships straight to `COMPLETED` with no QA gate, a fourth distinct reason from MATCH's/RECOLOR's (`docs/business-rules.md` §7/§16). **The one genuinely new architectural pattern this phase introduces:** a deterministic rough-composite (Pillow-only crop/scale/paste, no provider call) runs *before* the first provider call of any operation in this codebase, followed by a seam-band-scoped refinement call — proven correct with two dedicated tests, `test_build_rough_composite_places_cropped_region_b_at_mask_a_bbox` (placement, pure logic) and `test_mix_output_is_byte_identical_to_rough_composite_outside_seam_band` (off-seam pixel identity, full pipeline), not just an integration test asserting `COMPLETED`. **One real, non-obvious limitation found and documented, not silently left latent:** for a masked region narrower than roughly `2 * (MIX_SEAM_BAND_PX + MASK_FEATHER_PX)` in either dimension, the post-call Gaussian feather can bleed through the graft's interior from both sides of the seam-band ring at once — found while writing this phase's own central pixel-identity test (which initially used too small a mask box and failed for exactly this reason), documented in `app/services/mix_service.py::_seam_band_mask`'s docstring, `docs/business-rules.md` §16, and `docs/ai-integration.md`'s Mode F rather than silently worked around by picking a larger test fixture with no note. **Not done, and can't be from this environment:** the non-aspect-preserving scale-to-fit and the seam-only refinement strategy are both entirely unvalidated against a real Gemini call, same category of gap as RECOLOR's own unvalidated magenta-overlay approach. 386 pre-existing tests plus this phase's own new tests (9 unit + 11 integration) all pass; `mypy --strict` and `ruff` clean. |
 
+**Post-Phase-20 correction, 2026-08-31 — MIX was rewritten generative.** The
+Phase 20 row above describes a deterministic rough-composite plus a seam-scoped
+refinement call, and calls that "the one genuinely new architectural pattern
+this phase introduces." That pattern is **gone**. Three consecutive live client
+jobs showed the graft only works when the two painted masks are similar shapes,
+which real client masks routinely are not; on `f9768456` it covered 24.4% of
+what the client painted and the delivered image read as a smudge. MIX now sends
+both photos to Gemini as colour-marked reference images and returns the
+generated result directly. The row's two named tests
+(`test_build_rough_composite_places_cropped_region_b_at_mask_a_bbox`,
+`test_mix_output_is_byte_identical_to_rough_composite_outside_seam_band`) and
+the narrow-region feather limitation it documents are all deleted along with the
+code they covered. The row is left as written because it is an accurate record
+of what Phase 20 built; this note records what replaced it. See
+`docs/business-rules.md` §16 and `app/services/mix_service.py`'s module
+docstring.
+
 **Recommended order:** 0 → 1 → 2 → (3 ‖ 4) → 6 → 7 → 8 → (9 ‖ 10 ‖ 11) → 12 → 13 → 14 → 16 → (17 ‖ 18) → 19 → 20
 
 ---

@@ -158,9 +158,9 @@ Returns the parent `status` (`PENDING` | `PROCESSING` | `COMPLETED` | `PARTIAL_S
   `angles` minus `angle` itself; `retry_url` points at the job-level
   `/jobs/{job_id}/retry` instead. For `RECOLOR`, `image_url` is the **composited**
   image — everything outside the mask is byte-identical to the uploaded source, see
-  `docs/business-rules.md` §15. For `MIX`, `image_url` is likewise the composited
-  image — everything outside the seam band is byte-identical to the deterministic
-  rough-composite, see `docs/business-rules.md` §16.
+  `docs/business-rules.md` §15. For `MIX`, `image_url` is the model's raw output — a generated design concept
+  combining two marked elements, guaranteed identical to neither source; see
+  `docs/business-rules.md` §16.
 - `variants` — populated for `MATCH` jobs (1-4 elements, one per requested
   companion-piece variant), empty `[]` otherwise. Same per-item fields as `results`
   minus `preview_image_url` (a background-only, QA-preview addition — MATCH never
@@ -415,14 +415,23 @@ as the trivial single-sub-job case, same as background operations.
 
 ---
 
-## Two-Piece Masked Merge (Phase 20)
+## Two-Piece Combination (Phase 20; generative since 2026-08-31)
 
-`MIX` — two uploaded source photos + two uploaded masks in, one merged photo out,
-independent of the four-angle flow. See `phases/phase-20-mix.md` and
-`docs/ai-integration.md`'s Mode F. Reuses the existing job/sub-job state machine,
-`GET /status/{job_id}`, `POST /jobs/{job_id}/retry`, cost recording, and audit
-trail — no parallel pipeline, same posture as RECOLOR and Background Operations
-(MIX always has exactly one sub-job, not MATCH's 1-4).
+`MIX` — two uploaded source photos + two uploaded masks in, **one newly designed
+piece** out, independent of the four-angle flow. See `docs/ai-integration.md`'s
+Mode F. Reuses the existing job/sub-job state machine, `GET /status/{job_id}`,
+`POST /jobs/{job_id}/retry`, cost recording, and audit trail — no parallel
+pipeline, same posture as RECOLOR and Background Operations (MIX always has
+exactly one sub-job, not MATCH's 1-4).
+
+**Changed 2026-08-31 — read this before relying on any earlier description.**
+MIX used to graft the secondary photo's masked region into the primary photo's
+masked region and return the primary's frame with that graft blended in. It now
+sends both photos to Gemini with each masked region colour-marked and returns a
+**generated studio photograph of a single new piece** combining the two marked
+elements. The request and response *shapes* are unchanged — no client code
+breaks — but what the returned image depicts is different in kind. See
+`docs/business-rules.md` §16.
 
 ### `POST /api/v2/mix`
 **Auth required. `client` scope. `Idempotency-Key` header required.**
@@ -431,9 +440,12 @@ Request: `{ "primary_storage_path": "...", "primary_mask_storage_path": "...", "
 All four `storage_path`s come from `POST /uploads/presign`'s
 `{"operation": "MIX"}` response (`operation_upload`/`mask_upload`/
 `secondary_upload`/`secondary_mask_upload` — see Uploads, above).
-"Primary" is the photo whose frame the final output keeps; "secondary" is
-the photo the grafted content comes from — both are equally real uploaded
-photographs of physical pieces, unlike MATCH's style-reference source.
+"Primary" and "secondary" no longer mean "receives the graft" and "is grafted
+from" — since 2026-08-31 neither photo's frame is kept and nothing is grafted.
+They now name which marker colour each pair gets (primary = magenta,
+secondary = cyan) and the order the two reference images reach the model. Both
+are equally real uploaded photographs of physical pieces, unlike MATCH's
+style-reference source, and the design draws on both equally.
 
 Returns `202` with the same `JobAcceptedResponse` shape as `/background/*`/`/recolor` —
 `job_id`, `status: PENDING`, `poll_after_ms`, and a one-element `angles` array with
@@ -472,15 +484,24 @@ operations.
 
 ### Status and retry
 `GET /api/v2/status/{job_id}` — read `operation: "MIX"` first, then `results`
-instead of `angles`/`variants` (see that route's docs above). `image_url` is the
-**composited** output — everything outside the seam band is byte-identical to the
-deterministic rough-composite (not either original source photo directly — see
-`docs/business-rules.md` §16). **The MIX output image is capped at
-`WORKING_MAX_EDGE` (2048px on the long edge, 2026-08-27), so it will usually be
-smaller than the primary photo the client uploaded** — clients must not assume
-the output matches the input's dimensions. This is a memory constraint of the
-current deployment, not a property of the operation; see `docs/business-rules.md`
-§16. `POST /api/v2/jobs/{job_id}/retry` works unchanged:
+instead of `angles`/`variants` (see that route's docs above).
+
+`image_url` is **Gemini's raw output**: a generated design concept, not an edit
+of either uploaded photo. Nothing in it is guaranteed to match either source
+pixel-for-pixel, and the model may idealize details neither physical piece has
+— clients presenting a MIX result to an end customer should present it as a
+mockup, not as a photograph of goods in hand (`docs/business-rules.md` §16).
+Note that `results[].synthetic` is `false` for a MIX job despite this; that flag
+tracks whether a source photo was uploaded, which for MIX it was. A dedicated
+"generated concept" flag is an open item.
+
+**Output dimensions are whatever the model returns** and will usually differ
+from both uploads — clients must not assume otherwise. Before 2026-08-31 the
+output was capped at `WORKING_MAX_EDGE` (2048px on the long edge) because our
+own compositing canvas was; that canvas is gone, so the cap no longer applies to
+the output (it still bounds the images we send).
+
+`POST /api/v2/jobs/{job_id}/retry` works unchanged:
 a MIX job always has exactly one sub-job, so Phase 18's all-or-nothing
 generalization applies as the trivial single-sub-job case, same as RECOLOR and
 background operations.

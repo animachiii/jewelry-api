@@ -1,8 +1,12 @@
 """Phase 20 Steps 3-4 — POST /api/v2/mix, operation-aware presign for MIX
 (secondary_upload/secondary_mask_upload), two-independent-pair ingest
-validation, and the real dispatch/worker/status/retry machinery, including
-the rough-composite + seam-only generate-then-composite correctness this
-operation introduces.
+validation, and the real dispatch/worker/status/retry machinery.
+
+**Updated 2026-08-31:** MIX no longer builds a rough composite or composites
+the provider's output back onto one, so the off-seam pixel-identity test this
+module used to carry is gone -- see the section comment above
+`test_mix_sends_two_colour_marked_reference_images_in_documented_order` and
+`app/services/mix_service.py`'s module docstring.
 
 Same stack as tests/integration/test_api_recolor.py: testcontainers
 Postgres, real local Redis, real Supabase Storage (never mocked), fixture-
@@ -11,6 +15,7 @@ Under `task_always_eager` (also autouse), `POST /api/v2/mix` dispatches
 `mix.process` inline during the request.
 """
 
+import base64
 import io
 import json
 import uuid
@@ -43,7 +48,9 @@ from app.db.models.enums import (
 from app.db.models.jobs import Job, SubJob
 from app.db.session import get_db
 from app.main import app
+from app.providers.gemini import GeminiProvider
 from app.services import storage_service
+from app.services.mix_service import _HIGHLIGHT_PRIMARY, _HIGHLIGHT_SECONDARY
 from scripts.seed_dev import CATEGORY_PAYLOAD
 
 pytestmark = pytest.mark.integration
@@ -70,9 +77,13 @@ def _mix_payload() -> dict[str, Any]:
         **payload["global"]["operations"],
         "MIX": {
             "enabled": True,
+            # Shortened stand-in for migration 0020's real prompt — the point
+            # is that it names both marker colours, since that pairing is what
+            # test_mix_sends_two_colour_marked_reference_images_in_documented_order
+            # protects.
             "prompt": (
-                "Blend only the seam marked in solid magenta so the graft "
-                "looks like a single, naturally manufactured piece."
+                "Combine the magenta-marked element from the first image with "
+                "the cyan-marked element from the second into one new piece."
             ),
             "unit_cost_usd": 0.02,
         },
@@ -499,35 +510,47 @@ async def test_retry_job_dispatches_mix_process_for_failed_mix_job(
     assert job.status == JobStatus.COMPLETED
 
 
-# --- off-seam pixel identity (Checkpoint 4's central test) ---------------
+# --- what actually reaches Gemini (the generative rewrite's central test) ---
+#
+# Replaces test_mix_output_is_byte_identical_to_rough_composite_outside_seam_band,
+# deleted 2026-08-31. That test proved MIX's output matched a deterministic
+# rough composite outside a seam band; MIX no longer builds a rough composite,
+# and the output is the provider's raw response, so the guarantee it asserted
+# does not exist any more. See app/services/mix_service.py's module docstring.
+#
+# What is still mechanically checkable — and is what these two tests pin — is
+# the call itself: that both pieces reach the model, each marked in its own
+# colour and in the documented order, and that what comes back is stored
+# unmodified. Design quality needs a real Gemini call against real pieces and
+# is out of scope for CI (docs/ai-integration.md's testing rules).
 
 
-async def test_mix_output_is_byte_identical_to_rough_composite_outside_seam_band(
-    client: AsyncClient, api_client_key: str, db_session: AsyncSession
+async def test_mix_sends_two_colour_marked_reference_images_in_documented_order(
+    client: AsyncClient,
+    api_client_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The single most important test in this phase — see
-    phases/phase-20-mix.md Step 4/Checkpoint 4. Proves generate-then-
-    composite (scoped to the seam band) actually works: everywhere outside
-    the seam band, the stored OUTPUT asset's pixels must match the
-    deterministic rough-composite exactly, regardless of what the
-    (fixture-driven) provider returned.
+    """Migration 0020's prompt names magenta for the primary piece and cyan
+    for the secondary, and `mix_service.process` passes them in that order.
+    Nothing else enforces that pairing — swap the order or a colour and every
+    other test still passes while the prompt silently describes the wrong
+    image.
     """
-    # A larger canvas/mask than the module's default _SOURCE_SIZE — see
-    # mix_service._seam_band_mask's own "known limitation" docstring note:
-    # a mask region narrower than ~2*(MIX_SEAM_BAND_PX + MASK_FEATHER_PX)
-    # lets the post-call feather bleed through the graft's interior "hole"
-    # from both sides of the ring at once. The default settings (6, 3) need
-    # roughly an 18-20px-wide interior to stay protected, so this test uses
-    # a 100x100 canvas with a 40x40 primary mask (interior after erosion is
-    # 40 - 2*6 = 28px wide) rather than the smaller boxes other MIX tests
-    # use, which exercise ingest validation, not this pixel guarantee.
+    captured: list[list[bytes]] = []
+    fixture = _load_gemini_fixture("success.json")
+
+    def _capture(self: object, prompt: str, reference_images: list[bytes], seed: int) -> dict:
+        captured.append(list(reference_images))
+        return fixture
+
+    monkeypatch.setattr(GeminiProvider, "_call_api", _capture)
+
     canvas_size = (100, 100)
-    primary_color = (10, 10, 200)
-    secondary_color = (200, 10, 10)
     primary_buf = io.BytesIO()
-    Image.new("RGB", canvas_size, color=primary_color).save(primary_buf, format="PNG")
+    Image.new("RGB", canvas_size, color=(10, 10, 200)).save(primary_buf, format="PNG")
     secondary_buf = io.BytesIO()
-    Image.new("RGB", canvas_size, color=secondary_color).save(secondary_buf, format="PNG")
+    Image.new("RGB", canvas_size, color=(200, 10, 10)).save(secondary_buf, format="PNG")
 
     paths = await _presign_and_upload_mix(
         client,
@@ -539,7 +562,51 @@ async def test_mix_output_is_byte_identical_to_rough_composite_outside_seam_band
     )
     resp = await client.post(
         "/api/v2/mix",
-        headers={"X-API-Key": api_client_key, "Idempotency-Key": "mix-pixel-identity"},
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "mix-two-references"},
+        json=paths,
+    )
+    assert resp.status_code == 202, resp.text
+
+    assert len(captured) == 1, "expected exactly one provider call"
+    references = captured[0]
+    assert len(references) == 2, "MIX must send both pieces, not one composed image"
+
+    first = Image.open(io.BytesIO(references[0])).convert("RGB")
+    second = Image.open(io.BytesIO(references[1])).convert("RGB")
+
+    # Each still carries its own source photo outside the marked region...
+    assert first.getpixel((5, 5)) == (10, 10, 200)
+    assert second.getpixel((5, 5)) == (200, 10, 10)
+    # ...and its own marker colour on that region's boundary.
+    assert first.getpixel((30, 50)) == _HIGHLIGHT_PRIMARY
+    assert second.getpixel((10, 30)) == _HIGHLIGHT_SECONDARY
+
+
+async def test_mix_stores_the_provider_response_unmodified(
+    client: AsyncClient, api_client_key: str, db_session: AsyncSession
+) -> None:
+    """MIX's output is the provider's raw response — no compositing step,
+    unlike RECOLOR (docs/business-rules.md §15) and unlike MIX itself before
+    2026-08-31. Pins that nothing re-encodes or blends it on the way to
+    storage.
+    """
+    canvas_size = (100, 100)
+    primary_buf = io.BytesIO()
+    Image.new("RGB", canvas_size, color=(10, 10, 200)).save(primary_buf, format="PNG")
+    secondary_buf = io.BytesIO()
+    Image.new("RGB", canvas_size, color=(200, 10, 10)).save(secondary_buf, format="PNG")
+
+    paths = await _presign_and_upload_mix(
+        client,
+        api_client_key,
+        primary_bytes=primary_buf.getvalue(),
+        primary_mask_bytes=_mask_png_bytes(size=canvas_size, box=(30, 30, 70, 70)),
+        secondary_bytes=secondary_buf.getvalue(),
+        secondary_mask_bytes=_mask_png_bytes(size=canvas_size, box=(10, 10, 50, 50)),
+    )
+    resp = await client.post(
+        "/api/v2/mix",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "mix-raw-output"},
         json=paths,
     )
     assert resp.status_code == 202, resp.text
@@ -554,18 +621,11 @@ async def test_mix_output_is_byte_identical_to_rough_composite_outside_seam_band
     output_asset = (
         await db_session.execute(select(Asset).where(Asset.id == sub_job.output_asset_id))
     ).scalar_one()
-    output_bytes = storage_service.download_bytes(output_asset.bucket, output_asset.storage_path)
-    output_image = Image.open(io.BytesIO(output_bytes)).convert("RGB")
+    stored = storage_service.download_bytes(output_asset.bucket, output_asset.storage_path)
 
-    # Corners are far from the mask box at (30,30)-(70,70) — well outside
-    # even a generously feathered/banded edge. Untouched by both the
-    # rough-composite step (outside mask A's bbox) and the provider call
-    # (outside the feathered seam band).
-    for corner in [(1, 1), (98, 1), (1, 98), (98, 98)]:
-        assert output_image.getpixel(corner) == primary_color, (
-            f"pixel {corner} outside the mask changed: "
-            f"expected {primary_color}, got {output_image.getpixel(corner)}"
-        )
-    # Deep inside the graft's interior (outside the seam band too): the
-    # rough-composite's own deterministic placement, not the provider's.
-    assert output_image.getpixel((50, 50)) == secondary_color
+    fixture = _load_gemini_fixture("success.json")
+    expected = base64.b64decode(
+        fixture["candidates"][0]["content"]["parts"][0]["inline_data"]["data"]
+    )
+    assert stored == expected
+    assert output_asset.bytes == len(expected)

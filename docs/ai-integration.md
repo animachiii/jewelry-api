@@ -225,55 +225,70 @@ ERP must not offer a retry button for it.
 evaluated — including calls that end in refusal. A refused generation is
 still billed.
 
-### Mode F — Two-piece masked merge (MIX, Phase 20)
+### Mode F — Two-piece combination (MIX, Phase 20; rewritten generative 2026-08-31)
 
 | | |
 | :--- | :--- |
 | **Trigger** | Same as Mode A/B/C/D/E — sub-job enters `GENERATING` |
 | **Where** | Celery `io` queue, `app/workers/mix.py` via `app/providers/gemini.py` — **the same `GeminiProvider` class**, unmodified |
-| **Input** | One image: a solid-magenta *seam-band* overlay burned onto a deterministically-assembled `rough_composite`, not onto either raw source. Built by `app/services/mix_service.py::_build_rough_composite` (no model call) then `_build_seam_overlay` |
-| **Output** | The provider's raw response is **not** the client-facing artifact, same as Mode E — see below |
+| **Input** | **Two** images: each uploaded photo with its client-painted region marked in its own colour — magenta for the primary, cyan for the secondary. Built by `app/services/mix_service.py::_build_highlight`, called once per pair, and passed in that order |
+| **Output** | The provider's raw response, stored unmodified — same as Modes A-D, and **no longer** like Mode E |
 
-**Unlike Mode E, the step before the provider call does real deterministic image
-assembly, not just an overlay burn.** Mode E's overlay is the *source* photo with a
-colour fill over the edit region — the underlying image content is unchanged. MIX's
-overlay is built from `rough_composite`, an image that does not exist anywhere
-until this phase's own new pre-provider step constructs it: region B (the piece
-being grafted from) is cropped to its mask's bounding box, scaled (aspect ratio not
-preserved) to fit region A's bounding box, and pasted onto image A via mask A's own
-silhouette as the paste alpha. **No model call is involved in placement at all** —
-only the visible seam between the two pieces is Gemini's job, confined to a ring
-(`MIX_SEAM_BAND_PX` pixels wide) around the graft boundary rather than the mask's
-full interior the way Mode E's edit region is. This split exists because cross-image
-spatial reasoning — correctly placing content from one photo's frame into another's
-— is the weakest capability in play for any current-generation image model; asking
-Gemini to do placement *and* blending in one call risks the graft landing in the
-wrong position or at the wrong scale with no ground truth to check it against.
+**This section was rewritten on 2026-08-31; the pipeline it used to describe no
+longer exists.** Mode F was previously the only mode that did deterministic
+image *assembly* before its provider call: it built a `rough_composite` by
+cropping the secondary photo's masked region, scaling it into the primary's
+masked region and pasting it through the intersection of both silhouettes, then
+asked Gemini to blend a ring around the resulting seam, then composited the
+response back so everything outside that ring stayed byte-identical to the
+composite. `docs/business-rules.md` §16 has the full accounting of why that was
+abandoned — in short, fitting one painted silhouette into another is the wrong
+operation for the request, and three live client jobs demonstrated it.
 
-1. **Before the call**, `rough_composite` is built deterministically (Pillow only) —
-   B's masked region scaled **aspect-preserving** into A's box and pasted through
-   the **intersection of both silhouettes** (2026-08-28 corrections; see
-   `docs/business-rules.md` §16's defect note) — then a seam-band ring
-   (`dilate(g, band_px) - erode(g, band_px)`, where `g` is the resulting **graft
-   mask**, not mask A) is burned into a magenta overlay on top of it, the same
-   hard-edged-overlay mechanism Mode E established, applied to a ring instead of a
-   filled region.
-2. **After the call**, the same seam-band mask, feathered by `MASK_FEATHER_PX`
-   (Mode E's own existing setting, reused rather than duplicated), drives a
-   server-side compositing step (`app/services/mix_service.py::_composite_seam_result`)
-   that discards everything the provider changed outside the seam. Everywhere the
-   feathered seam-band mask is 0 — both the untouched rest of image A *and* the
-   already-correct interior of the graft — the stored `OUTPUT` asset's pixel is
-   `rough_composite`'s own pixel, exactly.
+**What Mode F does now** is the simplest shape of any masked operation:
 
-This is the direct architectural consequence of the same fact Call site 1's own
-constraint note above already states — no mask parameter exists — applied to a case
-(MIX) that, unlike every mode before it, needs to assemble content from **two**
-independent source images before any provider involvement, then bound the provider's
-influence to a boundary between them rather than a single edit region.
+1. **Before the call**, each photo is marked independently — a faint tint
+   (`_HIGHLIGHT_TINT_ALPHA`) plus a solid contour (`_HIGHLIGHT_OUTLINE_PX`) in
+   that pair's colour, over the client's painted region only. Nothing is
+   cropped, scaled, relocated or intersected. The rest of each photo is left
+   intact, because the surrounding piece is context the design depends on.
+2. **The call** sends both marked photos as reference images
+   (`GeminiProvider.generate` has always accepted a `list[bytes]` — no provider
+   change was needed, same as Phase 15's custom-background addition) alongside a
+   prompt that names both colours and asks for one new piece combining the two
+   marked elements.
+3. **After the call** — nothing. The response is the OUTPUT asset.
 
-**No QA gate**, for a fourth, distinct reason from MATCH's and RECOLOR's — see
+**Why translucent marks, unlike Mode E's opaque magenta fill.** RECOLOR paints
+its region opaque because it wants that region *replaced*; hiding what is under
+the fill costs nothing. MIX's marked region is precisely what the model must
+*reproduce*, so covering it would defeat the purpose. The contour carries the
+identification; the tint only disambiguates inside from outside on concave
+shapes. Its value was measured rather than guessed — at 0.30 the cyan mark
+turned a real client photo's gold bands visibly green, which risks the model
+rendering green enamel; see the constant's own note in `mix_service.py`.
+
+**Why two colours.** With two reference images, the prompt has to be able to say
+*which* element belongs to *which* piece. Magenta and cyan are both unreachable
+by real jewelry — gold, silver, ruby, emerald, sapphire and pearl are far from
+both in hue — so a mark can never be mistaken for the piece's own material. The
+pairing is a contract between `mix_service.process`'s argument order and
+migration `0020`'s prompt text; changing one without the other still produces a
+successful call that describes the wrong image, which is why
+`test_mix_sends_two_colour_marked_reference_images_in_documented_order` pins it.
+
+**No QA gate**, and since this rewrite the reason is MATCH's rather than a
+distinct one — the output is supposed to differ from both inputs. See
 `docs/business-rules.md` §7's MIX note and §16.
+
+**Mode F now carries Mode B's hallucination risk, and nothing catches it.** The
+output is a design concept: Gemini can invent prong counts, facet geometry and
+chain links neither physical piece has. Mode B is gated behind
+`synthetic_allowed`, flagged `synthetic: true` in the response, and mandatorily
+QA-checked for exactly this reason. Mode F has none of those three controls.
+That gap is deliberate and accepted (the client wants a mockup, not a
+photograph), but `docs/business-rules.md` §16 records the response-flagging half
+of it as a genuine open item, not a solved one.
 
 **Reuses `rate_limiter` unmodified** — same global `GEMINI_RATE_LIMIT_PER_MINUTE`
 window every other mode competes for.
@@ -281,48 +296,24 @@ window every other mode competes for.
 **Recorded on every call** (to `sub_jobs`): `prompt_snapshot`, `model_version`,
 `seed` — same fields, same reason, as every other mode.
 
-**Both the non-aspect-preserving scale-to-fit and the seam-only refinement strategy
-are unvalidated against a real model call** — no real `GEMINI_API_KEY` exists in
-this environment, same gap every phase since 6 has hit. If a future session with a
-real key finds either doesn't hold up on real jewelry macro photography, that
-correction belongs here and in `phases/phase-20-mix.md`'s own reality-check section
-— not silently in code.
+**Memory.** Both reference images are built through
+`mix_service._load_downscaled` at `settings.WORKING_MAX_EDGE`, preserving the
+2026-08-27 OOM fix (a real 12.6 MP client upload needed ~187 MB against ~160 MB
+of headroom and was SIGKILLed before every Gemini attempt, `attempt_count` never
+leaving `0`). This pipeline holds strictly less than the old one did — two
+downscaled images rather than a rough composite plus a seam overlay plus a
+provider output plus a final composite. **Mode F's output resolution is now
+whatever Gemini returns**, no longer capped by our own canvas. Mode E (RECOLOR)
+still composites at full resolution and retains the same exposure — unchanged,
+still a known risk.
 
-**Known limitation, found while building this phase's own central pixel-identity
-test, not a theoretical concern:** for a masked region narrower than roughly
-`2 * (MIX_SEAM_BAND_PX + MASK_FEATHER_PX)` in either dimension, the post-call
-Gaussian feather can bleed through the graft's interior from both sides of the
-seam-band ring at once — see `app/services/mix_service.py::_seam_band_mask`'s own
-docstring and `docs/business-rules.md` §16.
-
-**The seam overlay built here is downscaled to `settings.WORKING_MAX_EDGE`
-before it's sent to Gemini, same fix as Mode E's** (post-Phase-20 incident,
-2026-08-24 — see `docs/business-rules.md` §16 and `app/config.py`'s own
-note). `_build_rough_composite`'s *output* was, and still is, **not**
-downscaled — it's the base the final compositing step composites back onto,
-not a throwaway Gemini input. At the time this left the function decoding
-four full-resolution images at once, flagged as MIX's own remaining memory
-hotspot. **2026-08-25 follow-up:** source B and mask B (the two inputs that
-get cropped-then-resized into region A's bounding box regardless) are now
-downscaled to `WORKING_MAX_EDGE` *before* the crop, and a redundant
-full-resolution `.copy()` of source A was removed — source A/mask A stay
-full resolution as before, but the function now holds two uncapped
-full-resolution buffers instead of four.
-
-**2026-08-27 — superseded: MIX's whole working canvas is now capped.** Neither
-pass above was enough on a real 12.6 MP (3072x4096) client upload, which needed
-~187 MB against ~160 MB of headroom and was OOM-killed before every Gemini
-attempt (`attempt_count` never left `0`). All four inputs now decode at
-`WORKING_MAX_EDGE` via `_load_downscaled`, which uses Pillow's `draft()` to
-decode JPEGs straight at a reduced DCT scale rather than decoding 12.6 MP and
-discarding most of it. **Mode F's output is therefore capped at
-`WORKING_MAX_EDGE`, not the primary photo's native resolution** — a deliberate
-product tradeoff decided with the user, measured at 187 MB -> 74 MB peak.
-Masks resample with NEAREST specifically to stay binary, which
-`_seam_band_mask`'s dilate-minus-erode depends on. Mode E (RECOLOR) is
-unchanged and still composites at full resolution — same exposure, not yet
-addressed. See `app/services/mix_service.py::_build_rough_composite`'s own
-docstring and `docs/business-rules.md` §16.
+**Unvalidated against a real model call at the time of writing.** The
+highlight-plus-prompt strategy carries the same status Phase 20's seam-band
+strategy did — with one difference worth acting on: a real `GEMINI_API_KEY` now
+exists in the deployed environment, and job `f9768456`'s four stored input
+assets are the exact case that motivated this rewrite. Validating against them
+is a real, available step, not a blocked one. A correction belongs here and in
+`docs/business-rules.md` §16, not silently in code.
 
 ---
 

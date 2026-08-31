@@ -166,6 +166,45 @@ down from four uncapped full-resolution buffers to two. See
 `docs/business-rules.md` §16's own incident notes and
 `app/config.py`'s `WORKING_MAX_EDGE` comment for the full accounting.
 
+**Correction, 2026-08-31 — MIX is now generative, and the Phase 20 note above
+no longer describes it.** Every correction above about MIX concerns the
+deterministic rough-composite: the beige blob (2026-08-28), the aspect-ratio
+squash, the seam band, the byte-identical-outside-the-seam-band guarantee, the
+`WORKING_MAX_EDGE` output cap. **All of that machinery is deleted.** MIX now
+sends **two** reference images to Gemini — each uploaded photo with the
+client's painted region marked by a faint tint plus a solid contour, magenta
+for the primary and cyan for the secondary — plus a prompt asking for one new
+piece combining the two marked elements, and stores the provider's raw response
+as the output. `_build_rough_composite`, `_seam_band_mask`,
+`_build_seam_overlay`, `_composite_seam_result` and `settings.MIX_SEAM_BAND_PX`
+are all gone.
+
+**Why, in one line:** the graft fits one painted silhouette into the other's
+bounding box, which only works when the two shapes are comparable — and on
+three consecutive real client jobs they were not. On `f9768456` the client's
+compact bird pendant and two long curved bands produced a graft covering 24.4%
+of what they painted; pixels genuinely changed but the delivered image read as
+a smudge, and the client's verdict was "nothing changed." The request behind
+MIX was never "relocate these pixels," it was "here are two pieces, design me
+one that combines them" — a generative request.
+
+**What this gives up, deliberately:** the output is a **design concept**, not a
+photograph of either physical piece. Nothing is guaranteed pixel-identical to
+anything (RECOLOR is now the only operation whose output is not the provider's
+raw response), and Gemini may invent detail neither piece has — Mode B's
+hallucination risk, with none of Mode B's three controls (`synthetic_allowed`
+gating, the `synthetic: true` response flag, the mandatory QA gate). Decided
+directly with the user. **One genuine open item, not a solved one:** the output
+is not flagged as generated in the API response. `source_type: SYNTHETIC` looks
+like the cheap lever but is the wrong one — `job_service.check_retry_preconditions`
+skips the input-asset-expiry check for `SYNTHETIC` sub-jobs, and a MIX job has
+four real input assets that expire. A small additive response field is needed.
+
+MIX's "no QA gate" reason also collapsed into MATCH's (the output is *supposed*
+to differ from its inputs) rather than remaining a fourth distinct one. See
+`docs/business-rules.md` §7/§16, `docs/api-routes.md`'s "Two-Piece Combination"
+section, `docs/ai-integration.md`'s Mode F, and migration `0020` for the prompt.
+
 **Actors:**
 
 | Actor | Can do |

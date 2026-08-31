@@ -1,67 +1,113 @@
-"""Runs a single MIX sub-job end-to-end. See phases/phase-20-mix.md Step 4.
-Mirrors app/services/recolor_service.py's shape (rate-limit -> provider
-call -> cost event -> success/fail -> recompute) closely, plus a genuinely
-new step *before* the rate-limit loop even starts: a deterministic
-rough-composite, no provider involved. Separate module, not a shared code
-path — see app/workers/mix.py for the thin Celery wrapper (same split as
-recolor.py/background_service.py, match.py/match_service.py). Reimplements
-`_erode`/`_feather` as its own module-level functions rather than importing
-recolor_service.py's — same "two independent constants/helpers that happen
-to share a shape" precedent recolor_service.py's own docstring already
-establishes relative to background_service.py/match_service.py; no service
-module imports another service module's private helpers anywhere in this
-codebase.
+"""Runs a single MIX sub-job end-to-end. See phases/phase-20-mix.md Step 4,
+and the 2026-08-31 rewrite note below, which supersedes most of what that
+phase file describes.
 
-Two deliberate differences from recolor_service.py, on top of everything it
-already differs from background_service.py/match_service.py:
+Mirrors app/services/match_service.py's shape most closely of any operation:
+rate-limit -> provider call -> cost event -> success/fail -> recompute, with
+the provider's raw response stored as the client-facing OUTPUT asset. Separate
+module, not a shared code path — see app/workers/mix.py for the thin Celery
+wrapper (same split as recolor.py/recolor_service.py, match.py/match_service.py).
 
-1. **A deterministic rough-composite before any provider call.** RECOLOR's
-   first real step is a provider call with a pre-built overlay. MIX's first
-   real step is Pillow-only image assembly — crop region B via its mask's
-   bounding box, scale it to fit region A's bounding box, paste it onto
-   source A (`_build_rough_composite`). Placement is never asked of the
-   model — only the seam is. This is the direct consequence of cross-image
-   spatial reasoning being the weakest capability in play for any
-   current-generation image model (see phases/phase-20-mix.md's own
-   reality-check section).
-2. **A seam-band mask, not a filled-region mask.** RECOLOR's compositing
-   mask marks "the region to change." MIX's post-composite mask
-   (`_seam_band_mask`) marks a *ring* around the graft boundary — the
-   visible seam, not the graft's interior (already correct by construction
-   from the rough-composite step) and not the untouched rest of image A.
+**2026-08-31 — MIX is now generative, not a deterministic graft. This is a
+product decision, decided directly with the user, and it deletes the central
+architectural claim Phase 20 was built around.**
 
-**No QA gate — a fourth distinct reason, not a fourth posture.** See
-docs/business-rules.md §7's MIX note: RECOLOR's output is provably
-identical to *the original untouched source* outside a static mask; MIX's
-output is provably identical to `rough_composite` — itself already a
-deterministic merge of two different pieces' photos — outside the seam
-band. Verified by a deterministic test, not a probabilistic model call.
+What MIX used to be: a Pillow-only "rough composite" that cropped region B out
+of photo B, scaled it to fit region A's bounding box, and pasted it into photo
+A through the intersection of both painted silhouettes — followed by a Gemini
+call scoped to a thin ring around the graft's seam, and a final compositing
+step that discarded everything the provider changed outside that ring. The
+output was guaranteed byte-identical to the rough composite outside the seam.
 
-**Both the rough-composite's non-aspect-preserving scale-to-fit and the
-seam-only refinement strategy are unvalidated against a real model call** —
-no real `GEMINI_API_KEY` exists in this environment, same gap every phase
-since 6 has hit. If a future session with a real key finds either doesn't
-hold up, that's a correction to docs/ai-integration.md's Mode F, not a
-silent code change.
+Why that is gone. The deterministic graft only produces a sensible result when
+mask A and mask B are *similar shapes*, because it fits B's silhouette into A's
+box. Three consecutive live client jobs proved they routinely are not:
 
-**Post-Phase-20 incident fix (2026-08-24):** a live RECOLOR request OOM-killed
-`jewelry-api` on Render's free tier (512MB) — root-caused to full-resolution
-PIL compositing with no size cap; see `app/config.py`'s `WORKING_MAX_EDGE`
-note and `app/services/recolor_service.py`'s own matching fix. That first
-pass only covered `_build_seam_overlay` here — `_build_rough_composite`
-still decoded all four source images (source A, mask A, source B, mask B)
-at native resolution, flagged explicitly as MIX's own remaining hotspot
-rather than silently left unbounded.
+- `fe7d6372` (2026-08-28): mask B was two curved bands whose shared bounding
+  box was 39.5% painted, so 60% of the grafted content was unpainted mannequin
+  — a beige blob in the middle of the client's pendant. Fixed by intersecting
+  both silhouettes and preserving aspect ratio.
+- `f9768456` (2026-08-30): with those fixes in, mask A was a compact bird
+  pendant (481x441 at working resolution) and mask B two disjoint bands
+  (1103x651). The aspect-preserving fit shrank B to 481x284 and centred it, so
+  the empty gap between B's two blobs landed mid-pendant and the graft covered
+  only 24.4% of what the client painted. Measured against the real stored
+  assets, the output *did* differ from the primary photo (26,472 px changed,
+  mean diff 42.3 inside the graft) — but visually it read as a small patch of
+  smudged gold in one corner of the pendant, not a merge. The client's
+  verdict, looking at the delivered image, was "nothing changed."
 
-**2026-08-25 follow-up:** `_build_rough_composite` now downscales source B
-and mask B to `WORKING_MAX_EDGE` before the crop — they're always
-cropped-then-resized into region A's bounding box regardless, so decoding
-them at native resolution bought nothing. Source A and mask A still decode
-at full resolution (required — see `_build_rough_composite`'s own
-docstring), and the function no longer holds a redundant `.copy()` of
-source A alongside the original. Net effect: two of the four decodes are
-now bounded and the third full-resolution buffer (the old `.copy()`) is
-gone, down from four uncapped full-resolution images held at once to two.
+The lesson is not that the graft had another bug to fix. It is that
+"deterministically relocate pixels from photo B into photo A" is the wrong
+operation for what the client actually wants, which is: *here are two pieces,
+design me one that combines them.* That is a generative request, and asking
+Gemini to do it directly removes the entire class of geometry failures above —
+there is no crop, no scale-to-fit, no silhouette intersection, and therefore
+nothing for mismatched mask shapes to break.
+
+**What MIX is now.** Both photos go to Gemini as reference images, each with
+its client-painted region marked in a distinct colour, plus a prompt asking for
+a single new piece combining the two marked elements. The provider's raw
+response is the client-facing output. Consequences, stated plainly because they
+are real losses, not free wins:
+
+- **The byte-identical guarantee is gone entirely.** docs/business-rules.md §16
+  no longer claims the output matches anything pixel-for-pixel; it can't, and
+  pretending otherwise would be worse than dropping it. The output is a
+  generated design concept.
+- **The output may idealize.** Gemini can invent prong counts, facet geometry
+  and chain links the physical pieces don't have — the same hallucination risk
+  docs/ai-integration.md's Mode B has always carried. The client accepted this
+  explicitly: a MIX output is a mockup of a piece that does not exist yet, not
+  a photograph of one that does.
+- **MIX's "no QA gate" reason changes.** It used to be "provably identical to
+  the rough composite outside the seam, verified by a deterministic test." It
+  is now MATCH's reason: the output is *supposed* to differ from both inputs,
+  so a subject-preservation similarity judge asks the wrong question. See
+  docs/business-rules.md §7/§16.
+
+**Why the masks are still required, and still colour-marked.** They are the
+only way the client says *which* element of each photo they mean — the bird
+pendant rather than the whole necklace, this chain rather than that clasp.
+What changed is that the mask now drives attention, not geometry: it is burned
+into the photo as a translucent tint plus a hard contour, and the model is told
+to read those marks as identifying an element rather than as part of the
+design. Nothing is cropped out and nothing is relocated, so a mask whose shape
+doesn't match the other mask's shape is no longer a problem at all.
+
+This also degrades gracefully against a real, repeated user error. The /ui mask
+tool is a brush, not a lasso, and clients have circled a region instead of
+painting over it three separate times. Under the old graft that produced a
+ring-shaped region and grafted garbage; under a highlight it produces a ring
+drawn around the element, which still communicates "this one" perfectly well.
+
+**Why a translucent tint and not RECOLOR's solid magenta fill.** Mode E burns
+an *opaque* fill because it wants that region replaced — hiding what's under it
+costs nothing. Here the marked region is exactly what Gemini must reproduce, so
+covering it would defeat the purpose. The solid contour
+(`_HIGHLIGHT_OUTLINE_PX`) is what actually identifies the region; the tint
+(`_HIGHLIGHT_TINT_ALPHA`) only disambiguates inside from outside for concave
+shapes, so it is kept faint enough not to shift the material's apparent colour
+— see that constant's own note for the measurement behind its value.
+
+**Colour choice is deliberate:** magenta for the primary and cyan for the
+secondary, because no real jewelry is either — gold, silver, ruby, emerald,
+sapphire and pearl are all far from both in hue, so neither mark can be
+mistaken for the piece's own material.
+
+**Memory.** All four inputs still decode at `settings.WORKING_MAX_EDGE` via
+`_load_downscaled` (2026-08-27 OOM fix — a real 12.6 MP client upload needed
+~187 MB against ~160 MB of headroom on the 512 MB instance and was SIGKILLed
+before every Gemini attempt). This rewrite strictly improves on that: two
+downscaled highlight images are held instead of a full compositing chain, and
+`_composite_seam_result`'s extra decode of the rough composite alongside the
+provider's output is gone. The output's resolution is now whatever Gemini
+returns rather than being capped by our own canvas.
+
+**Unvalidated against a real model call at the time of writing** — the two-image
+highlight strategy has the same status Phase 20's seam-band strategy had, except
+that a real `GEMINI_API_KEY` now exists, so this one can and should be checked
+against job `f9768456`'s own stored inputs before it is trusted.
 """
 
 import random
@@ -99,7 +145,33 @@ _RETRYABLE_CLASSES = {
 }
 
 _COST_OPERATION_LABEL = "mix"
-_MAGENTA = (255, 0, 255)
+
+# Two marker colours, one per source photo, named in the prompt. Chosen to be
+# unreachable by real jewelry: gold, silver, rose gold, ruby, emerald, sapphire
+# and pearl are all far from pure magenta and pure cyan in hue, so a mark can
+# never be mistaken for the piece's own material. Magenta matches the colour
+# recolor_service already uses for the same "the model is being told about this
+# region" purpose; cyan is its complement and is the new one.
+_HIGHLIGHT_PRIMARY = (255, 0, 255)
+_HIGHLIGHT_SECONDARY = (0, 255, 255)
+
+# Deliberately translucent, unlike recolor_service._build_overlay's opaque
+# fill. RECOLOR hides the marked region because it wants it replaced; MIX must
+# keep it legible because it wants it reproduced. See this module's docstring.
+#
+# 0.10 was measured, not guessed. Rendered against job `f9768456`'s real
+# secondary photo — two ornate gold bands set with rubies — at 0.30 the cyan
+# mark turned the gold visibly green and washed the rubies out, which risks
+# Gemini reproducing green enamel instead of gold. At 0.15 a cool cast
+# remained. At 0.08 the gold read as unambiguously gold and the rubies as red,
+# with the contour no less legible. 0.10 sits just above that, keeping a little
+# more fill signal for large concave regions whose interior is far from any
+# edge, while staying in material-preserving territory.
+#
+# The contour, not the tint, is what identifies the region — which is why the
+# tint can afford to be this faint.
+_HIGHLIGHT_TINT_ALPHA = 0.10
+_HIGHLIGHT_OUTLINE_PX = 3
 
 
 class SubJobNotFoundError(Exception):
@@ -118,8 +190,8 @@ def _erode(mask: "Image.Image", px: int) -> "Image.Image":
 
 def _dilate(mask: "Image.Image", px: int) -> "Image.Image":
     """Grows the white region — the opposite of `_erode`, same odd-kernel
-    `ImageFilter.MaxFilter` mechanism. Used only to build the seam-band ring
-    (`_seam_band_mask`), never applied on its own to a compositing alpha.
+    `ImageFilter.MaxFilter` mechanism. Used only to build the contour ring
+    (`_outline_mask`), never applied on its own to a compositing alpha.
     """
     if px <= 0:
         return mask
@@ -127,38 +199,26 @@ def _dilate(mask: "Image.Image", px: int) -> "Image.Image":
     return mask.filter(ImageFilter.MaxFilter(size))
 
 
-def _feather(mask: "Image.Image", px: int) -> "Image.Image":
-    """Softens an edge for a post-generation composite alpha only — never
-    applied to the overlay sent to Gemini. See recolor_service._feather.
+def _outline_mask(mask: "Image.Image", px: int) -> "Image.Image":
+    """A ring `px` pixels wide straddling the mask's boundary —
+    `dilate(mask, px) - erode(mask, px)`. Drawn in the marker colour on top of
+    the tint so the edge of the client's painted region is unambiguous even
+    where a 30% tint reads faintly over bright polished metal.
+
+    Straddling the boundary rather than sitting strictly inside it is
+    deliberate: half the stroke falls on the element and half on its
+    surroundings, so the contour never eats a meaningful amount of the detail
+    Gemini is being asked to reproduce.
+
+    This is the same dilate-minus-erode shape the deleted `_seam_band_mask`
+    used, kept because the geometry is genuinely the same; its role is not.
+    That ring told the provider *where to blend two pasted images together*
+    and drove a post-call compositing step. This one is purely a visual
+    annotation — nothing downstream reads it, and no guarantee depends on it.
     """
     if px <= 0:
-        return mask
-    return mask.filter(ImageFilter.GaussianBlur(px))
-
-
-def _seam_band_mask(mask_a: "Image.Image", band_px: int) -> "Image.Image":
-    """A ring `band_px` pixels wide straddling mask A's boundary —
-    dilate(mask_a, band_px) minus erode(mask_a, band_px). Marks only the
-    visible graft edge: not the graft's interior (already correct by
-    construction from `_build_rough_composite`) and not the untouched rest
-    of image A. See this module's own docstring point 2.
-
-    **Known limitation, not fixed here:** for a mask A narrower than
-    roughly `2 * (band_px + settings.MASK_FEATHER_PX)` in either dimension,
-    the post-call Gaussian feather (`_composite_seam_result`) can bleed
-    through the graft's interior "hole" from both sides of the ring at
-    once, letting the provider's output reach pixels this module's own
-    docstring claims are protected. No ingest-time minimum-region-size
-    check exists yet for the same reason no cross-mask ratio check does —
-    see phases/phase-20-mix.md Step 3's note on deferred validation. Tests
-    covering the off-seam-band guarantee must use a region large enough to
-    avoid this, not a minimal one.
-    """
-    if band_px <= 0:
-        return Image.new("L", mask_a.size, 0)
-    dilated = _dilate(mask_a, band_px)
-    eroded = _erode(mask_a, band_px)
-    return ImageChops.subtract(dilated, eroded)
+        return Image.new("L", mask.size, 0)
+    return ImageChops.subtract(_dilate(mask, px), _erode(mask, px))
 
 
 def _working_size(width: int, height: int) -> tuple[int, int] | None:
@@ -182,10 +242,10 @@ def _load_downscaled(data: bytes, mode: str) -> "Image.Image":
     masks are the cheap buffers here (1 byte/px, not 3), so that is fine.
 
     Masks resample with NEAREST, deliberately, not LANCZOS: `mask_validation`
-    guarantees a binary 0/255 mask on ingest, `_seam_band_mask`'s
-    dilate-minus-erode assumes it, and a smooth filter would introduce
-    intermediate values that quietly blur the seam ring. Photos use LANCZOS,
-    where smoothness is what you want.
+    guarantees a binary 0/255 mask on ingest and `_outline_mask`'s
+    dilate-minus-erode assumes it, so a smooth filter would introduce
+    intermediate values that quietly soften the contour into a gradient.
+    Photos use LANCZOS, where smoothness is what you want.
     """
     # `handle` stays separate from `img`: Image.open returns an ImageFile,
     # and draft() is only available there -- it has to be called on the
@@ -201,181 +261,40 @@ def _load_downscaled(data: bytes, mode: str) -> "Image.Image":
     return img
 
 
-def _build_rough_composite(
-    source_a_bytes: bytes, mask_a_bytes: bytes, source_b_bytes: bytes, mask_b_bytes: bytes
-) -> tuple[bytes, "Image.Image"]:
-    """Deterministic image assembly, no provider call involved — see this
-    module's own docstring point 1. Crops region B to mask B's bounding box,
-    scales it **preserving aspect ratio** to fit inside mask A's bounding
-    box, centres it there, and pastes it through the intersection of **both**
-    silhouettes. Returns the composite plus the graft mask — the region that
-    actually changed, which the caller needs for the seam band.
+def _build_highlight(source_bytes: bytes, mask_bytes: bytes, color: tuple[int, int, int]) -> bytes:
+    """Mark the client's painted region on one source photo, without altering
+    what is inside it beyond a readable tint. Returns a full-frame PNG — this
+    is one of the two reference images sent to Gemini.
 
-    **2026-08-28 — two real defects found on the first genuine client run
-    (job `fe7d6372`), both fixed here.**
+    Two marks, both in `color`: a `_HIGHLIGHT_TINT_ALPHA` blend across the
+    whole painted region, and a solid `_HIGHLIGHT_OUTLINE_PX` contour on its
+    boundary. See this module's docstring for why this is translucent where
+    RECOLOR's equivalent overlay is opaque, and why these two colours.
 
-    *Defect 1: mask B's shape was discarded.* The old code used `mask_b` only
-    to compute `bbox_b`, then grafted the raw rectangular crop. Measured on
-    that job, mask B was two curved bands on opposite sides of the piece
-    whose shared bounding box was only **39.5% painted** — so **60% of what
-    got grafted was unpainted mannequin and background**, squashed into the
-    pendant silhouette. The output was a beige pendant-shaped blob with gold
-    fringing the edges. `mask_b` is now a paste alpha in its own right, so
-    only pixels the client actually painted travel across.
-
-    *Defect 2: the scale-to-fit was non-aspect-preserving.* Two long thin
-    bands stretched into a compact bird-shaped box distort badly no matter
-    how clean the masking is. `phases/phase-20-mix.md` Step 3 called this a
-    "deliberate simplification... unvalidated against real client pieces";
-    this was the validation, and it failed. The scale is now
-    `min(w_ratio, h_ratio)` with the result centred in A's box, so B keeps
-    its proportions and simply fits inside.
-
-    **Consequence the caller must respect:** the graft no longer necessarily
-    fills mask A. The real seam is the boundary of the returned graft mask,
-    NOT of mask A, so the seam band must be built from the returned mask —
-    building it from mask A would ask the provider to blend an edge that
-    isn't there while leaving the actual graft edge untouched.
-
-    **All four inputs are decoded at `settings.WORKING_MAX_EDGE`, so
-    `rough_composite` — and therefore MIX's final client-facing output — is
-    capped at that edge rather than source A's native resolution**
-    (2026-08-27; decided directly with the user). Two earlier passes tried
-    to keep full resolution and both were insufficient: 2026-08-24 (PR #32)
-    capped only the throwaway Gemini overlay, and 2026-08-25 (PR #33)
-    additionally capped source/mask B while keeping A native. Measured
-    against the real client upload that broke it — 3072x4096, 12.6 MP, two
-    photos plus two masks — the pipeline still needed **~187 MB** of working
-    memory, against ~160 MB of headroom on the 512 MB free instance (the
-    baseline was already 353 MB). The container was SIGKILLed roughly three
-    seconds into the task, every time, before a single Gemini attempt: the
-    live sub-job sat at `GENERATING` with `attempt_count` still 0.
-
-    Capping the whole working canvas takes 12.6 MP to ~3.1 MP, roughly a 4x
-    cut in every buffer, which is what makes MIX run at all on this instance.
-    The byte-identical-outside-the-seam-band guarantee is unchanged in
-    substance — it was always stated relative to `rough_composite`, not to
-    either original photo (docs/business-rules.md §16), and `rough_composite`
-    is simply now a smaller image. **What genuinely changed is the output
-    resolution**, so this is a real product tradeoff, not a free win.
-
-    Note this does NOT alter `recolor_service`, whose own guarantee *is*
-    stated against the untouched original source and which therefore still
-    composites at full resolution — it has the same exposure on a 12.6 MP
-    upload and has not been addressed here.
-
-    `settings.MIX_SEAM_BAND_PX` stays an absolute pixel count in working
-    space rather than being scaled down with the canvas: the band exists so
-    the model can see a seam to blend, and its usefulness is measured in the
-    pixels of the image actually sent. The consequence is that the
-    small-region limitation in `_seam_band_mask`'s docstring now applies in
-    working-space pixels, so it bites at a larger fraction of the piece than
-    it used to.
+    Everything outside the painted region is the downscaled source photo,
+    untouched — the model needs the surrounding piece for context (that this
+    pendant hangs from a chain, at that scale, in that metal), so masking it
+    away would lose information the design depends on.
     """
-    source_a = _load_downscaled(source_a_bytes, "RGB")
-    mask_a = _load_downscaled(mask_a_bytes, "L")
-    source_b = _load_downscaled(source_b_bytes, "RGB")
-    mask_b = _load_downscaled(mask_b_bytes, "L")
-
-    bbox_a = mask_a.getbbox()
-    bbox_b = mask_b.getbbox()
-    assert bbox_a is not None  # coverage validated > 0 at ingest (mask_validation)
-    assert bbox_b is not None
-
-    cropped_b = source_b.crop(bbox_b)
-    cropped_mask_b = mask_b.crop(bbox_b)
-
-    box_w = bbox_a[2] - bbox_a[0]
-    box_h = bbox_a[3] - bbox_a[1]
-    src_w, src_h = cropped_b.size
-
-    # Aspect-preserving fit-inside, not stretch-to-fill (defect 2 above).
-    scale = min(box_w / src_w, box_h / src_h)
-    fit_w = max(1, round(src_w * scale))
-    fit_h = max(1, round(src_h * scale))
-    scaled_b = cropped_b.resize((fit_w, fit_h), Image.Resampling.LANCZOS)
-    # NEAREST keeps the mask binary, same reason _load_downscaled uses it.
-    scaled_mask_b = cropped_mask_b.resize((fit_w, fit_h), Image.Resampling.NEAREST)
-
-    # Centre the fitted region inside A's box. fit_* <= box_*, so this window
-    # is always inside bbox_a and therefore inside the image.
-    off_x = bbox_a[0] + (box_w - fit_w) // 2
-    off_y = bbox_a[1] + (box_h - fit_h) // 2
-
-    # The graft is the INTERSECTION of the two silhouettes: inside A's region
-    # (don't spill past where the client said the graft lands) and inside B's
-    # painted shape (don't drag along the unpainted rest of B's crop —
-    # defect 1 above). Both are binary, so multiply is a logical AND.
-    window = (off_x, off_y, off_x + fit_w, off_y + fit_h)
-    paste_alpha = ImageChops.multiply(mask_a.crop(window), scaled_mask_b)
-    source_a.paste(scaled_b, (off_x, off_y), paste_alpha)
-
-    # Full-frame record of what actually changed, for the seam band.
-    graft_mask = Image.new("L", source_a.size, 0)
-    graft_mask.paste(paste_alpha, (off_x, off_y))
-
-    buf = BytesIO()
-    source_a.save(buf, format="PNG")
-    return buf.getvalue(), graft_mask
-
-
-def _build_seam_overlay(rough_composite_bytes: bytes, seam_band_mask: "Image.Image") -> bytes:
-    """Composites a solid magenta fill over `rough_composite` through the
-    seam-band mask (hard edge, same reasoning recolor_service._build_overlay
-    already established for why the overlay sent to Gemini needs a hard
-    boundary, not a feathered one). This single image is what's sent to
-    Gemini as the sole reference image.
-
-    Downscaled to `settings.WORKING_MAX_EDGE` first (2026-08-24 incident
-    fix, see this module's own docstring and app/config.py) — same
-    reasoning recolor_service._build_overlay already established: this
-    overlay is Gemini's input only, never the client-facing artifact.
-    `rough_composite_bytes` itself is untouched by this function (the
-    caller's own copy stays full resolution for
-    `_composite_seam_result`'s later use), so the byte-identical-outside-
-    the-seam-band guarantee is unaffected — only this one throwaway
-    working copy gets smaller.
-    """
-    rough = Image.open(BytesIO(rough_composite_bytes)).convert("RGB")
-    mask = seam_band_mask
-    if max(rough.size) > settings.WORKING_MAX_EDGE:
-        scale = settings.WORKING_MAX_EDGE / max(rough.size)
-        target_size = (round(rough.width * scale), round(rough.height * scale))
-        rough = rough.resize(target_size, Image.Resampling.LANCZOS)
-        mask = mask.resize(target_size, Image.Resampling.LANCZOS)
-    magenta_fill = Image.new("RGB", rough.size, _MAGENTA)
-    overlay = Image.composite(magenta_fill, rough, mask)
-    buf = BytesIO()
-    overlay.save(buf, format="PNG")
-    return buf.getvalue()
-
-
-def _composite_seam_result(
-    rough_composite_bytes: bytes, provider_output_bytes: bytes, seam_band_mask: "Image.Image"
-) -> bytes:
-    """Generate-then-composite, scoped to the seam only: everywhere the
-    (feathered) seam-band mask is 0 — including both the untouched rest of
-    image A and the already-correct interior of the graft — the result is
-    `rough_composite`'s own pixel, exactly. The provider's raw output is
-    resized to `rough_composite`'s own dimensions first if Gemini returned a
-    different resolution, same reasoning recolor_service._composite_result
-    already established.
-    """
-    rough = Image.open(BytesIO(rough_composite_bytes)).convert("RGB")
-    # Both must have come from _load_downscaled. Image.composite would raise
-    # on its own, but only with "images do not match" -- name the real cause,
-    # since reaching here means the billed provider call has already happened.
-    assert seam_band_mask.size == rough.size, (
-        f"seam band {seam_band_mask.size} != rough composite {rough.size} "
-        "-- both must be built at the same working resolution"
+    source = _load_downscaled(source_bytes, "RGB")
+    mask = _load_downscaled(mask_bytes, "L")
+    # mask_validation guarantees mask dims == source dims at ingest, and both
+    # go through the same _working_size, so this holds by construction.
+    # Assert rather than let Image.composite raise its generic "images do not
+    # match" — this runs before the billed provider call, so a loud, named
+    # failure here is strictly better than a confusing one.
+    assert mask.size == source.size, (
+        f"mask {mask.size} != source {source.size} — mask_validation should "
+        "have rejected this pair at ingest"
     )
-    provider_output = Image.open(BytesIO(provider_output_bytes)).convert("RGB")
-    if provider_output.size != rough.size:
-        provider_output = provider_output.resize(rough.size)
-    feathered = _feather(seam_band_mask, settings.MASK_FEATHER_PX)
-    composited = Image.composite(provider_output, rough, feathered)
+
+    fill = Image.new("RGB", source.size, color)
+    tinted = Image.blend(source, fill, _HIGHLIGHT_TINT_ALPHA)
+    highlighted = Image.composite(tinted, source, mask)
+    highlighted = Image.composite(fill, highlighted, _outline_mask(mask, _HIGHLIGHT_OUTLINE_PX))
+
     buf = BytesIO()
-    composited.save(buf, format="PNG")
+    highlighted.save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -445,19 +364,13 @@ async def process(session: AsyncSession, redis_client: Redis, sub_job_id: uuid.U
         secondary_mask_asset.bucket, secondary_mask_asset.storage_path
     )
 
-    # The graft mask comes back from the composite step rather than being
-    # rebuilt from the primary mask here. Two reasons, both load-bearing:
-    # it is already at the composite's own working resolution (so
-    # _composite_seam_result can never fail on a size mismatch after the
-    # billed provider call), and since 2026-08-28 the graft is the
-    # INTERSECTION of both silhouettes, which can be strictly smaller than
-    # the primary mask. Building the band from the primary mask would mark
-    # an edge that does not exist and miss the one that does.
-    rough_composite_bytes, graft_mask = _build_rough_composite(
-        primary_bytes, primary_mask_bytes, secondary_bytes, secondary_mask_bytes
-    )
-    seam_band = _seam_band_mask(graft_mask, settings.MIX_SEAM_BAND_PX)
-    overlay_bytes = _build_seam_overlay(rough_composite_bytes, seam_band)
+    # Two reference images, one per piece, each marked in its own colour. The
+    # prompt names both colours, so the order they're passed in is part of the
+    # contract: primary (magenta) first, secondary (cyan) second.
+    reference_images = [
+        _build_highlight(primary_bytes, primary_mask_bytes, _HIGHLIGHT_PRIMARY),
+        _build_highlight(secondary_bytes, secondary_mask_bytes, _HIGHLIGHT_SECONDARY),
+    ]
 
     provider = GeminiProvider(model_version=model_version)
     seed = random.randint(0, 2**31 - 1)
@@ -478,7 +391,7 @@ async def process(session: AsyncSession, redis_client: Redis, sub_job_id: uuid.U
             continue
 
         try:
-            result = provider.generate(prompt, [overlay_bytes], seed)
+            result = provider.generate(prompt, reference_images, seed)
         except ProviderError as exc:
             last_error = exc
             # docs/business-rules.md §10: cost recorded before further
@@ -505,9 +418,7 @@ async def process(session: AsyncSession, redis_client: Redis, sub_job_id: uuid.U
             model_version=result.model_version,
             unit_cost_usd=unit_cost_usd,
         )
-        await _complete_success(
-            session, job.id, sub_job, result, rough_composite_bytes, seam_band, prompt, seed
-        )
+        await _complete_success(session, job.id, sub_job, result, prompt, seed)
         await recompute_parent_status(session, job)
         return sub_job
 
@@ -522,16 +433,21 @@ async def _complete_success(
     job_id: uuid.UUID,
     sub_job: SubJob,
     result: GenerationResult,
-    rough_composite_bytes: bytes,
-    seam_band: "Image.Image",
     prompt: str,
     seed: int,
 ) -> None:
-    composited_bytes = _composite_seam_result(rough_composite_bytes, result.image_bytes, seam_band)
+    """Stores the provider's raw response as the OUTPUT asset.
+
+    No compositing step, unlike RECOLOR (Mode E) and unlike MIX itself before
+    2026-08-31. There is nothing to composite back onto: the output is a newly
+    generated piece, not an edit of either uploaded photo. Same shape as
+    match_service._complete_success, for the same reason — see this module's
+    docstring.
+    """
     assert sub_job.angle is None
     storage_path = storage_service.build_storage_path(job_id, "mix", AssetKind.OUTPUT, "png")
     storage_service.upload_bytes(
-        settings.BUCKET_OUTPUTS, storage_path, composited_bytes, "image/png"
+        settings.BUCKET_OUTPUTS, storage_path, result.image_bytes, "image/png"
     )
     output_asset = assets_repo.create_asset(
         session,
@@ -541,7 +457,7 @@ async def _complete_success(
         bucket=settings.BUCKET_OUTPUTS,
         storage_path=storage_path,
         mime_type="image/png",
-        bytes_=len(composited_bytes),
+        bytes_=len(result.image_bytes),
         expires_at=retention_policy.compute_expires_at(AssetKind.OUTPUT),
     )
     await session.flush()
@@ -551,7 +467,7 @@ async def _complete_success(
     sub_job.model_version = result.model_version
     sub_job.seed = seed
     # Straight to COMPLETED, never QA_REVIEW — see this module's docstring's
-    # "No QA gate" section.
+    # note on why MIX's no-QA-gate reason is now MATCH's.
     sub_job.status = SubJobStatus.COMPLETED
 
 

@@ -139,13 +139,14 @@ class Settings(BaseSettings):
     MASK_MIN_COVERAGE_PCT: float = 0.5
     MASK_MAX_COVERAGE_PCT: float = 60.0
 
-    # --- MIX seam-band processing (Phase 20) ---
-    # Half-width, in pixels, of the ring drawn around the graft boundary
-    # (mask A's silhouette) after the deterministic rough-composite step —
-    # both the hard-edged magenta seam overlay sent to Gemini and, feathered
-    # by MASK_FEATHER_PX above, the post-call compositing alpha are built
-    # from this same ring. See app/services/mix_service.py.
-    MIX_SEAM_BAND_PX: int = 6
+    # MIX_SEAM_BAND_PX was removed 2026-08-31. It sized the ring drawn around
+    # the graft boundary after MIX's deterministic rough-composite step; MIX no
+    # longer grafts anything, so there is no seam to band. The contour width on
+    # its new highlight images is mix_service._HIGHLIGHT_OUTLINE_PX, a module
+    # constant rather than a setting — it is a fixed property of how the two
+    # reference images are drawn, not something an operator would ever tune per
+    # deployment the way a memory ceiling is. See app/services/mix_service.py's
+    # module docstring and docs/business-rules.md §16.
 
     # --- Image processing memory ceiling (post-Phase-20 incident) ---
     # Live 2026-08-24 on the free-tier jewelry-api Render service: a single

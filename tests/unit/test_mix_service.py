@@ -1,14 +1,32 @@
-"""Phase 20 Step 4 Checkpoint 4 — deterministic rough-composite and
-seam-band logic. Pure PIL logic, no DB/Redis/Storage needed, mirroring how
-tests/unit/test_recolor_service.py keeps compositing-style pixel logic in a
-dedicated unit test rather than only exercising it indirectly through an
-integration test.
+"""MIX's highlight-building logic. Pure PIL, no DB/Redis/Storage needed,
+mirroring how tests/unit/test_recolor_service.py keeps compositing-style pixel
+logic in a dedicated unit test rather than only exercising it indirectly
+through an integration test.
 
-Real seam-blend quality against actual jewelry photography is NOT covered
-here and can't be from this environment — no real `GEMINI_API_KEY` or real
-client pieces exist to test against, same category of gap as RECOLOR's
-uncalibrated prong-bleed erosion. This only proves the deterministic
-placement/seam-band *code* behaves as intended.
+**Rewritten 2026-08-31 alongside the generative MIX rewrite.** This file used
+to cover `_build_rough_composite`, `_seam_band_mask`, `_build_seam_overlay` and
+`_composite_seam_result` — the deterministic graft pipeline and its
+byte-identical-outside-the-seam-band guarantee. None of those functions exist
+any more (see `app/services/mix_service.py`'s module docstring for why), so
+their tests are gone rather than adapted: they asserted a contract MIX no
+longer makes. Deleted with them:
+
+- `test_build_rough_composite_places_cropped_region_b_at_mask_a_bbox`
+- `test_graft_excludes_unpainted_parts_of_mask_b_bbox`
+- `test_graft_preserves_aspect_ratio_of_region_b`
+- `test_composite_seam_result_is_bounded_to_the_feathered_seam_band`
+  (and the integration-level `test_mix_output_is_byte_identical_to_
+  rough_composite_outside_seam_band`)
+
+What replaces them is narrower on purpose. The old tests could prove real
+things about the output because the output was deterministic; MIX's output is
+now a model response, so what is left to pin mechanically is that the two
+reference images we *send* are built correctly — the region is marked, the rest
+of the photo is untouched, and the marked jewelry stays visible under the mark.
+
+Whether the resulting design is any good is not testable here and never will
+be from CI (docs/ai-integration.md's "never call the live Gemini API in
+tests"). That judgement needs a real call against real client pieces.
 """
 
 import io
@@ -18,14 +36,15 @@ from PIL import Image
 
 from app.config import settings
 from app.services.mix_service import (
-    _build_rough_composite,
-    _build_seam_overlay,
-    _composite_seam_result,
+    _HIGHLIGHT_OUTLINE_PX,
+    _HIGHLIGHT_PRIMARY,
+    _HIGHLIGHT_SECONDARY,
+    _HIGHLIGHT_TINT_ALPHA,
+    _build_highlight,
     _dilate,
     _erode,
-    _feather,
     _load_downscaled,
-    _seam_band_mask,
+    _outline_mask,
 )
 
 
@@ -41,6 +60,10 @@ def _box_mask(size: tuple[int, int], box: tuple[int, int, int, int]) -> Image.Im
         for x in range(box[0], box[2]):
             mask.putpixel((x, y), 255)
     return mask
+
+
+def _open(data: bytes) -> Image.Image:
+    return Image.open(io.BytesIO(data)).convert("RGB")
 
 
 def test_dilate_grows_the_white_region() -> None:
@@ -59,314 +82,154 @@ def test_dilate_zero_px_is_a_noop() -> None:
     assert list(dilated.getdata()) == list(mask.getdata())
 
 
-def test_seam_band_mask_is_a_ring_around_the_boundary() -> None:
+def test_erode_shrinks_the_white_region() -> None:
     mask = _box_mask((40, 40), (15, 15, 25, 25))
-    band = _seam_band_mask(mask, band_px=3)
+    original_white = sum(1 for p in mask.getdata() if p == 255)
 
-    # Well inside the region (far from the boundary): not part of the seam.
-    assert band.getpixel((20, 20)) == 0
-    # Well outside the region: not part of the seam.
-    assert band.getpixel((1, 1)) == 0
-    # Right at the boundary: part of the seam.
-    assert band.getpixel((15, 20)) == 255
+    eroded = _erode(mask, px=2)
+    eroded_white = sum(1 for p in eroded.getdata() if p == 255)
+
+    assert eroded_white < original_white
 
 
-def test_build_rough_composite_places_cropped_region_b_at_mask_a_bbox() -> None:
-    """The single most important pure-logic test of this checkpoint (mirrors
-    RECOLOR's own _build_overlay test) — proves the deterministic placement
-    step works correctly *before* any provider call is even involved.
+def test_outline_mask_is_a_ring_around_the_boundary() -> None:
+    mask = _box_mask((40, 40), (10, 10, 30, 30))
+    ring = _outline_mask(mask, px=3)
+
+    # On the boundary: white. Deep inside and far outside: black.
+    assert ring.getpixel((10, 20)) == 255
+    assert ring.getpixel((20, 20)) == 0
+    assert ring.getpixel((2, 2)) == 0
+
+
+def test_outline_mask_zero_px_is_empty() -> None:
+    mask = _box_mask((20, 20), (5, 5, 15, 15))
+    assert set(_outline_mask(mask, px=0).getdata()) == {0}
+
+
+def test_highlight_leaves_pixels_outside_the_mask_byte_identical() -> None:
+    """The surrounding piece is context the model needs — that this element
+    hangs from that chain, at that scale, in that metal. Nothing outside the
+    client's painted region may be altered.
     """
-    source_a = Image.new("RGB", (40, 40), color=(10, 10, 200))
-    mask_a = _box_mask((40, 40), (10, 10, 20, 20))  # 10x10 region to receive the graft
-    source_b = Image.new("RGB", (40, 40), color=(200, 10, 10))
-    mask_b = _box_mask((40, 40), (5, 5, 15, 15))  # 10x10 region to cut from B
+    source = Image.new("RGB", (60, 60), color=(10, 120, 40))
+    mask = _box_mask((60, 60), (20, 20, 40, 40))
 
-    composite_bytes, _graft = _build_rough_composite(
-        _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
-    )
-    composite = Image.open(io.BytesIO(composite_bytes)).convert("RGB")
+    out = _open(_build_highlight(_png_bytes(source), _png_bytes(mask), _HIGHLIGHT_PRIMARY))
 
-    # Inside mask A's bbox: region B's color (the graft).
-    assert composite.getpixel((15, 15)) == (200, 10, 10)
-    # Outside mask A's bbox entirely: source A's own, untouched pixel.
-    assert composite.getpixel((35, 35)) == (10, 10, 200)
+    # Well clear of the region and of the outline ring that straddles it.
+    for point in ((2, 2), (58, 2), (2, 58), (58, 58), (10, 30)):
+        assert out.getpixel(point) == (10, 120, 40), f"pixel {point} was modified"
 
 
-def test_build_rough_composite_leaves_pixels_outside_mask_a_bbox_untouched() -> None:
-    source_a = Image.new("RGB", (40, 40), color=(10, 10, 200))
-    mask_a = _box_mask((40, 40), (15, 15, 25, 25))
-    source_b = Image.new("RGB", (40, 40), color=(200, 10, 10))
-    mask_b = _box_mask((40, 40), (0, 0, 10, 10))
+def test_highlight_tints_the_masked_region_toward_the_marker_colour() -> None:
+    source = Image.new("RGB", (60, 60), color=(0, 0, 0))
+    mask = _box_mask((60, 60), (20, 20, 40, 40))
 
-    composite_bytes, _graft = _build_rough_composite(
-        _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
-    )
-    composite = Image.open(io.BytesIO(composite_bytes)).convert("RGB")
+    out = _open(_build_highlight(_png_bytes(source), _png_bytes(mask), _HIGHLIGHT_PRIMARY))
 
-    for corner in [(1, 1), (38, 1), (1, 38), (38, 38)]:
-        assert composite.getpixel(corner) == (10, 10, 200)
+    # Interior, away from the outline ring. Black blended 30% toward magenta.
+    r, g, b = out.getpixel((30, 30))
+    expected = round(255 * _HIGHLIGHT_TINT_ALPHA)
+    assert abs(r - expected) <= 1
+    assert g == 0
+    assert abs(b - expected) <= 1
 
 
-def test_build_rough_composite_handles_different_aspect_ratios_without_crashing() -> None:
-    """Pins the documented, deliberately non-aspect-preserving scale-to-fit
-    behavior — see phases/phase-20-mix.md Step 3's note. A tall region B
-    stretched into a wide region A must not crash or silently crop.
+def test_highlight_keeps_the_marked_jewelry_visible() -> None:
+    """The single most important property, and the one that separates this
+    from RECOLOR's overlay: the marked region is what Gemini must *reproduce*,
+    so it cannot be painted over opaquely the way RECOLOR paints a region it
+    wants replaced. Two different source colours under the same mark must stay
+    distinguishable in the output.
     """
-    source_a = Image.new("RGB", (40, 40), color=(10, 10, 200))
-    mask_a = _box_mask((40, 40), (5, 15, 35, 25))  # wide: 30x10
-    source_b = Image.new("RGB", (40, 40), color=(200, 10, 10))
-    mask_b = _box_mask((40, 40), (15, 5, 25, 35))  # tall: 10x30
+    mask = _box_mask((60, 60), (20, 20, 40, 40))
+    light = Image.new("RGB", (60, 60), color=(230, 200, 120))  # gold
+    dark = Image.new("RGB", (60, 60), color=(20, 90, 60))  # emerald
 
-    composite_bytes, _graft = _build_rough_composite(
-        _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
-    )
-    composite = Image.open(io.BytesIO(composite_bytes)).convert("RGB")
-    assert composite.size == (40, 40)
-    assert composite.getpixel((20, 20)) == (200, 10, 10)
+    light_out = _open(_build_highlight(_png_bytes(light), _png_bytes(mask), _HIGHLIGHT_PRIMARY))
+    dark_out = _open(_build_highlight(_png_bytes(dark), _png_bytes(mask), _HIGHLIGHT_PRIMARY))
 
-
-def test_build_seam_overlay_paints_magenta_only_inside_the_seam_band() -> None:
-    rough = Image.new("RGB", (40, 40), color=(10, 10, 200))
-    mask_a = _box_mask((40, 40), (15, 15, 25, 25))
-    band = _seam_band_mask(mask_a, band_px=3)
-
-    overlay_bytes = _build_seam_overlay(_png_bytes(rough), band)
-    overlay = Image.open(io.BytesIO(overlay_bytes)).convert("RGB")
-
-    # Well inside the graft's interior (not part of the seam ring): untouched.
-    assert overlay.getpixel((20, 20)) == (10, 10, 200)
-    # Well outside the graft entirely: untouched.
-    assert overlay.getpixel((1, 1)) == (10, 10, 200)
-    # Right at the boundary (part of the seam ring): magenta.
-    assert overlay.getpixel((15, 20)) == (255, 0, 255)
+    light_px = light_out.getpixel((30, 30))
+    dark_px = dark_out.getpixel((30, 30))
+    assert light_px != dark_px
+    # Not merely different — still clearly separable, not crushed toward the
+    # marker colour. Green is the channel magenta contributes nothing to.
+    assert light_px[1] - dark_px[1] > 50
 
 
-def test_composite_seam_result_is_bounded_to_the_feathered_seam_band() -> None:
-    """Mirrors RECOLOR's own off-mask pixel identity test — everywhere the
-    feathered seam band is 0, the result must be rough_composite's own
-    pixel, exactly, regardless of what the provider changed."""
-    rough = Image.new("RGB", (60, 60), color=(10, 10, 200))
-    # A large box so its center sits well beyond the seam band's own width
-    # (band_px=3) plus the compositing feather (settings.MASK_FEATHER_PX=3)
-    # — a combined influence radius of ~6px from the boundary.
-    mask_a = _box_mask((60, 60), (10, 10, 50, 50))
-    band = _seam_band_mask(mask_a, band_px=3)
-    # Simulate "the model changed everything, not just the seam."
-    provider_output = Image.new("RGB", (60, 60), color=(0, 255, 0))
+def test_highlight_draws_a_solid_outline_on_the_boundary() -> None:
+    source = Image.new("RGB", (60, 60), color=(128, 128, 128))
+    mask = _box_mask((60, 60), (20, 20, 40, 40))
 
-    result_bytes = _composite_seam_result(_png_bytes(rough), _png_bytes(provider_output), band)
-    result = Image.open(io.BytesIO(result_bytes)).convert("RGB")
+    out = _open(_build_highlight(_png_bytes(source), _png_bytes(mask), _HIGHLIGHT_PRIMARY))
 
-    for corner in [(1, 1), (58, 1), (1, 58), (58, 58)]:
-        assert result.getpixel(corner) == (10, 10, 200)
-    # Well inside the graft's interior (outside the seam band): also untouched.
-    assert result.getpixel((30, 30)) == (10, 10, 200)
+    # The ring straddles the boundary, so the boundary pixel itself is solid
+    # marker colour rather than a tint of the source.
+    assert out.getpixel((20, 30)) == _HIGHLIGHT_PRIMARY
+    assert _HIGHLIGHT_OUTLINE_PX > 0
 
 
-def test_erode_and_feather_are_available_for_reuse_shape() -> None:
-    """mix_service.py reimplements erode/feather as its own module-level
-    functions rather than importing recolor_service.py's — see this
-    module's own docstring on why. Sanity-check the shape is unchanged."""
-    mask = _box_mask((10, 10), (2, 2, 8, 8))
-    assert _erode(mask, px=0) is mask or list(_erode(mask, px=0).getdata()) == list(mask.getdata())
-    feathered = _feather(mask, px=2)
-    assert any(0 < v < 255 for v in feathered.getdata())
+def test_the_two_marker_colours_are_distinct() -> None:
+    """The prompt distinguishes the two pieces by colour alone (migration
+    0020), so a change that made these equal would silently destroy the
+    pairing while every other test still passed.
+    """
+    assert _HIGHLIGHT_PRIMARY != _HIGHLIGHT_SECONDARY
 
 
-# --- post-Phase-20 incident fix: WORKING_MAX_EDGE downscale (2026-08-24) ---
+def test_highlight_uses_the_colour_it_is_given() -> None:
+    source = Image.new("RGB", (60, 60), color=(0, 0, 0))
+    mask = _box_mask((60, 60), (20, 20, 40, 40))
+
+    out = _open(_build_highlight(_png_bytes(source), _png_bytes(mask), _HIGHLIGHT_SECONDARY))
+
+    # Cyan is (0, 255, 255): no red contribution, unlike magenta's tint.
+    r, g, b = out.getpixel((30, 30))
+    assert r == 0
+    assert g > 0
+    assert b > 0
 
 
-def test_build_seam_overlay_downscales_an_oversized_rough_composite(
+def test_highlight_output_is_capped_at_working_max_edge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Mirrors recolor_service's own equivalent test — the overlay sent to
-    Gemini is a throwaway input, so it's safe to shrink. Lower the cap
-    rather than using a real multi-thousand-pixel fixture, same reasoning
-    as recolor's own test.
+    """The 2026-08-27 OOM fix still applies — a real client upload is 12.6 MP
+    and the instance has ~160 MB of headroom. See app/config.py's
+    WORKING_MAX_EDGE note.
     """
-    monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 50)
-    rough = Image.new("RGB", (200, 100), color=(10, 10, 200))
-    seam_band = _box_mask((200, 100), (80, 40, 120, 60))
+    monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 64)
+    source = Image.new("RGB", (300, 200), color=(10, 20, 30))
+    mask = _box_mask((300, 200), (100, 80, 200, 150))
 
-    overlay_bytes = _build_seam_overlay(_png_bytes(rough), seam_band)
-    overlay = Image.open(io.BytesIO(overlay_bytes)).convert("RGB")
+    out = _open(_build_highlight(_png_bytes(source), _png_bytes(mask), _HIGHLIGHT_PRIMARY))
 
-    assert max(overlay.size) == 50
-    assert overlay.size == (50, 25)
+    assert max(out.size) == 64
+    assert out.size == (64, 43)
 
 
-def test_build_rough_composite_output_is_capped_at_working_max_edge(
+def test_highlight_leaves_a_small_image_at_native_size(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """2026-08-27: this replaces an earlier test that asserted the OUTPUT
-    stayed at source A's full resolution. That guarantee was given up
-    deliberately — measured against the real 3072x4096 client upload the
-    full-res pipeline needed ~187MB against ~160MB of headroom on the 512MB
-    free instance and was OOM-killed before every single Gemini attempt.
-    Capping the whole working canvas is what makes MIX run at all here.
-    """
-    monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 50)
-    source_a = Image.new("RGB", (200, 100), color=(10, 10, 200))
-    mask_a = _box_mask((200, 100), (20, 20, 60, 60))
-    source_b = Image.new("RGB", (90, 90), color=(0, 255, 0))
-    mask_b = _box_mask((90, 90), (10, 10, 80, 80))
-
-    rough_bytes, _graft = _build_rough_composite(
-        _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
-    )
-    rough = Image.open(io.BytesIO(rough_bytes)).convert("RGB")
-
-    # 200x100 scaled so the longest edge is 50 -> 50x25.
-    assert rough.size == (50, 25)
-    assert max(rough.size) == 50
-
-
-def test_build_rough_composite_leaves_a_small_image_untouched(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The cap is a ceiling, not a resize-everything rule — an image already
-    under WORKING_MAX_EDGE must come through at its own native size, or every
-    existing small-fixture test would be silently changing shape.
-    """
     monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 2048)
-    source_a = Image.new("RGB", (200, 100), color=(10, 10, 200))
-    mask_a = _box_mask((200, 100), (20, 20, 60, 60))
-    source_b = Image.new("RGB", (90, 90), color=(0, 255, 0))
-    mask_b = _box_mask((90, 90), (10, 10, 80, 80))
+    source = Image.new("RGB", (60, 40), color=(10, 20, 30))
+    mask = _box_mask((60, 40), (20, 10, 40, 30))
 
-    rough_bytes, _graft = _build_rough_composite(
-        _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
-    )
-    assert Image.open(io.BytesIO(rough_bytes)).size == (200, 100)
+    out = _open(_build_highlight(_png_bytes(source), _png_bytes(mask), _HIGHLIGHT_PRIMARY))
+
+    assert out.size == (60, 40)
 
 
 def test_downscaled_mask_stays_binary(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`_seam_band_mask`'s dilate-minus-erode and the paste alpha both assume
-    the 0/255 mask `mask_validation` guarantees on ingest. Downscaling with a
-    smooth filter would introduce intermediate values and quietly blur the
-    seam ring, so masks must resample with NEAREST.
+    """`_outline_mask`'s dilate-minus-erode assumes a binary mask; a LANCZOS
+    resize would introduce intermediate values and soften the contour into a
+    gradient. `_load_downscaled` uses NEAREST for masks specifically to
+    prevent that.
     """
-    monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 64)
-    mask = _box_mask((256, 256), (64, 64, 192, 192))
+    monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 40)
+    mask = _box_mask((160, 160), (40, 40, 120, 120))
 
     downscaled = _load_downscaled(_png_bytes(mask), "L")
 
-    assert downscaled.size == (64, 64)
+    assert max(downscaled.size) == 40
     assert set(downscaled.getdata()) <= {0, 255}
-
-
-def test_graft_mask_matches_rough_composite_size(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The graft mask feeds the seam band, which is finally composited
-    against the rough composite. If those disagree on size the failure lands
-    in `_composite_seam_result` — after the billed Gemini call. Pin that they
-    agree.
-    """
-    monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 50)
-    source_a = Image.new("RGB", (200, 100), color=(10, 10, 200))
-    mask_a = _box_mask((200, 100), (20, 20, 60, 60))
-    source_b = Image.new("RGB", (90, 90), color=(0, 255, 0))
-    mask_b = _box_mask((90, 90), (10, 10, 80, 80))
-
-    rough_bytes, graft = _build_rough_composite(
-        _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
-    )
-    band = _seam_band_mask(graft, settings.MIX_SEAM_BAND_PX)
-
-    assert graft.size == Image.open(io.BytesIO(rough_bytes)).size
-    assert band.size == graft.size
-
-
-def test_graft_excludes_unpainted_parts_of_mask_b_bbox() -> None:
-    """Regression test for the 2026-08-28 defect found on job `fe7d6372`.
-
-    Mask B is two separate blobs, so 60%+ of their shared bounding box is
-    unpainted background. The old code grafted that whole rectangle, which
-    put mannequin-beige in the middle of the client's pendant. Only pixels
-    inside B's painted shape may travel.
-    """
-    source_a = Image.new("RGB", (80, 80), color=(10, 10, 200))
-    mask_a = _box_mask((80, 80), (20, 20, 60, 60))
-    # B: green subject on an unmistakable magenta "background" that must NOT
-    # be grafted. Two separate painted blobs, far apart, like the two gold
-    # bands in the real job.
-    source_b = Image.new("RGB", (80, 80), color=(255, 0, 255))
-    for y in range(10, 30):
-        for x in range(10, 25):
-            source_b.putpixel((x, y), (0, 255, 0))
-        for x in range(55, 70):
-            source_b.putpixel((x, y), (0, 255, 0))
-    mask_b = Image.new("L", (80, 80), 0)
-    for y in range(10, 30):
-        for x in range(10, 25):
-            mask_b.putpixel((x, y), 255)
-        for x in range(55, 70):
-            mask_b.putpixel((x, y), 255)
-
-    composite_bytes, graft = _build_rough_composite(
-        _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
-    )
-    composite = Image.open(io.BytesIO(composite_bytes)).convert("RGB")
-
-    # The magenta gap between B's two blobs must never appear in the output.
-    assert (255, 0, 255) not in set(composite.getdata()), (
-        "unpainted background from mask B's bounding box leaked into the graft"
-    )
-    # Something was still grafted, and only inside A's region.
-    assert graft.getbbox() is not None
-    gx0, gy0, gx1, gy1 = graft.getbbox()
-    assert gx0 >= 20 and gy0 >= 20 and gx1 <= 60 and gy1 <= 60
-
-
-def test_graft_preserves_aspect_ratio_of_region_b() -> None:
-    """A tall region grafted into a wide box must keep its proportions and be
-    centred, not stretched to fill — the second 2026-08-28 defect.
-    """
-    source_a = Image.new("RGB", (120, 120), color=(10, 10, 200))
-    mask_a = _box_mask((120, 120), (10, 50, 110, 70))  # wide box: 100x20
-    source_b = Image.new("RGB", (120, 120), color=(200, 10, 10))
-    mask_b = _box_mask((120, 120), (50, 10, 70, 110))  # tall region: 20x100
-
-    _bytes, graft = _build_rough_composite(
-        _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
-    )
-
-    gx0, gy0, gx1, gy1 = graft.getbbox()
-    gw, gh = gx1 - gx0, gy1 - gy0
-    # Source region is 20x100 (0.2). Fitted into a 100x20 box, the limiting
-    # dimension is height, so it should land ~4x20 -- still tall and narrow,
-    # NOT stretched to 100x20.
-    assert gh > gw, f"aspect inverted: graft is {gw}x{gh}, expected taller than wide"
-    assert abs((gw / gh) - 0.2) < 0.1, f"aspect not preserved: {gw}x{gh}"
-    # And centred horizontally in A's box.
-    assert abs(((gx0 + gx1) / 2) - 60) <= 2
-
-
-def test_build_rough_composite_downscales_source_b_before_crop(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """2026-08-25 follow-up to the incident fix above: source B/mask B are
-    now bounded by WORKING_MAX_EDGE before the crop, since they're always
-    cropped-then-resized into region A's bbox regardless. Proves the
-    downscale-then-crop-then-resize pipeline still lands the graft in the
-    right place with the right color — this is the memory-saving half of
-    the fix; the other half (output stays full resolution) is pinned by
-    the test above.
-    """
-    monkeypatch.setattr(settings, "WORKING_MAX_EDGE", 50)
-    source_a = Image.new("RGB", (40, 40), color=(10, 10, 200))
-    mask_a = _box_mask((40, 40), (10, 10, 20, 20))  # 10x10 region to receive the graft
-    # Source B is well over the 50px cap and will be downscaled before its
-    # own bbox/crop is computed.
-    source_b = Image.new("RGB", (300, 300), color=(200, 10, 10))
-    mask_b = _box_mask((300, 300), (50, 50, 150, 150))
-
-    composite_bytes, _graft = _build_rough_composite(
-        _png_bytes(source_a), _png_bytes(mask_a), _png_bytes(source_b), _png_bytes(mask_b)
-    )
-    composite = Image.open(io.BytesIO(composite_bytes)).convert("RGB")
-
-    assert composite.size == (40, 40)  # source A's own size, unaffected by the cap
-    # Inside mask A's bbox: still region B's color, despite B being downscaled first.
-    assert composite.getpixel((15, 15)) == (200, 10, 10)
-    # Outside mask A's bbox entirely: source A's own, untouched pixel.
-    assert composite.getpixel((35, 35)) == (10, 10, 200)
