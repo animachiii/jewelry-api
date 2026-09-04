@@ -141,6 +141,23 @@ async def retry_job(
     if not sub_jobs:
         raise NotFoundError("No sub-job found on this job.", details={"job_id": job_id})
 
+    # 2026-08-31: GENERATE_WITH_CLEANUP defers creating its angle sub-jobs
+    # until its cleanup step succeeds (docs/superpowers/specs/
+    # 2026-08-31-generate-with-cleanup-design.md section 4) — so job-level
+    # retry is valid ONLY while the job hasn't moved past that step yet.
+    # Once any angle sub-job exists, retrying a specific angle must go
+    # through the per-angle route, same posture ANGLE_GENERATION jobs
+    # always have, just conditional here on pipeline phase rather than
+    # unconditional on operation.
+    if job.operation == Operation.GENERATE_WITH_CLEANUP and any(
+        sj.angle is not None for sj in sub_jobs
+    ):
+        raise AngleJobRetryNotAllowedError(
+            "This job has moved past its cleanup step — retry a specific "
+            "angle via POST /jobs/{job_id}/angles/{angle}/retry.",
+            details={"job_id": job_id},
+        )
+
     # Keyed off the job, not a specific sub-job ID — see this route's own
     # 2026-08-16 note below on why. Same "check before preconditions" order
     # as the angle route above: a replay of an already-accepted retry is
@@ -222,6 +239,7 @@ async def retry_job(
     await session.commit()
 
     from app.workers.background import process_task as background_process_task
+    from app.workers.cleanup import process_task as cleanup_process_task
     from app.workers.match import process_task as match_process_task
     from app.workers.mix import process_task as mix_process_task
     from app.workers.recolor import process_task as recolor_process_task
@@ -230,6 +248,7 @@ async def retry_job(
         Operation.MATCH: match_process_task,
         Operation.RECOLOR: recolor_process_task,
         Operation.MIX: mix_process_task,
+        Operation.GENERATE_WITH_CLEANUP: cleanup_process_task,
     }.get(job.operation, background_process_task)
     for sub_job in failed:
         dispatch_task.delay(str(sub_job.id))
