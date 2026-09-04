@@ -10,7 +10,7 @@ from app.api.v2.schemas.status import JobStatusResponse
 from app.core.auth import require_client_scope
 from app.core.errors import NotFoundError
 from app.db.models.api_clients import ApiClient
-from app.db.models.enums import Operation
+from app.db.models.enums import Angle, Operation
 from app.db.repositories import assets as assets_repo
 from app.db.repositories import jobs as jobs_repo
 from app.db.session import get_db
@@ -79,10 +79,23 @@ async def get_status(
         # unmodified, since each angle sub-job's input_asset_id already
         # points at the cleanup output by the time it's created.
         cleanup_angle_sub_jobs = [sj for sj in sub_jobs if sj.angle is not None]
-        angle_statuses = [
-            status_service.build_angle_status(job, sub_job, bucket_and_paths[sub_job.id])
-            for sub_job in cleanup_angle_sub_jobs
-        ]
+        if not cleanup_angle_sub_jobs:
+            # Phase 1: cleanup still running (or failed -- but a failed
+            # cleanup makes the PARENT job FAILED via the unmodified
+            # rollup, which this same response already reflects via
+            # `status`; the synthesized angles here just mean "no angle
+            # sub-job exists yet," which is also true on a cleanup
+            # failure, and is not misleading paired with status: FAILED).
+            assert job.requested_angle_codes is not None
+            angle_statuses = [
+                status_service.build_pending_angle_status(Angle(code))
+                for code in job.requested_angle_codes
+            ]
+        else:
+            angle_statuses = [
+                status_service.build_angle_status(job, sub_job, bucket_and_paths[sub_job.id])
+                for sub_job in cleanup_angle_sub_jobs
+            ]
         return status_service.build_job_status_response(job, angle_statuses)
 
     if job.operation == Operation.MATCH:

@@ -494,3 +494,82 @@ async def test_cost_report_includes_cleanup_and_angle_calls(
         .all()
     )
     assert len(events) == 3  # 1 cleanup call + 2 angle calls
+
+
+async def test_status_shows_synthesized_pending_angles_during_cleanup_phase(
+    client: AsyncClient,
+    api_client_key: str,
+    db_session: AsyncSession,
+) -> None:
+    """Before any angle sub-job exists, GET /status must show a PENDING
+    entry per requested angle -- not an empty array, which would be
+    indistinguishable from "nothing requested"."""
+    storage_path = await _presign_and_upload(client, api_client_key)
+
+    # Build a job in exactly the state phase 1 leaves it in, without going
+    # through the full async pipeline (which completes synchronously under
+    # task_always_eager and leaves no observable in-between state over
+    # real HTTP) -- same technique used elsewhere in this test suite for
+    # states that are real but transient in production.
+    from app.db.models.enums import AssetKind, JobStatus, SourceType, SubJobStatus
+    from app.db.repositories import assets as assets_repo
+    from app.db.repositories import config_versions as config_versions_repo
+    from app.db.repositories import jobs as jobs_repo
+    from app.services import retention_policy
+
+    cv = await config_versions_repo.get_active(db_session)
+    assert cv is not None
+
+    client_row = (
+        await db_session.execute(
+            select(ApiClient).where(ApiClient.key_prefix == api_client_key[:8])
+        )
+    ).scalar_one()
+
+    job = jobs_repo.create_job(
+        db_session,
+        client_id=client_row.id,
+        idempotency_key="phase-1-status-test",
+        payload_hash="phase-1-status-test-hash",
+        category_code="RING",
+        config_version_id=cv.id,
+        requested_angles=2,
+        sku_reference=None,
+        metadata={},
+        operation=Operation.GENERATE_WITH_CLEANUP,
+        requested_angle_codes=["FRONT", "SIDE"],
+    )
+    await db_session.flush()
+    job.status = JobStatus.PROCESSING
+    asset = assets_repo.create_asset(
+        db_session,
+        job_id=job.id,
+        kind=AssetKind.INPUT,
+        bucket="jewelry-inputs",
+        storage_path=storage_path,
+        mime_type="image/jpeg",
+        expires_at=retention_policy.compute_expires_at(AssetKind.INPUT),
+    )
+    await db_session.flush()
+    jobs_repo.create_sub_job(
+        db_session,
+        job_id=job.id,
+        angle=None,
+        status=SubJobStatus.GENERATING,
+        source_type=SourceType.UPLOADED,
+        input_asset_id=asset.id,
+    )
+    await db_session.commit()
+
+    status_resp = await client.get(
+        f"/api/v2/status/{job.id}", headers={"X-API-Key": api_client_key}
+    )
+    assert status_resp.status_code == 200
+    body = status_resp.json()
+    assert body["status"] == "PROCESSING"
+    assert len(body["angles"]) == 2
+    assert {a["angle"] for a in body["angles"]} == {"FRONT", "SIDE"}
+    for angle_status in body["angles"]:
+        assert angle_status["status"] == "PENDING"
+        assert angle_status["image_url"] is None
+        assert angle_status["retryable"] is False
