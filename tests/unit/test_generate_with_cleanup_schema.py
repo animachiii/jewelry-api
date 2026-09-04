@@ -53,3 +53,20 @@ async def test_create_job_accepts_requested_angle_codes(db_session: AsyncSession
         requested_angle_codes=["FRONT", "SIDE"],
     )
     assert job.requested_angle_codes == ["FRONT", "SIDE"]
+
+
+def test_generate_with_cleanup_request_rejects_empty_angles_list_at_service_layer() -> None:
+    """Not a Pydantic-level constraint on purpose -- every existing /generate-
+    family validation failure uses a specific ErrorCode via the standard
+    error envelope (docs/conventions.md), not a generic Pydantic 422. See
+    NoAnglesRequestedError, already used by /generate for the identical rule.
+    """
+    from app.api.v2.schemas.generate_with_cleanup import GenerateWithCleanupRequest
+
+    # An empty list is valid Pydantic input -- the check belongs to the
+    # service layer (job_service.create_generate_with_cleanup_job_for_request),
+    # exercised in the integration tests (Task 8), not here.
+    request = GenerateWithCleanupRequest(
+        storage_path="pending/test/x/y.jpg", category_code="RING", angles=[]
+    )
+    assert request.angles == []

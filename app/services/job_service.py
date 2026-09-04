@@ -16,9 +16,10 @@ from app.api.v2.schemas.generate import (
     ResolvedAnglePlan,
     ResolvedVariantPlan,
 )
+from app.api.v2.schemas.generate_with_cleanup import GenerateWithCleanupRequest
 from app.config import settings
 from app.core import ratelimit
-from app.core.errors import AppError, ErrorCode, QuotaExceededError, RateLimitError
+from app.core.errors import AppError, ErrorCode, QuotaExceededError, RateLimitError, ValidationError
 from app.core.idempotency import IdempotencyKeyConflictError
 from app.db.models.api_clients import ApiClient
 from app.db.models.assets import Asset
@@ -1454,3 +1455,183 @@ async def _handle_mix_replay_race(
             "This Idempotency-Key was already used with a different request body."
         )
     return await _build_mix_accepted_response(existing.id, primary_storage_path)
+
+
+async def create_generate_with_cleanup_job_for_request(
+    session: AsyncSession,
+    client: ApiClient,
+    config_version: ConfigVersion,
+    body: GenerateWithCleanupRequest,
+    idempotency_key: str,
+    payload_hash: str,
+) -> JobAcceptedResponse:
+    """Implements POST /generate-with-cleanup. Creates the job plus its ONE
+    cleanup sub-job and dispatches cleanup.process — see
+    docs/superpowers/specs/2026-08-31-generate-with-cleanup-design.md.
+
+    Unlike create_job_for_request, this does NOT create any angle sub-jobs
+    here — those are created later, by app/workers/cleanup.py, once the
+    cleanup step succeeds. See that module's docstring for why (three
+    independent bugs eager creation causes, spec section 4).
+    """
+    existing = await jobs_repo.get_by_idempotency_key(session, client.id, idempotency_key)
+    if existing is not None:
+        if existing.payload_hash != payload_hash:
+            raise IdempotencyKeyConflictError(
+                "This Idempotency-Key was already used with a different request body."
+            )
+        return await _build_generate_with_cleanup_accepted_response(existing.id, body)
+
+    await _enforce_rate_limit_and_quota(session, client)
+
+    validate_operation_enabled(config_version, Operation.GENERATE_WITH_CLEANUP)
+
+    category = find_category(config_version, body.category_code)
+    if category is None:
+        raise CategoryNotFoundError(
+            f"Category {body.category_code} not found.",
+            details={"category_code": body.category_code},
+        )
+    if not category["is_active"]:
+        raise CategoryInactiveError(
+            f"Category {category['code']} is not active.",
+            details={"category_code": category["code"]},
+        )
+
+    if not body.angles:
+        raise NoAnglesRequestedError("At least one angle must be requested.")
+    if len(set(body.angles)) != len(body.angles):
+        raise ValidationError(
+            "Duplicate angles requested.", details={"angles": [a.value for a in body.angles]}
+        )
+    for angle in body.angles:
+        angle_config = category["angles"].get(angle.value, {})
+        if not angle_config.get("enabled", False):
+            raise AngleNotEnabledError(
+                f"Angle {angle.value} is not enabled for category {category['code']}.",
+                details={"category_code": category["code"], "angle": angle.value},
+            )
+
+    if not storage_service.exists(settings.BUCKET_INPUTS, body.storage_path):
+        raise AssetNotFoundError(
+            f"No uploaded asset found at {body.storage_path}.",
+            details={"storage_path": body.storage_path},
+        )
+    if not body.storage_path.startswith(f"pending/{client.id}/"):
+        raise AssetNotOwnedError(
+            f"storage_path {body.storage_path} does not belong to this client.",
+            details={"storage_path": body.storage_path},
+        )
+    meta = image_validation.inspect_and_validate(settings.BUCKET_INPUTS, body.storage_path)
+
+    job = jobs_repo.create_job(
+        session,
+        client_id=client.id,
+        idempotency_key=idempotency_key,
+        payload_hash=payload_hash,
+        category_code=body.category_code,
+        config_version_id=config_version.id,
+        requested_angles=len(body.angles),
+        sku_reference=body.sku_reference,
+        metadata=body.metadata,
+        operation=Operation.GENERATE_WITH_CLEANUP,
+        requested_angle_codes=[a.value for a in body.angles],
+    )
+
+    try:
+        await session.flush()  # assigns job.id
+    except IntegrityError:
+        await session.rollback()
+        return await _handle_generate_with_cleanup_replay_race(
+            session, client, idempotency_key, payload_hash, body
+        )
+
+    validate_operation_angle_consistency(Operation.GENERATE_WITH_CLEANUP, None)
+    asset = assets_repo.create_asset(
+        session,
+        job_id=job.id,
+        kind=AssetKind.INPUT,
+        bucket=settings.BUCKET_INPUTS,
+        storage_path=body.storage_path,
+        mime_type=meta.mime_type,
+        width_px=meta.width_px,
+        height_px=meta.height_px,
+        bytes_=meta.bytes,
+        checksum_sha256=meta.checksum_sha256,
+        expires_at=retention_policy.compute_expires_at(AssetKind.INPUT),
+    )
+    await session.flush()  # assigns asset.id
+
+    cleanup_sub_job = jobs_repo.create_sub_job(
+        session,
+        job_id=job.id,
+        angle=None,
+        status=SubJobStatus.PENDING,
+        source_type=SourceType.UPLOADED,
+        input_asset_id=asset.id,
+    )
+    await session.flush()  # assigns cleanup_sub_job.id
+
+    job_events_repo.record_event(
+        session,
+        job.id,
+        "JOB_CREATED",
+        to_status=job.status.value,
+        detail={
+            "category_code": body.category_code,
+            "requested_angles": len(body.angles),
+            "requested_angle_codes": [a.value for a in body.angles],
+        },
+    )
+
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        return await _handle_generate_with_cleanup_replay_race(
+            session, client, idempotency_key, payload_hash, body
+        )
+
+    from app.workers.cleanup import process_task
+
+    process_task.delay(str(cleanup_sub_job.id))
+
+    return await _build_generate_with_cleanup_accepted_response(job.id, body)
+
+
+async def _handle_generate_with_cleanup_replay_race(
+    session: AsyncSession,
+    client: ApiClient,
+    idempotency_key: str,
+    payload_hash: str,
+    body: "GenerateWithCleanupRequest",
+) -> JobAcceptedResponse:
+    existing = await jobs_repo.get_by_idempotency_key(session, client.id, idempotency_key)
+    if existing is None:
+        raise AppError(
+            "Idempotency key conflict could not be resolved.", code=ErrorCode.INTERNAL_ERROR
+        )
+    if existing.payload_hash != payload_hash:
+        raise IdempotencyKeyConflictError(
+            "This Idempotency-Key was already used with a different request body."
+        )
+    return await _build_generate_with_cleanup_accepted_response(existing.id, body)
+
+
+async def _build_generate_with_cleanup_accepted_response(
+    job_id: uuid.UUID, body: "GenerateWithCleanupRequest"
+) -> JobAcceptedResponse:
+    return JobAcceptedResponse(
+        job_id=str(job_id),
+        status="PENDING",
+        angles=[
+            ResolvedAnglePlan(
+                angle=angle,
+                source_type=SourceType.UPLOADED,
+                status=SubJobStatus.PENDING,
+                storage_path=None,
+            )
+            for angle in body.angles
+        ],
+        poll_after_ms=POLL_AFTER_MS,
+    )
