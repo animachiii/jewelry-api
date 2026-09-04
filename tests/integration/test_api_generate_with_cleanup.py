@@ -398,8 +398,20 @@ async def test_job_level_retry_blocked_once_angle_sub_jobs_exist(
     same posture ANGLE_GENERATION jobs already have, conditional here on
     whether the pipeline has moved past its cleanup phase.
 
-    **Expected to fail until Task 9** wires GENERATE_WITH_CLEANUP-specific
-    handling into retry.py -- see the note on the retry test above.
+    **Passes today, but not for a GENERATE_WITH_CLEANUP-specific reason --
+    app/api/v2/retry.py has no such logic yet (that's Task 9).** It passes
+    because job.operation != ANGLE_GENERATION, so the route skips its early
+    409, finds no FAILED sub-job (both cleanup and angle are COMPLETED here),
+    and falls into the generic "if not failed" branch, which calls
+    check_retry_preconditions(sub_jobs[0], ...) -- and a COMPLETED sub-job is
+    not FAILED, so that raises 409 on its own, coincidentally producing the
+    right client-facing status code. This is the existing generic
+    precondition check doing the work, not anything that knows this is a
+    GENERATE_WITH_CLEANUP job past its cleanup phase. Left here as a
+    regression guard (still correctly 409s), not as proof Task 9 is done --
+    whoever implements Task 9 should replace this reasoning with real
+    GENERATE_WITH_CLEANUP-aware logic, not assume the coincidence will keep
+    holding once retry.py changes shape.
     """
     storage_path = await _presign_and_upload(client, api_client_key)
     resp = await client.post(
