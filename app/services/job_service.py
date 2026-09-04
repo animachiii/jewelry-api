@@ -126,7 +126,15 @@ def validate_operation_angle_consistency(operation: Operation, angle: Angle | No
     parent job is ANGLE_GENERATION — see docs/schema.md and
     phases/phase-15-background-operations.md Step 2). Every code path that
     builds a SubJob must call this before `jobs_repo.create_sub_job`.
+
+    GENERATE_WITH_CLEANUP is exempt from both directions (2026-08-31,
+    docs/superpowers/specs/2026-08-31-generate-with-cleanup-design.md
+    section 3) — it is the first operation with heterogeneous sub-job
+    shapes: one angle-less cleanup sub-job, and 1-4 angled sub-jobs created
+    once cleanup succeeds. Either angle value is valid for it.
     """
+    if operation == Operation.GENERATE_WITH_CLEANUP:
+        return
     if operation == Operation.ANGLE_GENERATION and angle is None:
         raise ValueError(f"{operation.value} sub-jobs must specify an angle.")
     if operation != Operation.ANGLE_GENERATION and angle is not None:
