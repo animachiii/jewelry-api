@@ -315,6 +315,73 @@ assets are the exact case that motivated this rewrite. Validating against them
 is a real, available step, not a blocked one. A correction belongs here and in
 `docs/business-rules.md` §16, not silently in code.
 
+### Mode G — Cleanup-then-angles (GENERATE_WITH_CLEANUP, 2026-08-31)
+
+| | |
+| :--- | :--- |
+| **Trigger** | Two calls per job, in sequence. Phase 1: the job's cleanup sub-job enters `GENERATING` (same trigger as every other mode). Phase 2: each of the job's angle sub-jobs enters `GENERATING`, once created |
+| **Where** | Phase 1: Celery `io` queue, `app/workers/cleanup.py` via `app/services/cleanup_service.py::process`. Phase 2: Celery `io` queue, `app/workers/generation.py` — the **exact same task** Mode A angles already run on |
+| **Input** | Phase 1: one uploaded photo. Phase 2: the cleanup step's own output asset, in place of a client upload |
+| **Output** | Phase 1: a background-cleaned product photo, never exposed to the client. Phase 2: an ordinary Mode A angle output |
+
+**Phase 1 is Mode A's own background-removal transformation, reused
+verbatim as an internal pipeline stage — not new provider logic.**
+`app/services/cleanup_service.py` mirrors `background_service.py::process`
+almost exactly (same rate-limit → provider call → cost event →
+success/fail shape, same `GeminiProvider` call), and migration `0022`
+seeds `config.global.operations.GENERATE_WITH_CLEANUP.prompt` with
+`BACKGROUND_REMOVAL`'s own prompt text, copied verbatim — the cleanup step
+performs the exact same transformation standalone background removal does,
+just consumed internally rather than returned to the client. The one real
+difference from a standalone `BACKGROUND_REMOVAL` sub-job: success goes
+straight to `COMPLETED`, never `QA_REVIEW` — see the no-QA-gate note below.
+
+**Phase 2 is ordinary Mode A, completely unmodified.** Once the cleanup
+sub-job reaches `COMPLETED`, `app/workers/cleanup.py` creates the job's 1-4
+angle sub-jobs and dispatches `generation.transform_photo_task` for each —
+the same task, same code path, same failure classification and retry
+behavior every `ANGLE_GENERATION` job's real-photo angle already has. The
+only difference is where the input photo comes from: the cleanup step's
+own output asset, not a photo the client uploaded directly. An angle
+sub-job created this way is indistinguishable, once running, from an
+ordinary `ANGLE_GENERATION` angle.
+
+**No QA gate on the cleanup step**, same reason Mode A real-photo angles
+have none — the cleanup output is never the client-facing deliverable, so
+there is nothing to gate before handing it to a human. The angle sub-jobs
+phase 2 creates are ordinary Mode A angle sub-jobs and follow that mode's
+own no-QA-gate rule unmodified — see `docs/business-rules.md` §7's
+`GENERATE_WITH_CLEANUP` note and §17.
+
+**The phase-1-to-phase-2 handoff dispatches from the sync worker wrapper,
+after the async cleanup coroutine has already returned control to it** —
+`app/workers/cleanup.py::process_task` creates the angle sub-jobs in a
+separate transaction, then calls `transform_photo_task.delay()` for each
+one only once `run_async` has returned. An earlier version dispatched from
+inside the async coroutine itself and deadlocked under
+`task_always_eager`: that coroutine runs on a shared background loop via
+`run_coroutine_threadsafe`, and calling `.delay()` from inside it would
+submit the next task's coroutine onto that same loop and then block the
+loop's own thread waiting on it — a self-deadlock, since the loop can
+never get back to processing what it's blocked on. The fix mirrors
+`app/workers/generation.py::transform_photo_task`'s existing dispatch of
+`qa.score_similarity` from its own sync body. This is an implementation
+detail, found and fixed while building phase 2's dispatch — the external
+contract (dispatch happens after the creating transaction commits, angle
+sub-jobs receive the cleanup output as their input) is unchanged from what
+the design always specified.
+
+**Reuses `rate_limiter` unmodified** — both phases' calls compete with
+every other mode for the same global `GEMINI_RATE_LIMIT_PER_MINUTE`
+window, no separate budget for either phase.
+
+**Recorded on every call** (to `sub_jobs`): `prompt_snapshot`,
+`model_version`, `seed` — same fields, same reason, as every other mode.
+Each phase writes its own `cost_events` row (`operation:
+generate_with_cleanup_cleanup_step` for phase 1, the ordinary angle label
+for phase 2) — a `GENERATE_WITH_CLEANUP` job's total cost is the sum of
+one cleanup call plus N angle calls, not a single line item.
+
 ---
 
 ## Call site 2 — QA similarity gate

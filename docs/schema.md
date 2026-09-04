@@ -50,7 +50,7 @@ qa_status_t      NOT_APPLICABLE | PASSED | FLAGGED | FAILED
 sync_status_t    SUCCESS | FAILED
 
 operation_t      ANGLE_GENERATION | BACKGROUND_REMOVAL | BACKGROUND_REPLACEMENT
-                 | MATCH | RECOLOR | MIX
+                 | MATCH | RECOLOR | MIX | GENERATE_WITH_CLEANUP
 ```
 
 `REJECTED` is distinct from `FAILED`: it means the provider deterministically declined
@@ -82,6 +82,12 @@ migration — see `docs/business-rules.md` §15 and
 `RECOLOR`, this migration added **no new `asset_kind_t` value** —
 `sub_jobs.secondary_input_asset_id`/`secondary_mask_asset_id` reuse the
 existing `INPUT`/`MASK` kinds.
+
+`GENERATE_WITH_CLEANUP` was added by migration 0021 (2026-08-31), same
+`ALTER TYPE ... ADD VALUE` mechanism. Unlike every prior operation, its
+sub-jobs are heterogeneous within one job — one angle-less "cleanup"
+sub-job plus 1-4 angled sub-jobs, created in two phases rather than all at
+request time. See `docs/business-rules.md` §17 for the full contract.
 
 ---
 
@@ -157,7 +163,8 @@ Partial unique index: `CREATE UNIQUE INDEX ON config_versions (is_active) WHERE 
       },
       "MATCH": { "enabled": true, "prompt": "...{target_category}...", "unit_cost_usd": 0.02 },
       "RECOLOR": { "enabled": true, "prompt": "...{palette_prompt}...", "unit_cost_usd": 0.02 },
-      "MIX": { "enabled": true, "prompt": "...", "unit_cost_usd": 0.02 }
+      "MIX": { "enabled": true, "prompt": "...", "unit_cost_usd": 0.02 },
+      "GENERATE_WITH_CLEANUP": { "enabled": true, "prompt": "...", "unit_cost_usd": 0.02 }
     },
     "background_presets": [
       { "code": "STUDIO_WHITE", "name": "Studio White", "prompt": "...",
@@ -223,6 +230,16 @@ carries the visual information. **No new top-level `global` key** — MIX
 adds no palette or preset list of its own, the smallest config addition of
 any v3 phase. See `app/services/job_service.py::resolve_mix_prompt`.
 
+**`global.operations.GENERATE_WITH_CLEANUP` (migration 0022, 2026-08-31):**
+seeded the same merge-not-replace way as every prior operations-touching
+migration (this is the *fifth*). `prompt` is copied verbatim from
+`BACKGROUND_REMOVAL`'s own prompt (as superseded by migration 0019, not
+0007's stale original) — the cleanup step performs the exact same
+transformation standalone background removal does, just as an internal
+pipeline stage. No runtime template placeholder, no new top-level `global`
+key. See `app/services/cleanup_service.py::_resolve_prompt` and
+`docs/business-rules.md` §17.
+
 ---
 
 ## `jobs`
@@ -239,6 +256,7 @@ One row per `POST /api/v2/generate`, `POST /api/v2/background/remove`, or
 | `category_code` | TEXT NULL | Must exist in the active config version for an `ANGLE_GENERATION` job. **NULL for a background-operation job** — there is no category (migration 0008, Phase 15). |
 | `operation` | `operation_t` NOT NULL DEFAULT `ANGLE_GENERATION` | Added in migration 0006 (Phase 15). |
 | `preset_code` | TEXT NULL | Set only for `BACKGROUND_REPLACEMENT` — the pinned backdrop preset the worker resolves its prompt from. Added in migration 0009 (Phase 15). |
+| `requested_angle_codes` | JSONB NULL | Set only for `GENERATE_WITH_CLEANUP` — the requested angle codes, durably recorded so the worker can create angle sub-jobs after the cleanup step succeeds, once the original request body is gone (migration 0021). NULL for every other operation. |
 | `config_version_id` | UUID NOT NULL FK → `config_versions.id` | Pinned at creation. Never changes. |
 | `status` | `job_status_t` NOT NULL DEFAULT `PENDING` | |
 | `requested_angles` | INT NOT NULL | Count of angles not skipped for an angle job; always `1` for a background job; count of requested companion-piece variants (1-4) for a `MATCH` job; always `1` for a `RECOLOR` job or a `MIX` job (same posture as a background job — exactly one sub-job). Keeps its name across all five — see docs/business-rules.md. |

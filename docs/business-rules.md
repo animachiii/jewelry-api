@@ -261,6 +261,12 @@ catch a beautiful, plausible, wrong output — and §16 spells out why that
 matters more for MIX than for MATCH, since a client can reasonably mistake a
 MIX result for a render of two pieces they physically own.
 
+`GENERATE_WITH_CLEANUP`'s cleanup step has no QA gate either — same posture
+Mode A real-photo angles already have, for the same reason: it is never the
+client-facing deliverable. The angle sub-jobs it later creates are ordinary
+Mode A angle sub-jobs and follow that operation's existing no-QA-gate rule
+unmodified.
+
 ---
 
 ## 8. Idempotency
@@ -676,3 +682,113 @@ sub-job, so Phase 18's all-or-nothing multi-sub-job generalization applies here 
 the trivial "set of size 1" case, same as it already does for RECOLOR and
 background operations — no further changes to the retry route were needed for MIX,
 only a fourth entry in its dispatch-task lookup (`app/api/v2/retry.py`).
+
+---
+
+## 17. GENERATE_WITH_CLEANUP (2026-08-31)
+
+`GENERATE_WITH_CLEANUP` is a two-phase pipeline: one uploaded photo is
+background-cleaned (Mode A's own transformation, reused as an internal
+step), then 1-4 catalogue angles are generated from that cleaned image —
+`POST /api/v2/generate-with-cleanup`. See
+`docs/superpowers/specs/2026-08-31-generate-with-cleanup-design.md` and
+`docs/ai-integration.md`'s Mode G. Unlike every other operation in this
+file, a `GENERATE_WITH_CLEANUP` job's sub-jobs are **heterogeneous**: one
+angle-less cleanup sub-job plus 1-4 angled sub-jobs, and unlike every other
+operation, they are not all created at request time — the angle sub-jobs
+are created later, once the cleanup step succeeds.
+
+**Operation matrix:**
+
+| Phase | Input | Prompt source | Output |
+| :--- | :--- | :--- | :--- |
+| 1 — cleanup | One uploaded photo | `config.global.operations.GENERATE_WITH_CLEANUP.prompt` — copied verbatim from `BACKGROUND_REMOVAL`'s own prompt (migration 0022) | A background-cleaned product photo. **Never exposed to the client** — consumed internally as the input to phase 2 |
+| 2 — angles (×1-4) | The cleanup step's own output asset | Each angle's ordinary category/angle prompt — unmodified Mode A | Ordinary Mode A angle outputs, indistinguishable from an `ANGLE_GENERATION` job's |
+
+- **Category and angle rules (§1) apply, same as `/generate`.** `category_code`
+  must exist and be active; every requested angle must be `enabled` for that
+  category. Unlike `/generate`'s per-angle object (`storage_path`/`synthetic`/
+  `skip`), a `GENERATE_WITH_CLEANUP` request's `angles` is a plain list of
+  codes — every angle derives from the one cleaned photo, so there is nothing
+  per-angle to choose, and synthetic angles are not supported.
+- `requested_angles` is the count of requested angles (N), same meaning as an
+  `ANGLE_GENERATION` job. `jobs.requested_angle_codes` (migration 0021)
+  durably records the actual codes — the worker needs them to create the
+  angle sub-jobs after the cleanup step succeeds, once the original request
+  body is long gone. NULL for every other operation.
+- `operations.GENERATE_WITH_CLEANUP.enabled` gates `POST /generate-with-cleanup`
+  — `422 OPERATION_DISABLED` if `false` or absent, same code every other
+  operation uses.
+- `unit_cost_usd` resolves per-operation
+  (`config.global.operations.GENERATE_WITH_CLEANUP.unit_cost_usd`), falling
+  back to `config.global.unit_cost_usd` when unset — same generic fallback
+  rule §10 states for every other operation. The cleanup call and each angle
+  call are billed as independent provider calls, each writing its own
+  `cost_events` row (§10) — no separate line item exists for "the cleanup
+  step" versus "an angle" beyond the `operation` label
+  `cost_service.record_cost_event` is called with.
+
+**Two-phase sub-job creation — the one genuinely new mechanism this operation
+introduces.** `create_generate_with_cleanup_job_for_request`
+(`app/services/job_service.py`) creates the job and **exactly one** sub-job
+— the cleanup step, `angle: NULL` — then dispatches `cleanup.process`
+directly, the same "dispatch after commit, from outside the transaction"
+placement every other operation's initial dispatch already follows. No angle
+sub-jobs exist at this point. Once `cleanup.process` (`app/workers/cleanup.py`)
+observes its sub-job reach `COMPLETED`, it creates the job's N angle
+sub-jobs (`input_asset_id` pointing at the cleanup step's own output asset,
+never the client's original upload) and dispatches
+`generation.transform_photo_task` for each — ordinary Mode A dispatches,
+unmodified. If the cleanup step instead lands on `FAILED`/`REJECTED`, no
+angle sub-jobs are ever created; the unmodified parent-status rollup (§3)
+already marks the job `FAILED` from the one real sub-job that exists.
+
+**Why the angle-phase dispatch happens from the sync worker wrapper, not the
+async cleanup coroutine itself.** `app/workers/cleanup.py::process_task`
+creates the angle sub-jobs in `_dispatch_angle_phase` and only then, back in
+its own sync body (after `run_async` has returned control to the calling
+thread), calls `transform_photo_task.delay()` for each one. An earlier
+version of this dispatched from inside the async coroutine directly — a
+real deadlock under `task_always_eager`: that coroutine runs on a shared
+background loop via `run_coroutine_threadsafe`, and calling `.delay()` from
+inside it would submit the next task's coroutine onto that same loop, then
+block the loop's own thread waiting on it — a self-deadlock, since the loop
+can never get back to processing what it's blocked on. The fix mirrors
+`app/workers/generation.py::transform_photo_task`'s existing dispatch of
+`qa.score_similarity` from its own sync body rather than from inside
+`_run`. The external contract — dispatch happens after the cleanup
+sub-job's creating transaction commits, and angle sub-jobs receive the
+cleanup output as their input — is unchanged from what this section always
+specified; this is an implementation detail found while building it, not a
+behavior change.
+
+**No QA gate on the cleanup step.** See §7's note. Same posture Mode A
+real-photo angles already have, for the same reason: the cleanup output is
+never the client-facing deliverable. The angle sub-jobs it later creates
+are ordinary Mode A angle sub-jobs and follow that operation's own
+no-QA-gate rule, unmodified — nothing about being sourced from a cleaned
+photo rather than the client's raw upload changes that.
+
+**Status.** `GET /status/{job_id}` — the cleanup sub-job **never appears in
+the response** (`app/api/v2/status.py`'s `GENERATE_WITH_CLEANUP` branch
+filters to `sub_jobs` where `angle IS NOT NULL`); only its angle sub-jobs
+are reported, through the same `angles` array and `build_angle_status`
+builder an `ANGLE_GENERATION` job uses, unmodified. Before any angle
+sub-job exists, `status_service.build_pending_angle_status` synthesizes a
+`PENDING` entry per code in `jobs.requested_angle_codes`, so `angles` reads
+as N pending entries rather than an empty array — indistinguishable from
+`/generate`'s own immediate-request-time response shape.
+
+**Retry.** `POST /jobs/{job_id}/retry` retries the cleanup sub-job — but
+**only while no angle sub-job yet exists**. `app/api/v2/retry.py::retry_job`
+checks `job.operation == Operation.GENERATE_WITH_CLEANUP and any(sj.angle
+is not None for sj in sub_jobs)` and raises `409
+ANGLE_JOB_RETRY_NOT_ALLOWED` if so — once the job has moved past its
+cleanup phase, retry must name a specific angle via
+`POST /jobs/{job_id}/angles/{angle}/retry` instead, the same posture
+`ANGLE_GENERATION` jobs always have applied to this operation, just
+conditioned on pipeline phase rather than unconditionally on operation.
+While the cleanup step is still the job's only sub-job, `retry_job`
+dispatches `cleanup.process` (its own entry in the operation-to-task
+lookup) exactly the way it dispatches `background.process`/`match.process`/
+etc. for other single-sub-job operations.

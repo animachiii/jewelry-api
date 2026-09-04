@@ -606,6 +606,49 @@
         "title": "GenerateJobRequest",
         "type": "object"
       },
+      "GenerateWithCleanupRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "angles": {
+            "items": {
+              "$ref": "#/components/schemas/Angle"
+            },
+            "title": "Angles",
+            "type": "array"
+          },
+          "category_code": {
+            "title": "Category Code",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "sku_reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sku Reference"
+          },
+          "storage_path": {
+            "title": "Storage Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "storage_path",
+          "category_code",
+          "angles"
+        ],
+        "title": "GenerateWithCleanupRequest",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1009,7 +1052,8 @@
           "BACKGROUND_REPLACEMENT",
           "MATCH",
           "RECOLOR",
-          "MIX"
+          "MIX",
+          "GENERATE_WITH_CLEANUP"
         ],
         "title": "Operation",
         "type": "string"
@@ -2026,6 +2070,86 @@
         "summary": "Create Job",
         "tags": [
           "generate"
+        ]
+      }
+    },
+    "/api/v2/generate-with-cleanup": {
+      "post": {
+        "operationId": "create_generate_with_cleanup_job_api_v2_generate_with_cleanup_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateWithCleanupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAcceptedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "Idempotency-Key missing"
+          },
+          "401": {
+            "description": "Invalid API key"
+          },
+          "409": {
+            "description": "Idempotency key conflict"
+          },
+          "422": {
+            "description": "Operation disabled, category not found/inactive, angle not enabled, duplicate/empty angles, or asset not found/owned/invalid"
+          },
+          "429": {
+            "description": "Rate limit or quota exceeded"
+          }
+        },
+        "summary": "Create Generate With Cleanup Job",
+        "tags": [
+          "generate-with-cleanup"
         ]
       }
     },
