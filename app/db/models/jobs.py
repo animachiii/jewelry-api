@@ -63,6 +63,14 @@ class Job(Base):
     # its prompt. See migration 0009 and
     # phases/phase-15-background-operations.md Step 5.
     preset_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    # NULL unless operation == GENERATE_WITH_CLEANUP. That operation defers
+    # creating its angle sub-jobs until the cleanup step succeeds (see
+    # app/workers/cleanup.py), by which point the original request body no
+    # longer exists — this durably records which angles to build, the same
+    # reason migration 0009 added preset_code for BACKGROUND_REPLACEMENT.
+    # See migration 0021 and docs/superpowers/specs/2026-08-31-generate-with-cleanup-design.md
+    # section 3.
+    requested_angle_codes: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     config_version_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("config_versions.id"), nullable=False
     )
