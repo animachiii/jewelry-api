@@ -68,6 +68,23 @@ async def get_status(
         ]
         return status_service.build_job_status_response(job, angle_statuses)
 
+    if job.operation == Operation.GENERATE_WITH_CLEANUP:
+        # The job's one cleanup sub-job (angle IS NULL) is internal-only --
+        # never exposed in status, never counted in `angles` -- see
+        # docs/api-routes.md's Two-Phase Cleanup+Generate section and
+        # app/workers/cleanup.py's own docstring for why it exists. Only the
+        # angle sub-jobs it dispatches (if any yet exist) are reported here,
+        # through the exact same `build_angle_status` builder and
+        # `/angles/{angle}/retry` route ANGLE_GENERATION jobs use --
+        # unmodified, since each angle sub-job's input_asset_id already
+        # points at the cleanup output by the time it's created.
+        cleanup_angle_sub_jobs = [sj for sj in sub_jobs if sj.angle is not None]
+        angle_statuses = [
+            status_service.build_angle_status(job, sub_job, bucket_and_paths[sub_job.id])
+            for sub_job in cleanup_angle_sub_jobs
+        ]
+        return status_service.build_job_status_response(job, angle_statuses)
+
     if job.operation == Operation.MATCH:
         # get_sub_jobs orders by `angle`, which is NULL for every MATCH
         # sub-job — no natural ordering from that column, so sort by

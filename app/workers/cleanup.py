@@ -87,10 +87,29 @@ async def _get_cleanup_sub_job(session: AsyncSession, job_id: uuid.UUID) -> SubJ
     return result.scalar_one_or_none()
 
 
-async def _dispatch_angle_phase(job_id: str) -> None:
-    """Phase 2: create and dispatch the job's angle sub-jobs. Runs in its
-    own fresh engine/session, separate from `_run`'s — by the time this is
-    called, `_run`'s session has already closed and committed.
+async def _dispatch_angle_phase(job_id: str) -> list[uuid.UUID]:
+    """Phase 2: create the job's angle sub-jobs. Runs in its own fresh
+    engine/session, separate from `_run`'s -- by the time this is called,
+    `_run`'s session has already closed and committed.
+
+    Returns the created sub-job IDs; the caller (the sync `process_task`
+    wrapper, below) is responsible for dispatching `transform_photo_task`
+    for each one, and must do so only *after* this coroutine has returned
+    control to it -- not from inside this coroutine itself. See
+    `app/workers/_async_utils.py::run_async`: under `task_always_eager`,
+    this coroutine runs on the shared background loop via
+    `run_coroutine_threadsafe`. Calling `.delay()` (which under eager mode
+    recurses straight into another task body, which itself calls
+    `run_async`) from *inside* this coroutine would submit that nested
+    coroutine onto the very same background loop this one is already
+    running on, then block that loop's own thread waiting for it via
+    `future.result()` -- a self-deadlock, since the loop can never get back
+    to `run_forever()` to process what it's blocked waiting on. Dispatching
+    from the sync wrapper instead (after `run_async` has returned control
+    to the *original* caller's thread) avoids this -- the same reason
+    `app/workers/generation.py::transform_photo_task` dispatches
+    `qa.score_similarity` from its own sync body rather than from inside
+    `_run`.
     """
     engine = create_async_engine(settings.DATABASE_URL)
     try:
@@ -122,15 +141,9 @@ async def _dispatch_angle_phase(job_id: str) -> None:
                 angle_sub_job_ids.append(angle_sub_job.id)
 
             await session.commit()
+            return angle_sub_job_ids
     finally:
         await engine.dispose()
-
-    # Dispatched only after the creating transaction has committed -- same
-    # dispatch-after-commit rule this module's own docstring cites.
-    from app.workers.generation import transform_photo_task
-
-    for angle_sub_job_id in angle_sub_job_ids:
-        transform_photo_task.delay(str(angle_sub_job_id))
 
 
 @celery_app.task(name="cleanup.process")  # type: ignore[untyped-decorator]
@@ -143,6 +156,14 @@ def process_task(sub_job_id: str) -> str:
         status, job_id = run_async(_run_timed_out(sub_job_id))
 
     if status == SubJobStatus.COMPLETED.value:
-        run_async(_dispatch_angle_phase(job_id))
+        angle_sub_job_ids = run_async(_dispatch_angle_phase(job_id))
+
+        # Dispatched only after `run_async` has returned control to this
+        # (the original caller's) thread -- see `_dispatch_angle_phase`'s
+        # own docstring for why this can't happen inside that coroutine.
+        from app.workers.generation import transform_photo_task
+
+        for angle_sub_job_id in angle_sub_job_ids:
+            transform_photo_task.delay(str(angle_sub_job_id))
 
     return status

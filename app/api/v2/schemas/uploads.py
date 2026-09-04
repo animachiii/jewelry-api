@@ -33,7 +33,8 @@ class PresignUploadRequest(BaseModel):
         if op_mode and self.operation == Operation.ANGLE_GENERATION:
             raise ValueError(
                 "operation must be BACKGROUND_REMOVAL, BACKGROUND_REPLACEMENT, MATCH, "
-                "RECOLOR, or MIX (ANGLE_GENERATION uses category_code/angles instead)"
+                "RECOLOR, MIX, or GENERATE_WITH_CLEANUP "
+                "(ANGLE_GENERATION uses category_code/angles instead)"
             )
         if not angle_mode and not op_mode:
             raise ValueError("either category_code+angles or operation is required")

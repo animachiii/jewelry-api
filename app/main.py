@@ -15,6 +15,7 @@ from starlette.types import Scope
 from app.api.v2 import background as background_routes
 from app.api.v2 import config as config_routes
 from app.api.v2 import generate as generate_routes
+from app.api.v2 import generate_with_cleanup as generate_with_cleanup_routes
 from app.api.v2 import health as health_routes
 from app.api.v2 import jobs as jobs_routes
 from app.api.v2 import match as match_routes
@@ -55,6 +56,7 @@ api_v2.include_router(background_routes.router)
 api_v2.include_router(match_routes.router)
 api_v2.include_router(recolor_routes.router)
 api_v2.include_router(mix_routes.router)
+api_v2.include_router(generate_with_cleanup_routes.router)
 api_v2.include_router(status_routes.router)
 api_v2.include_router(retry_routes.router)
 api_v2.include_router(jobs_routes.router)
