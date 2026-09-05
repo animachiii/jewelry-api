@@ -171,6 +171,7 @@ def create_job(
     category_code: str | None = None,
     preset_code: str | None = None,
     operation: Operation = Operation.ANGLE_GENERATION,
+    requested_angle_codes: list[str] | None = None,
 ) -> Job:
     """Adds and returns a new Job row (status defaults to PENDING — nothing
     executes here, see phases/phase-2-data-model.md). Does not commit; the
@@ -179,6 +180,10 @@ def create_job(
     `operation` defaults to ANGLE_GENERATION so every existing `/generate`
     call site is unaffected — see migration 0006 and
     phases/phase-15-background-operations.md Step 2.
+
+    `requested_angle_codes` is set only for GENERATE_WITH_CLEANUP — see
+    migration 0021 and docs/superpowers/specs/2026-08-31-generate-with-cleanup-design.md
+    section 3.
     """
     job = Job(
         client_id=client_id,
@@ -192,6 +197,7 @@ def create_job(
         requested_angles=requested_angles,
         sku_reference=sku_reference,
         job_metadata=metadata,
+        requested_angle_codes=requested_angle_codes,
     )
     session.add(job)
     return job

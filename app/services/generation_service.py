@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.errors import ProviderError
-from app.db.models.enums import AssetKind, FailureClass, SourceType, SubJobStatus
+from app.db.models.enums import AssetKind, FailureClass, Operation, SourceType, SubJobStatus
 from app.db.models.jobs import Job, SubJob
 from app.db.repositories import assets as assets_repo
 from app.db.repositories import config_versions as config_versions_repo
@@ -248,6 +248,22 @@ async def recompute_parent_status(session: AsyncSession, job: Job) -> None:
     """
     sub_jobs = await jobs_repo.get_sub_jobs(session, job.id)
     non_skipped = [sj for sj in sub_jobs if sj.status != SubJobStatus.SKIPPED]
+    if job.operation == Operation.GENERATE_WITH_CLEANUP and any(
+        sj.angle is not None for sj in non_skipped
+    ):
+        # The internal cleanup sub-job is never client-facing (see
+        # docs/business-rules.md §17) and jobs.requested_angles only ever
+        # counts the N requested angles -- counting the cleanup sub-job too
+        # would let succeeded_angles exceed requested_angles once it and
+        # every angle complete. Only excluded once angle sub-jobs actually
+        # exist -- while the cleanup step is still the job's only sub-job
+        # (its own failure path), it must still be counted or a failed
+        # cleanup step would roll up as an empty, vacuously-COMPLETED job
+        # instead of FAILED. Excluded here, not in the shared
+        # cross-operation `compute_parent_status`, since every other
+        # operation's own angle-less sub-job (background/MATCH/RECOLOR/MIX)
+        # is the thing being counted, not an internal step to hide.
+        non_skipped = [sj for sj in non_skipped if sj.angle is not None]
     requested = len(non_skipped)
     succeeded = sum(1 for sj in non_skipped if sj.status == SubJobStatus.COMPLETED)
     failed = sum(

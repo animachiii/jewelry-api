@@ -172,6 +172,24 @@ CATEGORY_PAYLOAD = {
                     "together."
                 ),
             },
+            "GENERATE_WITH_CLEANUP": {
+                "enabled": True,
+                # Copied verbatim from operations.BACKGROUND_REMOVAL.prompt as
+                # superseded by migration 0019 (NOT 0007's original, which is
+                # stale) -- see migration 0022 for why.
+                "prompt": (
+                    "Isolate only the jewellery product and remove everything else from the "
+                    "frame — hands, fingers, mannequins, models, price tags, hangtags, "
+                    "stickers, packaging, props, and any other object. Replace the "
+                    "background with a clean, seamless pure white (#FFFFFF) studio backdrop. "
+                    "Keep the jewellery itself — its proportions, materials, textures, and "
+                    "every detail — exactly unchanged. Do not redesign, embellish, or "
+                    "invent any part of the product. The final image must contain only the "
+                    "jewellery product on a plain white background, ready to use directly "
+                    "as an e-commerce product photo."
+                ),
+                "unit_cost_usd": 0.02,
+            },
         },
         "background_presets": [
             {

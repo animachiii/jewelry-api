@@ -146,10 +146,14 @@ Returns the parent `status` (`PENDING` | `PROCESSING` | `COMPLETED` | `PARTIAL_S
 `variants` — `angles` is otherwise byte-identical to before either phase):
 
 - `operation` — `ANGLE_GENERATION` | `BACKGROUND_REMOVAL` | `BACKGROUND_REPLACEMENT` |
-  `MATCH` | `RECOLOR` | `MIX`. **Read this first** to know which array to read next —
-  exactly one of `angles`/`results`/`variants` is ever non-empty for a given job.
-- `angles` — populated for `ANGLE_GENERATION` jobs, empty `[]` otherwise. Each item
-  carries `angle`, `status`, `source_type`, `synthetic` flag,
+  `MATCH` | `RECOLOR` | `MIX` | `GENERATE_WITH_CLEANUP`. **Read this first** to know
+  which array to read next — exactly one of `angles`/`results`/`variants` is ever
+  non-empty for a given job.
+- `angles` — populated for `ANGLE_GENERATION` jobs, and for `GENERATE_WITH_CLEANUP`
+  jobs (see the "Cleanup + Angle Generation" section below — its internal cleanup
+  sub-job never appears here, only its angle sub-jobs, synthesized as `PENDING`
+  before any exist), empty `[]` otherwise. Each item carries `angle`, `status`,
+  `source_type`, `synthetic` flag,
   `image_url` (a **freshly signed URL, 1-hour TTL**, present only when `COMPLETED`),
   `qa_status`/`qa_score` when applicable, `failure_class`/`error_message`/`retryable`
   when failed, and `retry_url` (`/jobs/{job_id}/angles/{angle}/retry`) when retryable.
@@ -508,6 +512,74 @@ background operations.
 
 ---
 
+## Cleanup + Angle Generation
+
+`GENERATE_WITH_CLEANUP` — one uploaded photo in, a background-cleaned
+version of it consumed internally, then 1-4 catalogue angles generated
+*from that cleaned image* out — `POST /api/v2/generate-with-cleanup`. See
+`docs/business-rules.md` §17. Reuses the existing job/sub-job state
+machine, `GET /status/{job_id}`, cost recording, and audit trail — no
+parallel pipeline, but unlike every prior operation this one's sub-jobs
+are created in two phases rather than all at request time.
+
+### `POST /api/v2/generate-with-cleanup`
+**Auth required. `client` scope. `Idempotency-Key` header required.**
+
+Request: `{ "storage_path": "...", "category_code": "...", "angles": ["FRONT", "SIDE", ...], "sku_reference"?: "...", "metadata"?: {} }`.
+`storage_path` comes from `POST /uploads/presign`'s `{"operation": "GENERATE_WITH_CLEANUP"}`
+response. Unlike `/generate`'s per-angle object (`storage_path` / `synthetic`
+/ `skip` per angle), `angles` here is a plain list of angle codes — every
+angle derives from the one uploaded photo's cleaned output, so there is
+nothing per-angle to choose. Mixing in synthetic angles is not supported.
+
+Returns `202` with the same `JobAcceptedResponse` shape as `/generate` —
+`job_id`, `status: PENDING`, `poll_after_ms`, and an `angles` array with one
+`{angle, status: PENDING, source_type: UPLOADED}` entry per requested angle
+(`storage_path` is always `null` on each entry — there is no per-angle
+upload).
+
+**Validation, in order — all failures are `4xx` before any job row is
+created:**
+
+1. `operations.GENERATE_WITH_CLEANUP.enabled` is `true` in the active
+   config version (`422 OPERATION_DISABLED` otherwise)
+2. `category_code` exists and is active — `422 CATEGORY_NOT_FOUND` / `CATEGORY_INACTIVE`
+3. At least one angle requested, no duplicates — `422 NO_ANGLES_REQUESTED` / `422 VALIDATION_ERROR`
+4. Every requested angle is `enabled` for that category — `422 ANGLE_NOT_ENABLED`
+5. `storage_path` exists in `jewelry-inputs` and belongs to this client, and
+   the uploaded image passes `image_validation.inspect_and_validate` —
+   `422 ASSET_NOT_FOUND` / `ASSET_NOT_OWNED` / `VALIDATION_ERROR`
+
+**Idempotency:** same `(client_id, Idempotency-Key)` durable dedup as
+`/generate`.
+
+On acceptance, creates one job (`operation: GENERATE_WITH_CLEANUP`,
+`requested_angles: N`, `requested_angle_codes: [...]`) and **one** sub-job
+— the cleanup step (`angle: null`) — then dispatches `cleanup.process`
+directly. **No angle sub-jobs exist yet.** Once the cleanup step reaches
+`COMPLETED`, the worker layer creates the N angle sub-jobs (each
+`input_asset_id` pointing at the cleanup step's own output, not the
+client's original upload) and dispatches the standard angle-generation path
+for each, unmodified.
+
+### Status and retry
+`GET /api/v2/status/{job_id}` — read `operation: "GENERATE_WITH_CLEANUP"`
+first, then `angles` (never `results` or `variants`). **The cleanup step
+itself never appears anywhere in this response** — it is purely internal.
+Before it completes, `angles` shows a synthesized `PENDING` entry per
+requested angle rather than an empty array, so polling behaves identically
+to `/generate` from the client's point of view.
+
+`POST /api/v2/jobs/{job_id}/retry` retries the cleanup step **only while no
+angle sub-job yet exists** — once any does, the job has moved past its
+cleanup phase and retry must name a specific angle via
+`POST /jobs/{job_id}/angles/{angle}/retry` instead
+(`409 ANGLE_JOB_RETRY_NOT_ALLOWED`), the same posture `ANGLE_GENERATION`
+jobs always have, applied here conditionally on pipeline phase rather than
+unconditionally on operation.
+
+---
+
 ## Ops
 
 ### `GET /api/v2/jobs`
@@ -586,7 +658,7 @@ and the database cannot disagree.
 
 | Scope | Routes |
 | :--- | :--- |
-| `client` | config, uploads, generate, status, retry, `/background/*`, `/match`, `/recolor`, `/mix` |
+| `client` | config, uploads, generate, status, retry, `/background/*`, `/match`, `/recolor`, `/mix`, `/generate-with-cleanup` |
 | `ops` | everything in `client` plus `/internal/*`, `/jobs`, `/qa/*` |
 
 Scope lives on the `api_clients` row. There are exactly two scopes — resist adding more

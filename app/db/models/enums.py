@@ -45,6 +45,7 @@ class Operation(enum.StrEnum):
     MATCH = "MATCH"
     RECOLOR = "RECOLOR"
     MIX = "MIX"
+    GENERATE_WITH_CLEANUP = "GENERATE_WITH_CLEANUP"
 
 
 class AssetKind(enum.StrEnum):

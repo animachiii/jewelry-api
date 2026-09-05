@@ -205,6 +205,29 @@ to differ from its inputs) rather than remaining a fourth distinct one. See
 `docs/business-rules.md` §7/§16, `docs/api-routes.md`'s "Two-Piece Combination"
 section, `docs/ai-integration.md`'s Mode F, and migration `0020` for the prompt.
 
+**Correction, 2026-08-31 — a seventh operation family:** `POST /generate-with-cleanup`
+(`GENERATE_WITH_CLEANUP`) is a two-phase pipeline — one uploaded photo is
+background-cleaned (Mode A's own transformation, reused verbatim, migration
+0022 seeds it with `BACKGROUND_REMOVAL`'s exact prompt), then 1-4 catalogue
+angles are generated from that cleaned image via the ordinary Mode A angle
+path, unmodified. Unlike every prior operation, this job's sub-jobs are
+heterogeneous (one angle-less cleanup sub-job plus 1-4 angled ones) and not
+all created at request time — the angle sub-jobs are created by the worker
+only once cleanup succeeds, reading `jobs.requested_angle_codes` (migration
+0021) since the original request body is gone by then. The cleanup sub-job
+is never exposed in `GET /status`; before any angle sub-job exists, `angles`
+shows a synthesized `PENDING` entry per requested angle. Job-level retry
+retries the cleanup step only while no angle sub-job yet exists. No QA gate
+on the cleanup step, same reason Mode A real-photo angles have none.
+
+**Tradeoff accepted:** the cleanup step bills as its own provider call, so
+the job costs one cleanup call plus N angle calls for output the client
+never directly sees — accepted for guaranteeing every angle derives from a
+clean base photo. **Still open:** real pricing for the combined pipeline,
+same uncalibrated-placeholder status as every other seeded cost. See
+`docs/business-rules.md` §17, `docs/api-routes.md`'s "Cleanup + Angle
+Generation" section, and `docs/ai-integration.md`'s Mode G.
+
 **Actors:**
 
 | Actor | Can do |

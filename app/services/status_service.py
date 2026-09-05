@@ -13,7 +13,14 @@ from app.api.v2.schemas.status import (
     JobStatusResponse,
     VariantStatus,
 )
-from app.db.models.enums import FailureClass, JobStatus, QAStatus, SourceType, SubJobStatus
+from app.db.models.enums import (
+    Angle,
+    FailureClass,
+    JobStatus,
+    QAStatus,
+    SourceType,
+    SubJobStatus,
+)
 from app.db.models.jobs import Job, SubJob
 from app.services import storage_service
 from app.services.job_service import MAX_RETRY_ATTEMPTS
@@ -65,6 +72,30 @@ def build_angle_status(
         retry_url=(
             f"/api/v2/jobs/{job.id}/angles/{sub_job.angle.value}/retry" if retryable else None
         ),
+    )
+
+
+def build_pending_angle_status(angle: Angle) -> AngleStatus:
+    """Synthesizes a PENDING entry for an angle whose sub-job does not
+    exist yet -- GENERATE_WITH_CLEANUP defers creating angle sub-jobs until
+    its cleanup step succeeds (docs/superpowers/specs/
+    2026-08-31-generate-with-cleanup-design.md section 5), so during that
+    phase GET /status would otherwise show an empty `angles` array,
+    indistinguishable from "nothing was requested." This makes the response
+    shape match what /generate already shows immediately at request time.
+    """
+    return AngleStatus(
+        angle=angle,
+        status=SubJobStatus.PENDING,
+        source_type=SourceType.UPLOADED,
+        synthetic=False,
+        image_url=None,
+        qa_status=QAStatus.NOT_APPLICABLE,
+        qa_score=None,
+        failure_class=None,
+        error_message=None,
+        retryable=False,
+        retry_url=None,
     )
 
 
