@@ -25,9 +25,7 @@ actual angle *codes* are durably recorded.
 
 from collections.abc import Sequence
 
-import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects import postgresql
 
 revision: str = "0021"
 down_revision: str | None = "0020"
@@ -37,14 +35,17 @@ depends_on: Sequence[str] | None = None
 
 def upgrade() -> None:
     op.execute("ALTER TYPE operation_t ADD VALUE IF NOT EXISTS 'GENERATE_WITH_CLEANUP'")
-    op.add_column(
-        "jobs",
-        sa.Column("requested_angle_codes", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-    )
+    # Raw SQL with IF NOT EXISTS, not op.add_column -- this environment's
+    # shared dev/prod Supabase instance already carries this column from
+    # this migration's own earlier testing against it (found live during
+    # this branch's final review, see CLAUDE.md's Render-outage note), so
+    # a plain add_column would crash the next real deploy on "column
+    # already exists" the same way the version-pointer mismatch just did.
+    op.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS requested_angle_codes JSONB")
 
 
 def downgrade() -> None:
-    op.drop_column("jobs", "requested_angle_codes")
+    op.execute("ALTER TABLE jobs DROP COLUMN IF EXISTS requested_angle_codes")
     # Deliberately no attempt to remove 'GENERATE_WITH_CLEANUP' from
     # operation_t — Postgres has no ALTER TYPE ... DROP VALUE, and enum
     # values are never removed in this project (see migration 0017's own
