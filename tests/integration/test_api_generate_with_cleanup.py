@@ -196,6 +196,82 @@ async def test_happy_path_creates_cleanup_sub_job_then_angle_sub_jobs_from_its_o
         assert angle_sub_job.input_asset_id == cleanup_sub_job.output_asset_id
 
 
+async def test_job_status_is_processing_not_completed_immediately_after_cleanup_succeeds(
+    client: AsyncClient,
+    api_client_key: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for the false-terminal-COMPLETED bug: under
+    `task_always_eager`, POST /generate-with-cleanup's own dispatch of
+    `cleanup.process` completes the ENTIRE pipeline (cleanup + every angle)
+    synchronously within the request, so no HTTP-level test can observe the
+    moment in between. This test observes it directly by calling
+    `cleanup_service.process` itself, bypassing the Celery dispatch layer
+    entirely (`process_task.delay` is stubbed to a no-op), so nothing but
+    the cleanup step's own transaction has run when we assert.
+
+    Before the fix, `job.status` here was `COMPLETED` with zero angle
+    outputs delivered — the parent-status rollup saw only the one
+    just-completed cleanup sub-job (`requested == succeeded == 1`). The fix
+    creates the angle sub-jobs inside that same transaction, before the
+    rollup runs, so `requested` already reflects every angle and the job
+    correctly reads `PROCESSING`.
+    """
+    from app.core.redis_client import new_redis_client
+    from app.services import cleanup_service
+
+    monkeypatch.setattr("app.workers.cleanup.process_task.delay", lambda *a, **kw: None)
+
+    storage_path = await _presign_and_upload(client, api_client_key)
+    resp = await client.post(
+        "/api/v2/generate-with-cleanup",
+        headers={"X-API-Key": api_client_key, "Idempotency-Key": "cleanup-mid-pipeline"},
+        json={
+            "storage_path": storage_path,
+            "category_code": "RING",
+            "angles": ["FRONT", "SIDE", "DIAGONAL"],
+        },
+    )
+    assert resp.status_code == 202, resp.text
+    job_id = uuid.UUID(resp.json()["job_id"])
+
+    job = (await db_session.execute(select(Job).where(Job.id == job_id))).scalar_one()
+    assert job.status == JobStatus.PENDING  # nothing has run yet -- dispatch was stubbed
+
+    cleanup_sub_job = (
+        await db_session.execute(
+            select(SubJob).where(SubJob.job_id == job_id, SubJob.angle.is_(None))
+        )
+    ).scalar_one()
+
+    redis_client = new_redis_client()
+    try:
+        _sub_job, angle_sub_job_ids = await cleanup_service.process(
+            db_session, redis_client, cleanup_sub_job.id
+        )
+        await db_session.commit()
+    finally:
+        await redis_client.aclose()
+
+    assert len(angle_sub_job_ids) == 3
+
+    await db_session.refresh(job)
+    assert job.status == JobStatus.PROCESSING
+    assert job.completed_at is None
+    assert job.requested_angles == 3
+    assert job.succeeded_angles == 0
+    assert job.failed_angles == 0
+
+    sub_jobs = (
+        (await db_session.execute(select(SubJob).where(SubJob.job_id == job_id))).scalars().all()
+    )
+    assert len(sub_jobs) == 4  # 1 cleanup (COMPLETED) + 3 angles (PENDING)
+    angle_sub_jobs = [sj for sj in sub_jobs if sj.angle is not None]
+    assert len(angle_sub_jobs) == 3
+    assert all(sj.status == SubJobStatus.PENDING for sj in angle_sub_jobs)
+
+
 async def test_cleanup_failure_fails_the_job_with_zero_angle_sub_jobs(
     client: AsyncClient,
     api_client_key: str,
