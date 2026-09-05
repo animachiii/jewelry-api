@@ -456,6 +456,39 @@
   </section>
 
   <section>
+    <h2>Cleanup then angles (GENERATE_WITH_CLEANUP)</h2>
+    <p class="muted">
+      One uploaded photo in — background-cleaned internally, then 1-4 catalogue
+      angles generated from that cleaned image. See
+      <code>docs/api-routes.md</code>'s "Cleanup + Angle Generation" section.
+    </p>
+    <p class="muted" style="color: var(--err)">
+      Calls the real pipeline — a real, billed cleanup call plus one real, billed
+      call per requested angle. The cleaned intermediate photo is never returned;
+      only the angle outputs below are client-facing. No QA gate on either step.
+    </p>
+    <div class="row">
+      <div class="field">
+        <label for="cleanup-file">Photo</label>
+        <input type="file" id="cleanup-file" accept="image/jpeg,image/png,image/webp" />
+      </div>
+      <div class="field">
+        <label for="cleanup-category">Category</label>
+        <select id="cleanup-category"></select>
+      </div>
+      <div class="field">
+        <label for="cleanup-sku">SKU reference (optional)</label>
+        <input type="text" id="cleanup-sku" placeholder="e.g. RING-0142" />
+      </div>
+    </div>
+    <div class="angle-grid" id="cleanup-angle-grid"></div>
+    <div style="margin-top: 14px">
+      <button type="button" id="cleanup-submit-btn">Presign, upload &amp; submit</button>
+    </div>
+    <div class="call-error" id="cleanup-submit-error"></div>
+  </section>
+
+  <section>
     <h2>Ops — re-score flagged background QA</h2>
     <p class="muted">
       <code>POST /api/v2/internal/qa/rescore-flagged-background</code> — ops scope,
@@ -732,6 +765,7 @@
     renderPresetOptions();
     renderMatchCategoryOptions();
     renderPaletteOptions();
+    renderCleanupCategoryOptions();
   }
 
   // --- MATCH: target-category options -----------------------------------
@@ -746,6 +780,51 @@
       select.appendChild(opt);
     });
   }
+
+  // --- GENERATE_WITH_CLEANUP: category options + angle checkboxes -------
+
+  function renderCleanupCategoryOptions() {
+    const select = $("cleanup-category");
+    select.innerHTML = "";
+    (activeConfig.categories || []).forEach((cat) => {
+      const opt = document.createElement("option");
+      opt.value = cat.code;
+      opt.textContent = cat.name + " (" + cat.code + ")";
+      select.appendChild(opt);
+    });
+    renderCleanupAngleCheckboxes();
+  }
+
+  function renderCleanupAngleCheckboxes() {
+    const grid = $("cleanup-angle-grid");
+    grid.innerHTML = "";
+    if (!activeConfig) return;
+    const catCode = $("cleanup-category").value;
+    const cat = (activeConfig.categories || []).find((c) => c.code === catCode);
+    if (!cat) return;
+
+    ANGLES.forEach((angle) => {
+      const rule = cat.angles[angle];
+      const card = document.createElement("div");
+      card.className = "angle-card" + (!rule || !rule.enabled ? " disabled" : "");
+      card.dataset.angle = angle;
+
+      if (!rule || !rule.enabled) {
+        card.innerHTML = "<h3>" + angle + "</h3><div class='hint'>Not enabled for " + catCode + "</div>";
+        grid.appendChild(card);
+        return;
+      }
+
+      card.innerHTML =
+        '<div class="checkbox-field">' +
+        '<input type="checkbox" data-role="cleanup-angle" id="cleanup-angle-' + angle + '" checked />' +
+        '<label for="cleanup-angle-' + angle + '" style="margin:0">' + angle + "</label>" +
+        "</div>";
+      grid.appendChild(card);
+    });
+  }
+
+  $("cleanup-category").addEventListener("change", renderCleanupAngleCheckboxes);
 
   // --- RECOLOR: palette options --------------------------------------
 
@@ -1508,6 +1587,68 @@
     }
   });
 
+  // --- GENERATE_WITH_CLEANUP: presign -> upload -> submit -----------------
+
+  $("cleanup-submit-btn").addEventListener("click", async function () {
+    const errorEl = $("cleanup-submit-error");
+    hideCallError(errorEl);
+    const btn = $("cleanup-submit-btn");
+
+    const file = $("cleanup-file").files[0];
+    if (!file) {
+      showCallError(errorEl, new Error("Choose a photo first."));
+      return;
+    }
+    const categoryCode = $("cleanup-category").value;
+    if (!categoryCode) {
+      showCallError(errorEl, new Error("No category selected — check the connection/config above."));
+      return;
+    }
+    const angles = Array.from(
+      document.querySelectorAll("#cleanup-angle-grid input[data-role='cleanup-angle']:checked")
+    ).map((el) => el.id.replace("cleanup-angle-", ""));
+    if (angles.length === 0) {
+      showCallError(errorEl, new Error("Select at least one angle."));
+      return;
+    }
+
+    btn.disabled = true;
+    try {
+      btn.textContent = "Requesting upload URL…";
+      const presignResp = await apiFetch("/api/v2/uploads/presign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operation: "GENERATE_WITH_CLEANUP" }),
+      });
+      const upload = presignResp.operation_upload;
+
+      btn.textContent = "Uploading photo…";
+      await uploadFile(upload.upload_url, file);
+
+      const body = {
+        storage_path: upload.storage_path,
+        category_code: categoryCode,
+        angles: angles,
+      };
+      const sku = $("cleanup-sku").value.trim();
+      if (sku) body.sku_reference = sku;
+
+      btn.textContent = "Creating job…";
+      const result = await apiFetch("/api/v2/generate-with-cleanup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": uuid4() },
+        body: JSON.stringify(body),
+      });
+
+      startTrackingJob(result.job_id);
+    } catch (err) {
+      showCallError(errorEl, err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Presign, upload & submit";
+    }
+  });
+
   // --- Job tracking / polling -------------------------------------------
 
   // setTimeout, NOT setInterval. setInterval fired every POLL_INTERVAL_MS
@@ -1644,7 +1785,8 @@
     const grid = $("job-angles");
     grid.innerHTML = "";
     let items;
-    if (!job.operation || job.operation === "ANGLE_GENERATION") items = job.angles || [];
+    if (!job.operation || job.operation === "ANGLE_GENERATION" || job.operation === "GENERATE_WITH_CLEANUP")
+      items = job.angles || [];
     else if (job.operation === "MATCH") items = job.variants || [];
     else items = job.results || [];
     items.forEach((item) => grid.appendChild(renderResultCard(job.job_id, item)));
