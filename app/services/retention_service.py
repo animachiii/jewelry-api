@@ -21,7 +21,7 @@ async def expire_assets(
 ) -> int:
     """Removes Storage bytes for every asset past its `expires_at` deadline
     and marks `purged_at`. Never deletes the row — CLAUDE.md Hard Rule 10.
-    Storage delete is treated as idempotent: Supabase's remove() does not
+    Storage delete is treated as idempotent: S3's DeleteObject does not
     raise on an already-missing object, so a crash between delete and
     commit is safely re-attempted on the next sweep.
     """

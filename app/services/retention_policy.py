@@ -8,8 +8,9 @@ change; nothing else in the codebase hardcodes a number.
 `OUTPUT` was `None` (indefinite) pending the client's decision — see
 phases/phase-roadmap.md "Open decisions" #5. Phase 16 Step 4 defaults it to
 180 days instead of leaving it unbounded: a live storage audit
-(docs/storage-audit-2026-08.md) found this Supabase project at 484MB of its
-500MB free-tier ceiling, and real-photo/production `OUTPUT` assets are the
+(docs/storage-audit-2026-08.md) found the object-storage project then in use
+at 484MB of its 500MB free-tier ceiling, and real-photo/production `OUTPUT`
+assets are the
 one category of stored bytes with no expiry mechanism at all otherwise.
 This is a default, not a resolution of the open decision — the client can
 change it to any value at any time, including back to indefinite.

@@ -74,8 +74,8 @@ useful in production.
 | `API_BASE_PATH` | Default `/api/v2` is fine |
 | `MOCK_MODE` | Set via `[env]`, must be `false` — both `fly.toml` files already set this |
 | `DATABASE_URL` | **(required)** — Supabase session pooler URL, port 5432, not the transaction pooler. **URL-encode any special character in the password** (`@` → `%40`, `#` → `%23`, `/` → `%2F`, `:` → `%3A`). A raw `@` makes SQLAlchemy split the URL at the wrong `@`, so the host parses as `<tail-of-password>@aws-0-….pooler.supabase.com` and the deploy dies at `alembic upgrade head` with `socket.gaierror: [Errno -2] Name or service not known` — which reads like a DNS/network outage but is purely a parsing bug. Copy this value from a known-good `.env`; never retype it by hand. |
-| `SUPABASE_URL` | (has a default, but production needs a real value) |
-| `SUPABASE_SERVICE_KEY` | (has a default, but production needs a real value) — never log this, `docs/conventions.md` |
+| `S3_REGION` | Default `ap-south-1` is fine unless the bucket region differs |
+| `S3_ENDPOINT_URL` | Leave unset (`None`) for real AWS — set only to point at a non-AWS S3-compatible endpoint (a local moto server in tests, MinIO in local docker-compose). Credentials are **never** an env var on this path: boto3 resolves them from its default chain, which on Fly means an explicit `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` secret pair (Fly has no EC2-instance-profile equivalent) — set those two alongside this one, deliberately not listed as their own `Settings` fields since `app/config.py` never reads them directly (`docs/conventions.md`: "No `os.getenv` anywhere else in the codebase" — this is boto3's own credential resolution, not application config) |
 | `BUCKET_INPUTS` | Default `jewelry-inputs` is fine unless bucket names differ per environment |
 | `BUCKET_OUTPUTS` | Default `jewelry-outputs` is fine, same caveat |
 | `SIGNED_URL_TTL_SECONDS` | Default `3600` is fine |

@@ -1,7 +1,8 @@
 """Phase 10 Checkpoint 1 — real per-client rate limiting and daily quota on
 POST /generate. Real testcontainers Postgres, real local Redis (the
 fixed-window counter genuinely lives there, not fakeredis — see
-app/core/ratelimit.py), real Supabase Storage, fixture-driven Gemini
+app/core/ratelimit.py), real S3 storage (a session-scoped moto server; see
+tests/conftest.py::_moto_s3_server), fixture-driven Gemini
 generation (tests/conftest.py's autouse fixture).
 """
 

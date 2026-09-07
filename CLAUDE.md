@@ -239,7 +239,8 @@ Generation" section, and `docs/ai-integration.md`'s Mode G.
 
 ## Tech Stack
 
-FastAPI + Pydantic v2 · Celery 5.4 + Redis · Supabase (Postgres 15 + Storage buckets) ·
+FastAPI + Pydantic v2 · Celery 5.4 + Redis · Supabase Postgres 15 ·
+S3 object storage (boto3 — migrated off Supabase Storage, Stage A) ·
 Gemini Image API · Docker Compose · Sentry + structlog
 
 ## Folder Structure
@@ -287,7 +288,7 @@ app/
                             (Phase 2 — not in the original sketch)
     status_service.py      GET /status response assembly, retryable/signed-URL logic
                             (Phase 1 Step 3 — not in the original sketch)
-    storage_service.py     Supabase Storage upload/download/signed URLs
+    storage_service.py     S3 (boto3) upload/download/signed URLs
     cost_service.py        Cost event recording (Phase 6)
     generation_service.py  Real single-sub-job generation call: prompt resolution,
                             Mode A/B input sourcing, rate limiting, cost logging,

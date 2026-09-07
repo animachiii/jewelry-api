@@ -1,8 +1,9 @@
 """Phase 7 Checkpoints 2-4 — parent-status recompute and fan-out dispatch,
 end-to-end through the real POST /generate -> orchestration.fan_out_job ->
 generation.transform_photo cascade. Real testcontainers Postgres, real local
-Redis, real Supabase Storage — only the Gemini call itself is faked (see
-tests/conftest.py's autouse `_fake_gemini_success_by_default`, overridden
+Redis, real S3 storage (a session-scoped moto server; see
+tests/conftest.py::_moto_s3_server) — only the Gemini call itself is faked
+(see tests/conftest.py's autouse `_fake_gemini_success_by_default`, overridden
 per-test here where a different outcome is needed).
 """
 

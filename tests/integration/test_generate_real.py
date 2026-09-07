@@ -1,7 +1,8 @@
 """Phase 2 Checkpoint 4 — real POST /generate: validation, job/sub-job/asset
-creation, and idempotency. Uses testcontainers Postgres for the DB and the
-real Supabase project for the presign -> PUT -> /generate round trip (same
-approach as tests/integration/test_mock_fixtures.py).
+creation, and idempotency. Uses testcontainers Postgres for the DB and a
+real S3-compatible server (a session-scoped moto server; see
+tests/conftest.py::_moto_s3_server) for the presign -> PUT -> /generate
+round trip (same approach as tests/integration/test_mock_fixtures.py).
 """
 
 import io

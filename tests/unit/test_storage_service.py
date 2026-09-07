@@ -12,16 +12,16 @@ httpx.ReadTimeout signature failed a different, unrelated test in CI five
 times in one week -- see storage_service.py's own module docstring.
 
 2026-09-07 (Task 2, S3 migration): download_to_temp/download_bytes now call
-get_client().get_object(...) instead of the old Supabase-style
+get_client().get_object(...) instead of the old object-storage-provider-style
 `.storage.from_(bucket).download(...)`. Their tests below moved from a
-hand-written Supabase fake to a real local S3 server (moto's
+hand-written fake for that old API to a real local S3 server (moto's
 ThreadedMotoServer, not mock_aws() -- see the `s3` fixture's own docstring
 for why a real listening socket matters for a later task's presigned-URL
 tests).
 
 2026-09-07 (Task 3, S3 migration): upload_from_temp/upload_bytes now call
-get_client().put_object(...) the same way. Their old hand-written Supabase
-fake (_FakeBucket/_FakeStorage/_FakeClient) is gone -- the retry coverage it
+get_client().put_object(...) the same way. Their old hand-written fake for
+that same old API (_FakeBucket/_FakeStorage/_FakeClient) is gone -- the retry coverage it
 provided (a transient failure is retried and the caller-supplied bytes are
 identical on every attempt) now lives in
 test_upload_bytes_retries_a_transient_timeout_and_succeeds below, retargeted
@@ -238,7 +238,7 @@ def test_upload_from_temp_survives_the_caller_deleting_the_file(s3: Any, tmp_pat
 def test_upload_bytes_retries_a_transient_timeout_and_succeeds(
     s3: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Restores the coverage of the old Supabase-fake-based retry test (a
+    """Restores the coverage of the old fake-client-based retry test (a
     transient failure is retried, and the caller-supplied bytes are
     identical on every attempt), retargeted at the real boto3 client the
     `s3` fixture returns -- exactly like

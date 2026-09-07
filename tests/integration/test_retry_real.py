@@ -1,14 +1,15 @@
 """Phase 8 Checkpoint 2-3 — real POST /jobs/{job_id}/angles/{angle}/retry.
 
 Real testcontainers Postgres, real local Redis (retry-scoped idempotency,
-app/core/idempotency.py), real Supabase Storage, fixture-driven Gemini
+app/core/idempotency.py), real S3 storage (a session-scoped moto server; see
+tests/conftest.py::_moto_s3_server), fixture-driven Gemini
 (tests/conftest.py's autouse `_fake_gemini_success_by_default`, overridden
 per-test where a different outcome is needed) — same stack as
 tests/integration/test_orchestration.py.
 
 Every test here starts from a real /generate + a real forced provider
 failure (not a hand-built row) so the retried angle's input asset actually
-exists in Supabase Storage and its config_version is genuinely pinned —
+exists in S3 storage and its config_version is genuinely pinned —
 exactly what a client hits in production. The one thing tests must still do
 by hand: generation_service.MAX_ATTEMPTS and job_service.MAX_RETRY_ATTEMPTS
 are both 3 and share one column (docs/schema.md — "attempt_count increments

@@ -2,14 +2,15 @@
 
 Seeds the real 8 scenarios (scripts/seed_dev.py) into the testcontainers
 Postgres, then drives GET /status/{job_id} etc. against them for real. Signed
-URLs are generated against the real configured Supabase project (see
-app/services/storage_service.py) — Supabase's sign endpoint 404s for a path
-with no object, so `seeded_jobs` also backfills placeholder bytes for every
-COMPLETED output asset (scripts/upload_seed_assets.upload_placeholder_bytes)
-before any test runs. This is a real signed-URL + real-bytes round trip, not
-a stub. TTL expiry was verified manually: Supabase returns 400, not the 403
-phases/phase-1-api-contract.md originally assumed — see the Step 3 self-audit
-in docs/integration-guide.md for that discrepancy.
+URLs are generated against a real S3-compatible server (see
+tests/conftest.py::_moto_s3_server and app/services/storage_service.py) — its
+sign endpoint 404s for a path with no object, so `seeded_jobs` also backfills
+placeholder bytes for every COMPLETED output asset
+(scripts/upload_seed_assets.upload_placeholder_bytes) before any test runs.
+This is a real signed-URL + real-bytes round trip, not a stub. See
+docs/integration-guide.md's own Step 3 self-audit for a TTL-expiry-status
+discrepancy this checkpoint originally found against the object-storage
+provider in use at the time, since superseded by Stage A's S3 migration.
 """
 
 import uuid
@@ -208,7 +209,8 @@ async def test_completed_angle_has_real_signed_url(
     for angle in body["angles"]:
         assert angle["status"] == "COMPLETED"
         assert angle["image_url"] is not None
-        assert angle["image_url"].startswith(f"https://{settings.SUPABASE_URL.split('://')[-1]}")
+        assert angle["image_url"].startswith(str(settings.S3_ENDPOINT_URL))
+        assert f"/{settings.BUCKET_OUTPUTS}/" in angle["image_url"]
 
     # Real signed URL that actually returns image bytes on GET — not just a
     # plausible-looking string. See phases/phase-1-api-contract.md Checkpoint 3.
@@ -259,7 +261,7 @@ async def test_other_clients_job_id_404_body_leaks_nothing(
     assert set(body["error"].keys()) == {"code", "message", "details", "request_id"}
     assert "image_url" not in resp.text
     assert "storage_path" not in resp.text
-    assert "supabase" not in resp.text.lower()
+    assert settings.BUCKET_OUTPUTS not in resp.text
 
 
 async def test_presign_returns_url_accepting_real_put(

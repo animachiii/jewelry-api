@@ -1,7 +1,8 @@
 """Phase 9 Checkpoints 2-3 — real QA scoring wired into the pipeline, plus
 real GET /qa/review-queue and POST /qa/{sub_job_id}/decision.
 
-Real testcontainers Postgres, real local Redis, real Supabase Storage,
+Real testcontainers Postgres, real local Redis, real S3 storage (a
+session-scoped moto server; see tests/conftest.py::_moto_s3_server),
 fixture-driven Gemini generation AND Gemini QA scoring — same stack as
 tests/integration/test_orchestration.py. Under task_always_eager, a single
 POST /generate for a synthetic angle cascades all the way through

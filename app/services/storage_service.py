@@ -1,14 +1,16 @@
-"""Supabase Storage upload/download/signed URLs.
+"""S3 object storage — upload/download/signed URLs, via boto3.
 
 Path convention (docs/schema.md): {job_id}/{angle}/{kind}_{short_uuid}.{ext}
 Enforced here via `build_storage_path` rather than string-formatted at call
 sites. All buckets are private — there is no public read path.
 
-NOT YET LIVE-VERIFIED: Phase 0 Checkpoint 3 requires round-tripping a real
-upload against actual Supabase Storage buckets, which needs a Supabase
-project + SUPABASE_SERVICE_KEY that do not exist yet in this environment.
-The client construction and calls below follow the supabase-py API exactly,
-but have not been exercised against a live project.
+**S3 migration complete (Stage A, Tasks 1-6).** Every function in this
+module — downloads, uploads, `exists`/`delete`, presigned upload/read URLs —
+is real `boto3`/botocore against S3 (or, in tests, a local moto server; see
+`tests/conftest.py::_moto_s3_server`). Nothing here speaks the previous
+object-storage provider's API any more. Credentials come from boto3's default chain
+(environment locally, the EC2 instance profile in production) and are never
+read directly by this module — see `get_client`.
 
 **2026-08-28 — every call below retries on a transient network failure.**
 Found via a very visible symptom: `test_api_mix.py`/`test_api_recolor.py`/
@@ -32,6 +34,18 @@ raises `storage3.utils.StorageException` instead, an unrelated exception
 type that is never caught here and propagates on the first attempt, same as
 before this change. Retrying that would be silently swallowing a real,
 deterministic failure — this must never do that.
+
+**The same transient-vs-deterministic classification carries over to
+botocore, unchanged in substance (Stage A, Task 2).** `_with_retries` now
+retries only the transport-level botocore exceptions in `TRANSIENT_ERRORS`
+below (connection error, connect/read timeout, endpoint-connection
+failure) — no HTTP response was ever received, same rule as the
+`httpx.TransportError` case above. A real S3 error response (`NoSuchKey`,
+`AccessDenied`, ...) raises botocore's `ClientError` instead, which is
+deliberately not in that tuple and propagates on the first attempt, same
+posture as the previous provider's own error-response exception type had
+before it. The rule this paragraph documents — retry only "no response,"
+never a real error response — is what moved, not the reasoning behind it.
 """
 
 import tempfile
@@ -140,7 +154,7 @@ def build_storage_path(job_id: uuid.UUID, angle: str, kind: AssetKind, ext: str)
     return f"{job_id}/{angle}/{kind.value.lower()}_{short_uuid}.{ext.lstrip('.')}"
 
 
-# Matches the Supabase upload-URL lifetime this replaces, and
+# Matches the previous object-storage provider's upload-URL lifetime, and
 # app/api/v2/uploads.py's own _UPLOAD_URL_TTL_SECONDS, which stamps the
 # expires_at the client is shown. Keep the two in step.
 _UPLOAD_URL_TTL_SECONDS = 600
@@ -149,9 +163,10 @@ _UPLOAD_URL_TTL_SECONDS = 600
 def generate_upload_url(bucket: str, storage_path: str) -> dict[str, Any]:
     """Returns a short-lived presigned URL the client can PUT a file to directly.
 
-    The `signedUrl` key is inherited from the Supabase implementation this
-    replaces and is read at six call sites in app/api/v2/uploads.py — it is
-    this function's contract with its caller, not an accident.
+    The `signedUrl` key is inherited from the object-storage API this
+    module previously spoke and is read at six call sites in
+    app/api/v2/uploads.py — it is this function's contract with its caller,
+    not an accident.
     """
     url = _with_retries(
         "generate_upload_url",
