@@ -27,7 +27,7 @@ from typing import Any
 import boto3
 import pytest
 from botocore.client import Config
-from botocore.exceptions import ClientError, ConnectTimeoutError
+from botocore.exceptions import ClientError, ConnectTimeoutError, ReadTimeoutError
 from moto.server import ThreadedMotoServer
 
 from app.config import settings
@@ -120,6 +120,81 @@ def test_with_retries_does_not_retry_a_real_error_response(
         storage_service._with_retries("download", _boom)
 
     assert len(calls) == 1, "a real error response must not be retried"
+
+
+def test_download_bytes_retries_a_transient_timeout_and_succeeds(
+    s3: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restores the Task 1 test of the same name, retargeted at the real
+    boto3 client the `s3` fixture returns (moto doesn't inject transport
+    failures itself, so the client's own `get_object` is monkeypatched to
+    raise). See this module's own docstring: the 2026-08-28 incident this
+    protects against was a real `httpx.ReadTimeout`/`ReadTimeoutError`
+    signature failing CI five times in one week.
+    """
+    s3.put_object(Bucket=TEST_BUCKET, Key="a/b/input_1.jpg", Body=b"real-image-bytes")
+
+    client = storage_service.get_client()
+    real_get_object = client.get_object
+    calls = {"count": 0}
+
+    def _flaky_get_object(**kwargs: Any) -> Any:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise ReadTimeoutError(endpoint_url="https://s3.example.com")
+        return real_get_object(**kwargs)
+
+    monkeypatch.setattr(client, "get_object", _flaky_get_object)
+
+    result = storage_service.download_bytes(TEST_BUCKET, "a/b/input_1.jpg")
+
+    assert result == b"real-image-bytes"
+    assert calls["count"] == 2  # one failure, one success
+
+
+def test_download_bytes_gives_up_after_max_attempts(
+    s3: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient failure on every attempt must still surface to the
+    caller -- this is bounded retry, not infinite retry, and not silently
+    swallowing a real, persistent outage.
+    """
+    s3.put_object(Bucket=TEST_BUCKET, Key="a/b/input_1.jpg", Body=b"real-image-bytes")
+
+    client = storage_service.get_client()
+    calls = {"count": 0}
+
+    def _always_fails(**kwargs: Any) -> Any:
+        calls["count"] += 1
+        raise ReadTimeoutError(endpoint_url="https://s3.example.com")
+
+    monkeypatch.setattr(client, "get_object", _always_fails)
+
+    with pytest.raises(ReadTimeoutError):
+        storage_service.download_bytes(TEST_BUCKET, "a/b/input_1.jpg")
+
+    assert calls["count"] == settings.STORAGE_MAX_ATTEMPTS
+
+
+def test_download_bytes_does_not_write_a_temp_file(
+    s3: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point: download_to_temp's NamedTemporaryFile round trip is
+    what caused the double buffering (see this module's own docstring, the
+    2026-08-13 OOM investigation). download_bytes must never touch disk.
+    """
+    import tempfile
+
+    s3.put_object(Bucket=TEST_BUCKET, Key="a/b/input_1.jpg", Body=b"real-image-bytes")
+
+    def _fail_named_temp_file(*args: object, **kwargs: object) -> None:
+        raise AssertionError("download_bytes must not create a temp file")
+
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", _fail_named_temp_file)
+
+    result = storage_service.download_bytes(TEST_BUCKET, "a/b/input_1.jpg")
+
+    assert result == b"real-image-bytes"
 
 
 class _FakeBucket:
