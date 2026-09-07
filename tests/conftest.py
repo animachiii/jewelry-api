@@ -244,6 +244,71 @@ def _cleanup_storage_uploads() -> Iterator[None]:
         yield
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _flush_rate_limit_keys() -> AsyncGenerator[None, None]:
+    """Task 6 fix round — Important finding.
+
+    This task's own moto-server migration (`_moto_s3_server` above) made the
+    full integration suite ~10x faster (755s -> ~90s). That's a real,
+    intended improvement, but it exposed a pre-existing, unrelated latent
+    bug in test isolation: `app/services/rate_limiter.py` enforces a real
+    fixed-window rate limit (`provider:gemini:tokens:{minute-window}`,
+    capacity `GEMINI_RATE_LIMIT_PER_MINUTE`) against a REAL Redis instance
+    (`settings.REDIS_URL` — not fakeredis; `app/core/ratelimit.py`'s
+    per-client counter, `ratelimit:{client_id}:{minute}`, shares the exact
+    same real-Redis wall-clock-window problem). Before this task, the slow
+    (~12.5-minute) suite spread real-provider-classified calls across many
+    real wall-clock minutes, so the shared per-minute budget rarely
+    collided across unrelated tests. Now the whole suite finishes in ~90
+    seconds — well inside one or two real minutes — so far more than 60
+    provider-classified calls compete for one shared window, and tests
+    later in the run genuinely got `RATE_LIMITED` and failed
+    (`failure_class=RATE_LIMITED`, sub-job `FAILED` instead of
+    `COMPLETED`). Reproduced twice independently (a different specific
+    failing test each time — a real race, not a fixed bug).
+
+    Fix: flush both key families **before** each test runs (not after) so
+    every test starts with an isolated rate-limit window regardless of real
+    wall-clock timing or what ran immediately before it in the same test
+    session. Flushing before — not during/after — is what keeps
+    `tests/integration/test_rate_limit_quota.py` able to deliberately
+    exhaust its own window and see it enforced within its own test body:
+    that test's own assertions run after this fixture's pre-test flush, so
+    its first `/generate` call always starts from zero.
+
+    Function-scoped and autouse for every test, not scoped to a directory
+    or marker: a session-scoped flush would run once and not solve
+    cross-test contention (the entire problem), and scoping this to
+    "integration only" would require trusting that no other test file ever
+    exercises `rate_limiter.acquire` or `ratelimit.allow` against real
+    Redis — a narrower guarantee than "flush before every test," for no
+    real benefit, since a test that never touches real Redis pays only the
+    cost of one Redis round trip for a SCAN that matches nothing.
+
+    Does NOT touch `GEMINI_RATE_LIMIT_PER_MINUTE` itself (stays 60) — the
+    limiter's own real behavior, including genuinely hitting the cap within
+    one test, must remain testable; see
+    `tests/integration/test_rate_limit_quota.py`.
+
+    Uses a real (not fake) Redis client against the same Redis instance the
+    app connects to (`app.core.redis_client.new_redis_client`, which reads
+    `settings.REDIS_URL` — see `.env`), matching how a human would flush
+    with `docker exec jewellery-test-redis redis-cli` but via the same
+    Python client the app itself uses rather than shelling out.
+    """
+    from app.core.redis_client import new_redis_client
+
+    client = new_redis_client()
+    try:
+        for pattern in ("provider:gemini:tokens:*", "ratelimit:*"):
+            keys = [key async for key in client.scan_iter(match=pattern)]
+            if keys:
+                await client.delete(*keys)
+        yield
+    finally:
+        await client.aclose()
+
+
 _QA_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "qa"
 
 
