@@ -45,12 +45,13 @@ import boto3
 import structlog
 from botocore.client import Config
 from botocore.exceptions import (
-    ConnectionError as BotoConnectionError,
-)
-from botocore.exceptions import (
+    ClientError,
     ConnectTimeoutError,
     EndpointConnectionError,
     ReadTimeoutError,
+)
+from botocore.exceptions import (
+    ConnectionError as BotoConnectionError,
 )
 
 from app.config import settings
@@ -218,16 +219,31 @@ def upload_bytes(bucket: str, storage_path: str, data: bytes, content_type: str)
 
 
 def exists(bucket: str, storage_path: str) -> bool:
-    parent = str(Path(storage_path).parent)
-    filename = Path(storage_path).name
-    listing = _with_retries("list", lambda: get_client().storage.from_(bucket).list(parent))
-    return any(item.get("name") == filename for item in listing)
+    """Exact-key existence check.
+
+    A 404 means the object is absent and returns False. Every other error
+    response propagates: an AccessDenied swallowed as "absent" would make
+    the retention worker silently skip objects it cannot see, which is worse
+    than failing loudly.
+    """
+
+    def _head() -> bool:
+        try:
+            get_client().head_object(Bucket=bucket, Key=storage_path)
+        except ClientError as exc:
+            if exc.response["ResponseMetadata"]["HTTPStatusCode"] == 404:
+                return False
+            raise
+        return True
+
+    return _with_retries("head", _head)
 
 
 def delete(bucket: str, storage_path: str) -> None:
     """Removes bytes for a single object. Idempotent — deleting an object
     that is already gone does not raise, which is also what makes retrying
-    it safe. Used by the retention worker (app/workers/retention.py); never
-    deletes the Asset row itself.
+    it safe (S3's DeleteObject returns 204 for an absent key). Used by the
+    retention worker (app/workers/retention.py); never deletes the Asset row
+    itself.
     """
-    _with_retries("delete", lambda: get_client().storage.from_(bucket).remove([storage_path]))
+    _with_retries("delete", lambda: get_client().delete_object(Bucket=bucket, Key=storage_path))

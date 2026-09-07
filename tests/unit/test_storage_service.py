@@ -278,6 +278,67 @@ def test_get_client_is_cached_and_targets_configured_region(
     assert first.meta.region_name == "ap-south-1"
 
 
+def test_exists_is_true_for_a_stored_object(s3: Any) -> None:
+    storage_service.upload_bytes(TEST_BUCKET, "a/b/out_1.jpg", b"x", "image/jpeg")
+
+    assert storage_service.exists(TEST_BUCKET, "a/b/out_1.jpg") is True
+
+
+def test_exists_is_false_for_a_missing_object(s3: Any) -> None:
+    assert storage_service.exists(TEST_BUCKET, "a/b/missing.jpg") is False
+
+
+def test_exists_does_not_match_a_prefix_sibling(s3: Any) -> None:
+    """head_object is an exact-key check. The previous list-and-match
+    implementation could be fooled by a sibling; this must not be."""
+    storage_service.upload_bytes(TEST_BUCKET, "a/b/out_1.jpg", b"x", "image/jpeg")
+
+    assert storage_service.exists(TEST_BUCKET, "a/b/out_1.jpg.bak") is False
+
+
+def test_exists_reraises_a_403_rather_than_treating_it_as_absent(
+    s3: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one correctness property that matters most in this task: a 404
+    means absent, but every other error response — most importantly a 403
+    AccessDenied — must propagate. If exists() swallowed AccessDenied as
+    False, the retention worker (app/workers/retention.py) would silently
+    skip real objects it merely lacks permission to see, rather than
+    failing loudly. This proves a 403-shaped ClientError is NOT swallowed.
+    """
+    client = storage_service.get_client()
+
+    def _forbidden(**kwargs: Any) -> Any:
+        raise ClientError(
+            {
+                "Error": {"Code": "AccessDenied", "Message": "Forbidden"},
+                "ResponseMetadata": {"HTTPStatusCode": 403},
+            },
+            "HeadObject",
+        )
+
+    monkeypatch.setattr(client, "head_object", _forbidden)
+
+    with pytest.raises(ClientError) as exc_info:
+        storage_service.exists(TEST_BUCKET, "a/b/out_1.jpg")
+
+    assert exc_info.value.response["ResponseMetadata"]["HTTPStatusCode"] == 403
+
+
+def test_delete_removes_the_object(s3: Any) -> None:
+    storage_service.upload_bytes(TEST_BUCKET, "a/b/out_1.jpg", b"x", "image/jpeg")
+
+    storage_service.delete(TEST_BUCKET, "a/b/out_1.jpg")
+
+    assert storage_service.exists(TEST_BUCKET, "a/b/out_1.jpg") is False
+
+
+def test_delete_is_idempotent(s3: Any) -> None:
+    """Deleting an object that is already gone must not raise — that is what
+    makes retrying a delete safe. See the retention worker."""
+    storage_service.delete(TEST_BUCKET, "a/b/never-existed.jpg")
+
+
 def test_get_client_disables_botocore_internal_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
