@@ -350,3 +350,55 @@ def test_get_client_disables_botocore_internal_retries(
     client = storage_service.get_client()
 
     assert client.meta.config.retries["total_max_attempts"] == 1
+
+
+def test_generate_signed_url_round_trips_with_httpx(s3: Any) -> None:
+    """A presigned GET must actually fetch the object. Asserting the URL
+    merely contains 'Signature' would pass for a URL that 403s."""
+    import httpx
+
+    storage_service.upload_bytes(TEST_BUCKET, "a/b/out_1.jpg", b"jpeg-bytes", "image/jpeg")
+
+    url = storage_service.generate_signed_url(TEST_BUCKET, "a/b/out_1.jpg")
+
+    assert httpx.get(url).content == b"jpeg-bytes"
+
+
+def test_generate_signed_url_honours_an_explicit_ttl(s3: Any) -> None:
+    storage_service.upload_bytes(TEST_BUCKET, "a/b/out_1.jpg", b"x", "image/jpeg")
+
+    url = storage_service.generate_signed_url(TEST_BUCKET, "a/b/out_1.jpg", ttl_seconds=60)
+
+    assert "X-Amz-Expires=60" in url
+
+
+def test_generate_signed_url_defaults_to_the_configured_ttl(
+    s3: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "SIGNED_URL_TTL_SECONDS", 1800)
+    storage_service.upload_bytes(TEST_BUCKET, "a/b/out_1.jpg", b"x", "image/jpeg")
+
+    url = storage_service.generate_signed_url(TEST_BUCKET, "a/b/out_1.jpg")
+
+    assert "X-Amz-Expires=1800" in url
+
+
+def test_generate_upload_url_returns_a_signedUrl_key(s3: Any) -> None:
+    """app/api/v2/uploads.py reads result["signedUrl"] at six call sites.
+    That key is this module's contract with its caller."""
+    result = storage_service.generate_upload_url(TEST_BUCKET, "a/b/input_1.jpg")
+
+    assert "signedUrl" in result
+    assert result["signedUrl"].startswith("http")
+
+
+def test_generate_upload_url_round_trips_with_httpx(s3: Any) -> None:
+    """A presigned PUT must actually accept an upload."""
+    import httpx
+
+    result = storage_service.generate_upload_url(TEST_BUCKET, "a/b/input_1.jpg")
+
+    response = httpx.put(result["signedUrl"], content=b"uploaded-bytes")
+
+    assert response.status_code == 200
+    assert storage_service.download_bytes(TEST_BUCKET, "a/b/input_1.jpg") == b"uploaded-bytes"

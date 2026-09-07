@@ -140,26 +140,42 @@ def build_storage_path(job_id: uuid.UUID, angle: str, kind: AssetKind, ext: str)
     return f"{job_id}/{angle}/{kind.value.lower()}_{short_uuid}.{ext.lstrip('.')}"
 
 
+# Matches the Supabase upload-URL lifetime this replaces, and
+# app/api/v2/uploads.py's own _UPLOAD_URL_TTL_SECONDS, which stamps the
+# expires_at the client is shown. Keep the two in step.
+_UPLOAD_URL_TTL_SECONDS = 600
+
+
 def generate_upload_url(bucket: str, storage_path: str) -> dict[str, Any]:
-    """Returns a short-lived signed URL the client can PUT a file to directly."""
-    result = _with_retries(
+    """Returns a short-lived presigned URL the client can PUT a file to directly.
+
+    The `signedUrl` key is inherited from the Supabase implementation this
+    replaces and is read at six call sites in app/api/v2/uploads.py — it is
+    this function's contract with its caller, not an accident.
+    """
+    url = _with_retries(
         "generate_upload_url",
-        lambda: get_client().storage.from_(bucket).create_signed_upload_url(storage_path),
+        lambda: get_client().generate_presigned_url(
+            "put_object",
+            Params={"Bucket": bucket, "Key": storage_path},
+            ExpiresIn=_UPLOAD_URL_TTL_SECONDS,
+        ),
     )
-    return dict(result)
+    return {"signedUrl": url, "path": storage_path}
 
 
 def generate_signed_url(bucket: str, storage_path: str, ttl_seconds: int | None = None) -> str:
     """Fresh signed read URL, generated on demand — never persisted to the database."""
     ttl = ttl_seconds or settings.SIGNED_URL_TTL_SECONDS
-    result = _with_retries(
+    url: str = _with_retries(
         "generate_signed_url",
-        lambda: get_client().storage.from_(bucket).create_signed_url(storage_path, ttl),
+        lambda: get_client().generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": storage_path},
+            ExpiresIn=ttl,
+        ),
     )
-    signed_url = result.get("signedURL")
-    if not signed_url:
-        raise RuntimeError(f"Supabase did not return a signedURL for {bucket}/{storage_path}")
-    return str(signed_url)
+    return url
 
 
 def download_to_temp(bucket: str, storage_path: str) -> Path:
