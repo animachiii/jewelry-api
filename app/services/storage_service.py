@@ -42,14 +42,16 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+import structlog
 from botocore.client import Config
 from botocore.exceptions import (
     ConnectionError as BotoConnectionError,
+)
+from botocore.exceptions import (
     ConnectTimeoutError,
     EndpointConnectionError,
     ReadTimeoutError,
 )
-import structlog
 
 from app.config import settings
 from app.db.models.enums import AssetKind

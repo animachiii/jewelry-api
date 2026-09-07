@@ -13,8 +13,8 @@ times in one week -- see storage_service.py's own module docstring.
 
 from typing import Any
 
-import httpx
 import pytest
+from botocore.exceptions import ClientError, ConnectTimeoutError, ReadTimeoutError
 
 from app.config import settings
 from app.services import storage_service
@@ -89,7 +89,9 @@ def test_download_bytes_retries_a_transient_timeout_and_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bucket = _FlakyThenOkBucket(
-        b"real-image-bytes", fail_times=1, exc=httpx.ReadTimeout("timed out")
+        b"real-image-bytes",
+        fail_times=1,
+        exc=ReadTimeoutError(endpoint_url="https://s3.example.com"),
     )
     client = _FakeClient(b"unused")
     client.storage = _FakeStorage(bucket)  # type: ignore[assignment]
@@ -107,13 +109,15 @@ def test_download_bytes_gives_up_after_max_attempts(monkeypatch: pytest.MonkeyPa
     swallowing a real, persistent outage.
     """
     bucket = _FlakyThenOkBucket(
-        b"real-image-bytes", fail_times=999, exc=httpx.ReadTimeout("timed out")
+        b"real-image-bytes",
+        fail_times=999,
+        exc=ReadTimeoutError(endpoint_url="https://s3.example.com"),
     )
     client = _FakeClient(b"unused")
     client.storage = _FakeStorage(bucket)  # type: ignore[assignment]
     monkeypatch.setattr(storage_service, "get_client", lambda: client)
 
-    with pytest.raises(httpx.ReadTimeout):
+    with pytest.raises(ReadTimeoutError):
         storage_service.download_bytes("jewelry-inputs", "job/1/input.jpg")
 
     assert bucket.call_count == settings.STORAGE_MAX_ATTEMPTS
@@ -142,6 +146,25 @@ def test_a_real_storage_error_is_never_retried(monkeypatch: pytest.MonkeyPatch) 
     assert bucket.call_count == 1  # never retried
 
 
+def test_with_retries_does_not_retry_a_real_error_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ClientError is S3 answering. Retrying it would swallow a real,
+    deterministic failure — see this module's retry discipline."""
+    calls = []
+
+    def _boom() -> None:
+        calls.append(1)
+        raise ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": "not found"}}, "GetObject"
+        )
+
+    with pytest.raises(ClientError):
+        storage_service._with_retries("download", _boom)
+
+    assert len(calls) == 1, "a real error response must not be retried"
+
+
 def test_upload_bytes_only_reads_source_data_once_across_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -159,7 +182,7 @@ def test_upload_bytes_only_reads_source_data_once_across_retries(
             self.call_count += 1
             self.received.append(data)
             if self.call_count == 1:
-                raise httpx.ConnectError("connection reset")
+                raise ConnectTimeoutError(endpoint_url="https://s3.example.com")
 
     bucket = _FlakyUploadBucket()
     client = _FakeClient(b"unused")

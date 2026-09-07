@@ -63,6 +63,10 @@ plugins = ["pydantic.mypy"]
 module = ["celery.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["boto3.*", "botocore.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = [

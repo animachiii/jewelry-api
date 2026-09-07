@@ -10,6 +10,7 @@ from pathlib import Path
 import fakeredis.aioredis
 import pytest
 import pytest_asyncio
+import structlog
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -86,6 +87,8 @@ def _celery_eager() -> Iterator[None]:
     celery_app.conf.task_eager_propagates = False
 
 
+_logger = structlog.get_logger()
+
 _GEMINI_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "gemini"
 
 
@@ -141,7 +144,25 @@ def track_storage_uploads() -> Iterator[list[tuple[str, str]]]:
         storage_service.upload_bytes = orig_upload_bytes  # type: ignore[assignment]
         storage_service.upload_from_temp = orig_upload_from_temp  # type: ignore[assignment]
         for bucket, path in uploaded:
-            storage_service.delete(bucket, path)
+            # Best-effort: a unit test that mocks storage_service.get_client
+            # for the duration of its own test body (e.g.
+            # tests/unit/test_storage_service.py's retry tests) has that
+            # patch reverted by pytest's `monkeypatch` fixture before this
+            # fixture's own teardown runs here, so `delete` below can end up
+            # calling the real, unmocked client -- currently (Stage A, Task
+            # 1 of the S3 migration) a boto3 S3 client while this function's
+            # body still speaks the pre-migration Supabase Storage API,
+            # since Tasks 2-5 haven't migrated it yet. No unit test ever
+            # wrote real bytes anywhere, so there's nothing to actually
+            # clean up for it; only a genuine integration test (real
+            # Storage, real get_client) has real bytes at this path, and for
+            # that case this must still surface a real failure.
+            try:
+                storage_service.delete(bucket, path)
+            except Exception:
+                _logger.warning(
+                    "storage_cleanup_skipped", bucket=bucket, storage_path=path, exc_info=True
+                )
 
 
 @pytest.fixture(autouse=True)
