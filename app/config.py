@@ -22,7 +22,13 @@ class Settings(BaseSettings):
     # Session pooler (5432), NOT transaction pooler (6543) — SQLAlchemy uses prepared statements.
     DATABASE_URL: str
 
-    # --- Supabase Storage ---
+    # --- S3 object storage ---
+    # Credentials come from boto3's default chain: environment variables
+    # locally, the EC2 instance profile in production. Never set explicitly.
+    S3_REGION: str = "ap-south-1"
+    # Set only to point at a non-AWS S3 endpoint — the moto server in tests,
+    # or MinIO in local docker-compose. None means real AWS.
+    S3_ENDPOINT_URL: str | None = None
     SUPABASE_URL: str = ""
     SUPABASE_SERVICE_KEY: str = ""
     BUCKET_INPUTS: str = "jewelry-inputs"

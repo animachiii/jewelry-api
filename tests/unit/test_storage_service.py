@@ -188,3 +188,29 @@ def test_download_bytes_does_not_write_a_temp_file(
     result = storage_service.download_bytes("jewelry-inputs", "job/1/input.jpg")
 
     assert result == b"real-image-bytes"
+
+
+def test_get_client_is_cached_and_targets_configured_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(storage_service, "_client", None)
+    monkeypatch.setattr(settings, "S3_REGION", "ap-south-1")
+
+    first = storage_service.get_client()
+    second = storage_service.get_client()
+
+    assert first is second, "client must be cached in the module global"
+    assert first.meta.region_name == "ap-south-1"
+
+
+def test_get_client_disables_botocore_internal_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_with_retries owns retry policy. If botocore also retried, a transient
+    failure would be attempted STORAGE_MAX_ATTEMPTS x botocore's own count,
+    and the retry test assertions below would silently stop meaning anything.
+    """
+    monkeypatch.setattr(storage_service, "_client", None)
+    client = storage_service.get_client()
+
+    assert client.meta.config.retries["total_max_attempts"] == 1

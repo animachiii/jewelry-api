@@ -41,35 +41,77 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import httpx
+import boto3
+from botocore.client import Config
+from botocore.exceptions import (
+    ConnectionError as BotoConnectionError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
 import structlog
-from supabase import Client, create_client
 
 from app.config import settings
 from app.db.models.enums import AssetKind
 
-_client: Client | None = None
+_client: Any | None = None
 _logger = structlog.get_logger()
 
+# Transport-level failures only: no HTTP response was ever received. A real
+# S3 error response (NoSuchKey, AccessDenied) raises botocore's ClientError,
+# which is deliberately NOT in this tuple and propagates on the first
+# attempt. Retrying a deterministic failure silently swallows it. This
+# mirrors exactly what httpx.TransportError covered before the S3 move.
+TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
+    BotoConnectionError,
+    ConnectTimeoutError,
+    ReadTimeoutError,
+    EndpointConnectionError,
+)
 
-def get_client() -> Client:
+
+def get_client() -> Any:
     global _client
     if _client is None:
-        _client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
+        s3_addressing: dict[str, Any] = {}
+        if settings.S3_ENDPOINT_URL is not None:
+            # Path-style addressing (bucket/key in the path, not
+            # bucket.host in the hostname). Virtual-hosted-style — boto3's
+            # default — needs DNS resolution of a subdomain that only
+            # exists for real AWS endpoints; a local moto server or MinIO
+            # has no such DNS entry, so a non-None endpoint always means a
+            # non-AWS target that needs path style. Real AWS
+            # (S3_ENDPOINT_URL is None) never takes this branch and keeps
+            # boto3's default addressing.
+            s3_addressing["s3"] = {"addressing_style": "path"}
+        _client = boto3.client(
+            "s3",
+            region_name=settings.S3_REGION,
+            endpoint_url=settings.S3_ENDPOINT_URL,
+            # total_max_attempts=1 means "try once, never retry internally".
+            # _with_retries below is the single, tested retry boundary; two
+            # nested retry policies would multiply attempts and make the
+            # backoff untunable.
+            config=Config(
+                signature_version="s3v4",
+                retries={"total_max_attempts": 1, "mode": "standard"},
+                **s3_addressing,
+            ),
+        )
     return _client
 
 
 def _with_retries[T](operation: str, call: Callable[[], T]) -> T:
-    """Runs `call`, retrying only on `httpx.TransportError` — see this
+    """Runs `call`, retrying only on transport-level failures — see this
     module's own docstring for exactly what that does and does not cover.
     `operation` is a short label (e.g. "download", "upload") for the log
     line on a retried attempt; nothing structural depends on its value.
     """
-    last_exc: httpx.TransportError | None = None
+    last_exc: Exception | None = None
     for attempt in range(1, settings.STORAGE_MAX_ATTEMPTS + 1):
         try:
             return call()
-        except httpx.TransportError as exc:
+        except TRANSIENT_ERRORS as exc:
             last_exc = exc
             if attempt == settings.STORAGE_MAX_ATTEMPTS:
                 raise
