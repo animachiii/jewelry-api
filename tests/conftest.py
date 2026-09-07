@@ -7,11 +7,14 @@ from collections.abc import AsyncGenerator, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+import boto3
 import fakeredis.aioredis
 import pytest
 import pytest_asyncio
 import structlog
+from botocore.exceptions import ClientError
 from httpx import ASGITransport, AsyncClient
+from moto.server import ThreadedMotoServer
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -20,6 +23,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from testcontainers.postgres import PostgresContainer
 
+from app.config import settings
 from app.db.models import Base
 from app.main import app
 
@@ -28,6 +32,53 @@ from app.main import app
 def postgres_container() -> Iterator[PostgresContainer]:
     with PostgresContainer("postgres:15-alpine", driver="asyncpg") as pg:
         yield pg
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _moto_s3_server() -> Iterator[None]:
+    """Integration tests upload real bytes. Before the S3 migration those
+    bytes went to a live object-storage project, which needed credentials
+    in CI and made the suite hostage to network blips — five unrelated tests
+    failed that way in one week (see storage_service.py's docstring). A
+    moto server is a real HTTP S3 endpoint, so presigned-URL round trips
+    still work, with no external dependency.
+
+    Session-scoped: one server for the run. Note tests/integration/ also
+    shares a session-scoped Postgres container, and the same rule applies
+    here — a test that mutates shared state must reset it on the way out.
+
+    This is a *separate* server from tests/unit/test_storage_service.py's
+    own per-test `s3` fixture, which spins up its own ThreadedMotoServer and
+    monkeypatches settings.S3_ENDPOINT_URL for the duration of one test.
+    That monkeypatch always reverts to whatever this fixture set at session
+    start (never to None), and it also resets storage_service._client to
+    None on the way out, so the next test's storage_service.get_client()
+    call rebuilds a fresh client against this session server rather than
+    reusing a client wired to the now-stopped per-test server.
+    """
+    mp = pytest.MonkeyPatch()
+    # ThreadedMotoServer is a real HTTP server, so botocore's SigV4 signer
+    # runs for real and needs *some* resolvable credentials — moto's backend
+    # doesn't check their value. Session-scoped since this server itself is.
+    mp.setenv("AWS_ACCESS_KEY_ID", "testing")
+    mp.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+
+    server = ThreadedMotoServer(port=0)
+    server.start()
+    host, port = server.get_host_and_port()
+    endpoint = f"http://{host}:{port}"
+
+    settings.S3_ENDPOINT_URL = endpoint
+    settings.S3_REGION = "us-east-1"
+
+    client = boto3.client("s3", endpoint_url=endpoint, region_name="us-east-1")
+    for bucket in (settings.BUCKET_INPUTS, settings.BUCKET_OUTPUTS):
+        client.create_bucket(Bucket=bucket)
+
+    yield
+
+    server.stop()
+    mp.undo()
 
 
 @pytest_asyncio.fixture
@@ -144,22 +195,29 @@ def track_storage_uploads() -> Iterator[list[tuple[str, str]]]:
         storage_service.upload_bytes = orig_upload_bytes  # type: ignore[assignment]
         storage_service.upload_from_temp = orig_upload_from_temp  # type: ignore[assignment]
         for bucket, path in uploaded:
-            # Best-effort: a unit test that mocks storage_service.get_client
-            # for the duration of its own test body (e.g.
-            # tests/unit/test_storage_service.py's retry tests) has that
-            # patch reverted by pytest's `monkeypatch` fixture before this
-            # fixture's own teardown runs here, so `delete` below can end up
-            # calling the real, unmocked client -- currently (Stage A, Task
-            # 1 of the S3 migration) a boto3 S3 client while this function's
-            # body still speaks the pre-migration Supabase Storage API,
-            # since Tasks 2-5 haven't migrated it yet. No unit test ever
-            # wrote real bytes anywhere, so there's nothing to actually
-            # clean up for it; only a genuine integration test (real
-            # Storage, real get_client) has real bytes at this path, and for
-            # that case this must still surface a real failure.
+            # Best-effort, but narrowly so: a unit test that mocks
+            # storage_service.get_client for the duration of its own test
+            # body (e.g. tests/unit/test_storage_service.py's `s3` fixture)
+            # has that patch reverted by pytest's `monkeypatch` fixture
+            # before this fixture's own teardown runs here, so `delete`
+            # below can end up calling the real client, targeting a bucket
+            # (e.g. "test-bucket") that only ever existed on that test's own
+            # now-stopped per-test moto server, not the session-scoped one
+            # tests/conftest.py::_moto_s3_server creates — a real S3 404
+            # (NoSuchBucket/NoSuchKey), surfaced by boto3 as
+            # botocore.exceptions.ClientError. That specific, expected case
+            # is all this catches now.
+            #
+            # Until Task 6, every function in storage_service.py wasn't
+            # boto3 yet (Tasks 2-5 migrated it function by function), so
+            # this used to catch bare Exception to avoid a real crash from
+            # whatever transitional shape `delete` happened to be in. As of
+            # Task 6 the whole module is boto3, so a bug in this cleanup
+            # logic itself -- not a real S3 error response -- should fail
+            # loud again rather than log a warning and move on.
             try:
                 storage_service.delete(bucket, path)
-            except Exception:
+            except ClientError:
                 _logger.warning(
                     "storage_cleanup_skipped", bucket=bucket, storage_path=path, exc_info=True
                 )
@@ -168,8 +226,8 @@ def track_storage_uploads() -> Iterator[list[tuple[str, str]]]:
 @pytest.fixture(autouse=True)
 def _cleanup_storage_uploads() -> Iterator[None]:
     """Every integration test that calls storage_service uploads real bytes
-    to the real, shared Supabase project — there is no local Storage stub
-    (docs/ai-integration.md: Storage is deliberately never mocked). The
+    to the session-scoped moto S3 server (`_moto_s3_server` above) — there
+    is no per-test local Storage stub. The
     Postgres row a test creates alongside that upload lives in this test's
     ephemeral testcontainers DB and is gone at teardown; the Storage object
     is not, unless something removes it.
