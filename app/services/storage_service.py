@@ -199,10 +199,8 @@ def upload_from_temp(bucket: str, storage_path: str, local_path: Path, content_t
         data = f.read()
     _with_retries(
         "upload",
-        lambda: (
-            get_client()
-            .storage.from_(bucket)
-            .upload(storage_path, data, {"content-type": content_type})
+        lambda: get_client().put_object(
+            Bucket=bucket, Key=storage_path, Body=data, ContentType=content_type
         ),
     )
 
@@ -213,10 +211,8 @@ def upload_bytes(bucket: str, storage_path: str, data: bytes, content_type: str)
     provider's output directly, without a temp-file round trip."""
     _with_retries(
         "upload",
-        lambda: (
-            get_client()
-            .storage.from_(bucket)
-            .upload(storage_path, data, {"content-type": content_type})
+        lambda: get_client().put_object(
+            Bucket=bucket, Key=storage_path, Body=data, ContentType=content_type
         ),
     )
 

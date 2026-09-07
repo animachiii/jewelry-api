@@ -17,9 +17,16 @@ get_client().get_object(...) instead of the old Supabase-style
 hand-written Supabase fake to a real local S3 server (moto's
 ThreadedMotoServer, not mock_aws() -- see the `s3` fixture's own docstring
 for why a real listening socket matters for a later task's presigned-URL
-tests). upload_bytes below is still Task 3/4/5's Supabase-style
-implementation, unmodified here, so its own retry test keeps the old fake
-client it always used.
+tests).
+
+2026-09-07 (Task 3, S3 migration): upload_from_temp/upload_bytes now call
+get_client().put_object(...) the same way. Their old hand-written Supabase
+fake (_FakeBucket/_FakeStorage/_FakeClient) is gone -- the retry coverage it
+provided (a transient failure is retried and the caller-supplied bytes are
+identical on every attempt) now lives in
+test_upload_bytes_retries_a_transient_timeout_and_succeeds below, retargeted
+at the real boto3 client the `s3` fixture returns, exactly like the download
+retry test above it.
 """
 
 from typing import Any
@@ -197,61 +204,65 @@ def test_download_bytes_does_not_write_a_temp_file(
     assert result == b"real-image-bytes"
 
 
-class _FakeBucket:
-    def __init__(self, data: bytes) -> None:
-        self._data = data
-        self.download_calls: list[str] = []
+def test_upload_bytes_stores_data_and_content_type(s3: Any) -> None:
+    storage_service.upload_bytes(TEST_BUCKET, "a/b/out_1.jpg", b"jpeg-bytes", "image/jpeg")
 
-    def download(self, storage_path: str) -> bytes:
-        self.download_calls.append(storage_path)
-        return self._data
+    obj = s3.get_object(Bucket=TEST_BUCKET, Key="a/b/out_1.jpg")
+    assert obj["Body"].read() == b"jpeg-bytes"
+    assert obj["ContentType"] == "image/jpeg"
 
 
-class _FakeStorage:
-    def __init__(self, bucket: Any) -> None:
-        self._bucket = bucket
+def test_upload_from_temp_reads_the_file_once(s3: Any, tmp_path: Any) -> None:
+    local = tmp_path / "src.png"
+    local.write_bytes(b"png-bytes")
 
-    def from_(self, bucket_name: str) -> Any:
-        return self._bucket
+    storage_service.upload_from_temp(TEST_BUCKET, "a/b/out_1.png", local, "image/png")
 
-
-class _FakeClient:
-    def __init__(self, data: bytes) -> None:
-        self.storage = _FakeStorage(_FakeBucket(data))
+    obj = s3.get_object(Bucket=TEST_BUCKET, Key="a/b/out_1.png")
+    assert obj["Body"].read() == b"png-bytes"
+    assert obj["ContentType"] == "image/png"
 
 
-def test_upload_bytes_only_reads_source_data_once_across_retries(
-    monkeypatch: pytest.MonkeyPatch,
+def test_upload_from_temp_survives_the_caller_deleting_the_file(s3: Any, tmp_path: Any) -> None:
+    """The file is read once, outside the retry loop, so a caller that
+    deletes local_path immediately after the call cannot race a retry."""
+    local = tmp_path / "src.jpg"
+    local.write_bytes(b"jpeg-bytes")
+
+    storage_service.upload_from_temp(TEST_BUCKET, "a/b/out_2.jpg", local, "image/jpeg")
+    local.unlink()
+
+    assert s3.get_object(Bucket=TEST_BUCKET, Key="a/b/out_2.jpg")["Body"].read() == b"jpeg-bytes"
+
+
+def test_upload_bytes_retries_a_transient_timeout_and_succeeds(
+    s3: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """upload_bytes's caller-supplied `data` must be the exact same bytes on
-    every retried attempt -- there's no local file to accidentally re-read
-    here, but this pins that the retry loop doesn't mutate or re-derive it.
-
-    upload_bytes itself is not this task's scope (Tasks 3-5 still own it and
-    its Supabase-style call shape) -- this test and its fake client are
-    unchanged from before the S3 download rewrite.
+    """Restores the coverage of the old Supabase-fake-based retry test (a
+    transient failure is retried, and the caller-supplied bytes are
+    identical on every attempt), retargeted at the real boto3 client the
+    `s3` fixture returns -- exactly like
+    test_download_bytes_retries_a_transient_timeout_and_succeeds above.
     """
+    client = storage_service.get_client()
+    real_put_object = client.put_object
+    calls: dict[str, Any] = {"count": 0, "received": []}
 
-    class _FlakyUploadBucket:
-        def __init__(self) -> None:
-            self.call_count = 0
-            self.received: list[bytes] = []
+    def _flaky_put_object(**kwargs: Any) -> Any:
+        calls["count"] += 1
+        calls["received"].append(kwargs.get("Body"))
+        if calls["count"] == 1:
+            raise ConnectTimeoutError(endpoint_url="https://s3.example.com")
+        return real_put_object(**kwargs)
 
-        def upload(self, storage_path: str, data: bytes, options: dict[str, str]) -> None:
-            self.call_count += 1
-            self.received.append(data)
-            if self.call_count == 1:
-                raise ConnectTimeoutError(endpoint_url="https://s3.example.com")
+    monkeypatch.setattr(client, "put_object", _flaky_put_object)
 
-    bucket = _FlakyUploadBucket()
-    client = _FakeClient(b"unused")
-    client.storage = _FakeStorage(bucket)  # type: ignore[assignment]
-    monkeypatch.setattr(storage_service, "get_client", lambda: client)
+    storage_service.upload_bytes(TEST_BUCKET, "job/1/output.png", b"payload", "image/png")
 
-    storage_service.upload_bytes("jewelry-outputs", "job/1/output.png", b"payload", "image/png")
-
-    assert bucket.call_count == 2
-    assert bucket.received == [b"payload", b"payload"]
+    assert calls["count"] == 2  # one failure, one success
+    assert calls["received"] == [b"payload", b"payload"]
+    obj = s3.get_object(Bucket=TEST_BUCKET, Key="job/1/output.png")
+    assert obj["Body"].read() == b"payload"
 
 
 def test_get_client_is_cached_and_targets_configured_region(
