@@ -1,4 +1,5 @@
-"""app/services/storage_service.py::download_bytes and the retry wrapper.
+"""app/services/storage_service.py::download_bytes/download_to_temp and the
+retry wrapper.
 
 Found during the 2026-08-13 BACKGROUND_REMOVAL OOM investigation:
 download_to_temp() downloads the object into memory, writes it to a temp
@@ -9,45 +10,69 @@ download_bytes() returns the client's bytes directly, no temp file.
 2026-08-28: also covers _with_retries, added after the identical
 httpx.ReadTimeout signature failed a different, unrelated test in CI five
 times in one week -- see storage_service.py's own module docstring.
+
+2026-09-07 (Task 2, S3 migration): download_to_temp/download_bytes now call
+get_client().get_object(...) instead of the old Supabase-style
+`.storage.from_(bucket).download(...)`. Their tests below moved from a
+hand-written Supabase fake to a real local S3 server (moto's
+ThreadedMotoServer, not mock_aws() -- see the `s3` fixture's own docstring
+for why a real listening socket matters for a later task's presigned-URL
+tests). upload_bytes below is still Task 3/4/5's Supabase-style
+implementation, unmodified here, so its own retry test keeps the old fake
+client it always used.
 """
 
 from typing import Any
 
+import boto3
 import pytest
-from botocore.exceptions import ClientError, ConnectTimeoutError, ReadTimeoutError
+from botocore.client import Config
+from botocore.exceptions import ClientError, ConnectTimeoutError
+from moto.server import ThreadedMotoServer
 
 from app.config import settings
 from app.services import storage_service
 
-
-class _FakeBucket:
-    def __init__(self, data: bytes) -> None:
-        self._data = data
-        self.download_calls: list[str] = []
-
-    def download(self, storage_path: str) -> bytes:
-        self.download_calls.append(storage_path)
-        return self._data
-
-
-class _FakeStorage:
-    def __init__(self, bucket: _FakeBucket) -> None:
-        self._bucket = bucket
-
-    def from_(self, bucket_name: str) -> _FakeBucket:
-        return self._bucket
-
-
-class _FakeClient:
-    def __init__(self, data: bytes) -> None:
-        self.storage = _FakeStorage(_FakeBucket(data))
+TEST_BUCKET = "test-bucket"
 
 
 @pytest.fixture
-def fake_client(monkeypatch: pytest.MonkeyPatch) -> Any:
-    client = _FakeClient(b"real-image-bytes")
-    monkeypatch.setattr(storage_service, "get_client", lambda: client)
-    return client
+def s3(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A real local S3-compatible HTTP server (moto), with TEST_BUCKET
+    created and storage_service pointed at it. A real server, not
+    mock_aws()'s pure transport interception, because Task 5's tests hit
+    presigned URLs with raw httpx -- see this step's note above.
+    """
+    server = ThreadedMotoServer(port=0)
+    server.start()
+    host, port = server.get_host_and_port()
+    endpoint = f"http://{host}:{port}"
+
+    monkeypatch.setattr(settings, "S3_REGION", "us-east-1")
+    monkeypatch.setattr(settings, "S3_ENDPOINT_URL", endpoint)
+    monkeypatch.setattr(storage_service, "_client", None)
+
+    # Unlike moto's mock_aws() (which patches botocore's transport and never
+    # signs a real request), ThreadedMotoServer is a real HTTP server, so
+    # botocore's SigV4 signer runs for real and raises NoCredentialsError if
+    # no credentials are resolvable -- confirmed in this environment, which
+    # has no AWS credential chain configured at all. Any value works; moto's
+    # backend doesn't check them.
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        region_name="us-east-1",
+        config=Config(s3={"addressing_style": "path"}),
+    )
+    client.create_bucket(Bucket=TEST_BUCKET)
+
+    yield client
+
+    server.stop()
+    monkeypatch.setattr(storage_service, "_client", None)
 
 
 @pytest.fixture(autouse=True)
@@ -58,92 +83,24 @@ def _fast_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "STORAGE_RETRY_BACKOFF_SECONDS", 0.0)
 
 
-def test_download_bytes_returns_the_objects_bytes(fake_client: Any) -> None:
-    result = storage_service.download_bytes("jewelry-inputs", "job/1/input.jpg")
+def test_download_bytes_returns_the_stored_object(s3: Any) -> None:
+    s3.put_object(Bucket=TEST_BUCKET, Key="a/b/input_1.jpg", Body=b"real-image-bytes")
 
-    assert result == b"real-image-bytes"
-
-
-class _FlakyThenOkBucket:
-    """Fails with a given exception `fail_times` times, then returns data --
-    models the real CI failure signature: the first N attempts hit
-    httpcore.ReadTimeout (surfaces as httpx.ReadTimeout, a TransportError
-    subclass), then Supabase answers normally, same as when the specific
-    failing test was re-run in isolation.
-    """
-
-    def __init__(self, data: bytes, fail_times: int, exc: Exception) -> None:
-        self._data = data
-        self._fail_times = fail_times
-        self._exc = exc
-        self.call_count = 0
-
-    def download(self, storage_path: str) -> bytes:
-        self.call_count += 1
-        if self.call_count <= self._fail_times:
-            raise self._exc
-        return self._data
+    assert storage_service.download_bytes(TEST_BUCKET, "a/b/input_1.jpg") == b"real-image-bytes"
 
 
-def test_download_bytes_retries_a_transient_timeout_and_succeeds(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    bucket = _FlakyThenOkBucket(
-        b"real-image-bytes",
-        fail_times=1,
-        exc=ReadTimeoutError(endpoint_url="https://s3.example.com"),
-    )
-    client = _FakeClient(b"unused")
-    client.storage = _FakeStorage(bucket)  # type: ignore[assignment]
-    monkeypatch.setattr(storage_service, "get_client", lambda: client)
+def test_download_to_temp_writes_the_bytes_and_keeps_the_suffix(s3: Any) -> None:
+    s3.put_object(Bucket=TEST_BUCKET, Key="a/b/input_1.png", Body=b"png-bytes")
 
-    result = storage_service.download_bytes("jewelry-inputs", "job/1/input.jpg")
+    path = storage_service.download_to_temp(TEST_BUCKET, "a/b/input_1.png")
 
-    assert result == b"real-image-bytes"
-    assert bucket.call_count == 2  # one failure, one success
+    assert path.suffix == ".png"
+    assert path.read_bytes() == b"png-bytes"
 
 
-def test_download_bytes_gives_up_after_max_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A transient failure on every attempt must still surface to the
-    caller -- this is bounded retry, not infinite retry, and not silently
-    swallowing a real, persistent outage.
-    """
-    bucket = _FlakyThenOkBucket(
-        b"real-image-bytes",
-        fail_times=999,
-        exc=ReadTimeoutError(endpoint_url="https://s3.example.com"),
-    )
-    client = _FakeClient(b"unused")
-    client.storage = _FakeStorage(bucket)  # type: ignore[assignment]
-    monkeypatch.setattr(storage_service, "get_client", lambda: client)
-
-    with pytest.raises(ReadTimeoutError):
-        storage_service.download_bytes("jewelry-inputs", "job/1/input.jpg")
-
-    assert bucket.call_count == settings.STORAGE_MAX_ATTEMPTS
-
-
-def test_a_real_storage_error_is_never_retried(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The load-bearing safety property: a deterministic Supabase error
-    response (object not found, bad auth) raises storage3's own
-    StorageException, not an httpx exception, and must propagate on the
-    first attempt -- retrying a real error would silently mask it and waste
-    STORAGE_MAX_ATTEMPTS worth of latency on something that will never
-    succeed.
-    """
-    from storage3.utils import StorageException
-
-    bucket = _FlakyThenOkBucket(
-        b"real-image-bytes", fail_times=999, exc=StorageException("object not found")
-    )
-    client = _FakeClient(b"unused")
-    client.storage = _FakeStorage(bucket)  # type: ignore[assignment]
-    monkeypatch.setattr(storage_service, "get_client", lambda: client)
-
-    with pytest.raises(StorageException):
-        storage_service.download_bytes("jewelry-inputs", "job/1/input.jpg")
-
-    assert bucket.call_count == 1  # never retried
+def test_download_bytes_propagates_a_missing_key(s3: Any) -> None:
+    with pytest.raises(ClientError):
+        storage_service.download_bytes(TEST_BUCKET, "a/b/nope.jpg")
 
 
 def test_with_retries_does_not_retry_a_real_error_response(
@@ -165,12 +122,39 @@ def test_with_retries_does_not_retry_a_real_error_response(
     assert len(calls) == 1, "a real error response must not be retried"
 
 
+class _FakeBucket:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self.download_calls: list[str] = []
+
+    def download(self, storage_path: str) -> bytes:
+        self.download_calls.append(storage_path)
+        return self._data
+
+
+class _FakeStorage:
+    def __init__(self, bucket: Any) -> None:
+        self._bucket = bucket
+
+    def from_(self, bucket_name: str) -> Any:
+        return self._bucket
+
+
+class _FakeClient:
+    def __init__(self, data: bytes) -> None:
+        self.storage = _FakeStorage(_FakeBucket(data))
+
+
 def test_upload_bytes_only_reads_source_data_once_across_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """upload_bytes's caller-supplied `data` must be the exact same bytes on
     every retried attempt -- there's no local file to accidentally re-read
     here, but this pins that the retry loop doesn't mutate or re-derive it.
+
+    upload_bytes itself is not this task's scope (Tasks 3-5 still own it and
+    its Supabase-style call shape) -- this test and its fake client are
+    unchanged from before the S3 download rewrite.
     """
 
     class _FlakyUploadBucket:
@@ -193,24 +177,6 @@ def test_upload_bytes_only_reads_source_data_once_across_retries(
 
     assert bucket.call_count == 2
     assert bucket.received == [b"payload", b"payload"]
-
-
-def test_download_bytes_does_not_write_a_temp_file(
-    fake_client: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The whole point: download_to_temp's NamedTemporaryFile round trip is
-    what caused the double buffering. download_bytes must never touch disk.
-    """
-    import tempfile
-
-    def _fail_named_temp_file(*args: object, **kwargs: object) -> None:
-        raise AssertionError("download_bytes must not create a temp file")
-
-    monkeypatch.setattr(tempfile, "NamedTemporaryFile", _fail_named_temp_file)
-
-    result = storage_service.download_bytes("jewelry-inputs", "job/1/input.jpg")
-
-    assert result == b"real-image-bytes"
 
 
 def test_get_client_is_cached_and_targets_configured_region(

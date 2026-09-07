@@ -166,7 +166,8 @@ def download_to_temp(bucket: str, storage_path: str) -> Path:
     # I/O, not a Storage call, and must run exactly once per successful
     # download regardless of how many network attempts it took.
     def _download() -> bytes:
-        return bytes(get_client().storage.from_(bucket).download(storage_path))
+        response = get_client().get_object(Bucket=bucket, Key=storage_path)
+        return bytes(response["Body"].read())
 
     data = _with_retries("download", _download)
     suffix = Path(storage_path).suffix
@@ -182,9 +183,12 @@ def download_bytes(bucket: str, storage_path: str) -> bytes:
     PIL). Found during the 2026-08-13 BACKGROUND_REMOVAL OOM investigation:
     download_to_temp().read_bytes() buffers the same object in memory twice.
     """
-    return bytes(
-        _with_retries("download", lambda: get_client().storage.from_(bucket).download(storage_path))
-    )
+
+    def _download() -> bytes:
+        response = get_client().get_object(Bucket=bucket, Key=storage_path)
+        return bytes(response["Body"].read())
+
+    return _with_retries("download", _download)
 
 
 def upload_from_temp(bucket: str, storage_path: str, local_path: Path, content_type: str) -> None:
