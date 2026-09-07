@@ -13,3 +13,4 @@ build/
 .DS_Store
 celerybeat-schedule
 .claude/worktrees/
+.worktrees/

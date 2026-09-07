@@ -1,7 +1,8 @@
 """Phase 6 Checkpoint 4 — generation.transform_photo end-to-end.
 
-Real testcontainers Postgres, real local Redis (rate limiter), real
-Supabase Storage (input download + output upload) — only the Gemini call
+Real testcontainers Postgres, real local Redis (rate limiter), real S3
+storage (a session-scoped moto server; see tests/conftest.py::_moto_s3_server;
+input download + output upload) — only the Gemini call
 itself is faked, via GeminiProvider._call_api monkeypatching, per
 docs/ai-integration.md's "never call the live Gemini API in CI."
 """

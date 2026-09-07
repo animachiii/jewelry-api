@@ -1,10 +1,13 @@
 """Phase 16 Step 4 regression test — the fix for the storage-pollution bug
 found by scripts/audit_storage.py (docs/storage-audit-2026-08.md): test runs
-uploading real bytes to the real, shared Supabase project with nothing ever
-cleaning them up. Exercises tests/conftest.py's actual
-`track_storage_uploads` context manager (the same one the autouse
-`_cleanup_storage_uploads` fixture uses), against real Supabase Storage —
-matching this repo's own "never mock Storage" testing convention.
+uploading real bytes to the real, shared object-storage project with
+nothing ever cleaning them up. Exercises
+tests/conftest.py's actual `track_storage_uploads` context manager (the
+same one the autouse `_cleanup_storage_uploads` fixture uses), against a
+real S3-compatible server (the session-scoped moto server, since Stage A's
+S3 migration; see tests/conftest.py::_moto_s3_server) — matching this
+repo's own "never mock Storage with a fake Python client" testing
+convention.
 """
 
 import uuid

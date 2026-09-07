@@ -3,7 +3,7 @@
 Deliberately *not* perceptual/content ML validation — see
 docs/decisions/0001-drop-local-matting.md, which rules out local ML-based
 image processing for this project. This module only verifies that the bytes
-a client PUT to Supabase Storage decode as a real, non-corrupt image in a
+a client PUT to S3 decode as a real, non-corrupt image in a
 supported format, and extracts the structural metadata
 (`width_px`/`height_px`/`bytes`/`checksum_sha256`) that `assets` rows need.
 """

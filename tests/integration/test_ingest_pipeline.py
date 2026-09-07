@@ -1,10 +1,11 @@
 """Phase 4 — Storage & Ingest Pipeline.
 
 Real image validation on /generate, asset metadata persistence, and the
-retention/expiry worker. Uses testcontainers Postgres for the DB and the
-real Supabase project for Storage (same approach as
-tests/integration/test_generate_real.py) — Supabase Storage is never mocked
-in this repo.
+retention/expiry worker. Uses testcontainers Postgres for the DB and a real
+S3-compatible server for Storage (same approach as
+tests/integration/test_generate_real.py) — a session-scoped moto server, see
+tests/conftest.py::_moto_s3_server; Storage is never mocked with a fake
+Python client in this repo.
 """
 
 import io
@@ -218,8 +219,8 @@ async def test_retention_worker_purges_bytes_but_keeps_row(
     db_session: AsyncSession, active_config: ConfigVersion
 ) -> None:
     """Simulates an INPUT asset past its retention deadline:
-    retention_service.expire_assets removes the Supabase Storage object and
-    stamps `purged_at`, but the row survives (CLAUDE.md Hard Rule 10)."""
+    retention_service.expire_assets removes the S3 object and stamps
+    `purged_at`, but the row survives (CLAUDE.md Hard Rule 10)."""
     api_client, _raw = await _make_client(db_session, "retention-test-client")
     await db_session.flush()
 
@@ -237,9 +238,7 @@ async def test_retention_worker_purges_bytes_but_keeps_row(
     storage_path = f"retention-test/{uuid.uuid4().hex}/FRONT/input_{uuid.uuid4().hex[:8]}.jpg"
     buf = io.BytesIO()
     Image.new("RGB", (8, 8)).save(buf, format="JPEG")
-    storage_service.get_client().storage.from_(settings.BUCKET_INPUTS).upload(
-        storage_path, buf.getvalue(), {"content-type": "image/jpeg"}
-    )
+    storage_service.upload_bytes(settings.BUCKET_INPUTS, storage_path, buf.getvalue(), "image/jpeg")
     assert storage_service.exists(settings.BUCKET_INPUTS, storage_path)
 
     asset = Asset(

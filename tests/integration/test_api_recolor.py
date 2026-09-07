@@ -4,8 +4,9 @@ worker / status / retry machinery, including the generate-then-composite
 correctness this operation introduces.
 
 Same stack as tests/integration/test_api_match.py: testcontainers Postgres,
-real local Redis, real Supabase Storage (never mocked — this project's own
-convention, see docs/ai-integration.md), fixture-driven Gemini
+real local Redis, real S3 storage (a session-scoped moto server; see
+tests/conftest.py::_moto_s3_server — this project's own convention, see
+docs/ai-integration.md), fixture-driven Gemini
 (tests/conftest.py's autouse `_fake_gemini_success_by_default`). Under
 `task_always_eager` (also autouse), `POST /api/v2/recolor` dispatches
 `recolor.process` inline during the request — a RECOLOR job created here

@@ -1,8 +1,15 @@
 """Phase 10 Checkpoint 2 — static audit that no logger call references a
 secret value. Mechanizes the rule docs/conventions.md already states in
-prose ("Never log: API keys, SUPABASE_SERVICE_KEY, GEMINI_API_KEY... Log the
+prose ("Never log: API keys, ..., GEMINI_API_KEY... Log the
 key_prefix, log the storage_path, never the signed URL"). No server, no
 fixtures — pure source-code grep.
+
+Stage A's S3 migration (Task 6) removed the object-storage service-key
+setting this test used to also check for — S3 credentials come from
+boto3's default chain (env vars locally, the instance profile in
+production), never from an app-level setting this codebase could
+accidentally log in the first place, so there is no equivalent token to
+add in its place.
 """
 
 import re
@@ -12,7 +19,6 @@ from pathlib import Path
 APP_ROOT = Path(__file__).resolve().parent.parent.parent / "app"
 
 _FORBIDDEN_TOKENS = (
-    "SUPABASE_SERVICE_KEY",
     "GEMINI_API_KEY",
     "GOOGLE_SERVICE_ACCOUNT_JSON",
     "key_hash",

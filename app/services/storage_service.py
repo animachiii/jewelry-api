@@ -1,14 +1,16 @@
-"""Supabase Storage upload/download/signed URLs.
+"""S3 object storage — upload/download/signed URLs, via boto3.
 
 Path convention (docs/schema.md): {job_id}/{angle}/{kind}_{short_uuid}.{ext}
 Enforced here via `build_storage_path` rather than string-formatted at call
 sites. All buckets are private — there is no public read path.
 
-NOT YET LIVE-VERIFIED: Phase 0 Checkpoint 3 requires round-tripping a real
-upload against actual Supabase Storage buckets, which needs a Supabase
-project + SUPABASE_SERVICE_KEY that do not exist yet in this environment.
-The client construction and calls below follow the supabase-py API exactly,
-but have not been exercised against a live project.
+**S3 migration complete (Stage A, Tasks 1-6).** Every function in this
+module — downloads, uploads, `exists`/`delete`, presigned upload/read URLs —
+is real `boto3`/botocore against S3 (or, in tests, a local moto server; see
+`tests/conftest.py::_moto_s3_server`). Nothing here speaks the previous
+object-storage provider's API any more. Credentials come from boto3's default chain
+(environment locally, the EC2 instance profile in production) and are never
+read directly by this module — see `get_client`.
 
 **2026-08-28 — every call below retries on a transient network failure.**
 Found via a very visible symptom: `test_api_mix.py`/`test_api_recolor.py`/
@@ -32,6 +34,18 @@ raises `storage3.utils.StorageException` instead, an unrelated exception
 type that is never caught here and propagates on the first attempt, same as
 before this change. Retrying that would be silently swallowing a real,
 deterministic failure — this must never do that.
+
+**The same transient-vs-deterministic classification carries over to
+botocore, unchanged in substance (Stage A, Task 2).** `_with_retries` now
+retries only the transport-level botocore exceptions in `TRANSIENT_ERRORS`
+below (connection error, connect/read timeout, endpoint-connection
+failure) — no HTTP response was ever received, same rule as the
+`httpx.TransportError` case above. A real S3 error response (`NoSuchKey`,
+`AccessDenied`, ...) raises botocore's `ClientError` instead, which is
+deliberately not in that tuple and propagates on the first attempt, same
+posture as the previous provider's own error-response exception type had
+before it. The rule this paragraph documents — retry only "no response,"
+never a real error response — is what moved, not the reasoning behind it.
 """
 
 import tempfile
@@ -41,35 +55,80 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import httpx
+import boto3
 import structlog
-from supabase import Client, create_client
+from botocore.client import Config
+from botocore.exceptions import (
+    ClientError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
+from botocore.exceptions import (
+    ConnectionError as BotoConnectionError,
+)
 
 from app.config import settings
 from app.db.models.enums import AssetKind
 
-_client: Client | None = None
+_client: Any | None = None
 _logger = structlog.get_logger()
 
+# Transport-level failures only: no HTTP response was ever received. A real
+# S3 error response (NoSuchKey, AccessDenied) raises botocore's ClientError,
+# which is deliberately NOT in this tuple and propagates on the first
+# attempt. Retrying a deterministic failure silently swallows it. This
+# mirrors exactly what httpx.TransportError covered before the S3 move.
+TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
+    BotoConnectionError,
+    ConnectTimeoutError,
+    ReadTimeoutError,
+    EndpointConnectionError,
+)
 
-def get_client() -> Client:
+
+def get_client() -> Any:
     global _client
     if _client is None:
-        _client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
+        s3_addressing: dict[str, Any] = {}
+        if settings.S3_ENDPOINT_URL is not None:
+            # Path-style addressing (bucket/key in the path, not
+            # bucket.host in the hostname). Virtual-hosted-style — boto3's
+            # default — needs DNS resolution of a subdomain that only
+            # exists for real AWS endpoints; a local moto server or MinIO
+            # has no such DNS entry, so a non-None endpoint always means a
+            # non-AWS target that needs path style. Real AWS
+            # (S3_ENDPOINT_URL is None) never takes this branch and keeps
+            # boto3's default addressing.
+            s3_addressing["s3"] = {"addressing_style": "path"}
+        _client = boto3.client(
+            "s3",
+            region_name=settings.S3_REGION,
+            endpoint_url=settings.S3_ENDPOINT_URL,
+            # total_max_attempts=1 means "try once, never retry internally".
+            # _with_retries below is the single, tested retry boundary; two
+            # nested retry policies would multiply attempts and make the
+            # backoff untunable.
+            config=Config(
+                signature_version="s3v4",
+                retries={"total_max_attempts": 1, "mode": "standard"},
+                **s3_addressing,
+            ),
+        )
     return _client
 
 
 def _with_retries[T](operation: str, call: Callable[[], T]) -> T:
-    """Runs `call`, retrying only on `httpx.TransportError` — see this
+    """Runs `call`, retrying only on transport-level failures — see this
     module's own docstring for exactly what that does and does not cover.
     `operation` is a short label (e.g. "download", "upload") for the log
     line on a retried attempt; nothing structural depends on its value.
     """
-    last_exc: httpx.TransportError | None = None
+    last_exc: Exception | None = None
     for attempt in range(1, settings.STORAGE_MAX_ATTEMPTS + 1):
         try:
             return call()
-        except httpx.TransportError as exc:
+        except TRANSIENT_ERRORS as exc:
             last_exc = exc
             if attempt == settings.STORAGE_MAX_ATTEMPTS:
                 raise
@@ -95,26 +154,43 @@ def build_storage_path(job_id: uuid.UUID, angle: str, kind: AssetKind, ext: str)
     return f"{job_id}/{angle}/{kind.value.lower()}_{short_uuid}.{ext.lstrip('.')}"
 
 
+# Matches the previous object-storage provider's upload-URL lifetime, and
+# app/api/v2/uploads.py's own _UPLOAD_URL_TTL_SECONDS, which stamps the
+# expires_at the client is shown. Keep the two in step.
+_UPLOAD_URL_TTL_SECONDS = 600
+
+
 def generate_upload_url(bucket: str, storage_path: str) -> dict[str, Any]:
-    """Returns a short-lived signed URL the client can PUT a file to directly."""
-    result = _with_retries(
+    """Returns a short-lived presigned URL the client can PUT a file to directly.
+
+    The `signedUrl` key is inherited from the object-storage API this
+    module previously spoke and is read at six call sites in
+    app/api/v2/uploads.py — it is this function's contract with its caller,
+    not an accident.
+    """
+    url = _with_retries(
         "generate_upload_url",
-        lambda: get_client().storage.from_(bucket).create_signed_upload_url(storage_path),
+        lambda: get_client().generate_presigned_url(
+            "put_object",
+            Params={"Bucket": bucket, "Key": storage_path},
+            ExpiresIn=_UPLOAD_URL_TTL_SECONDS,
+        ),
     )
-    return dict(result)
+    return {"signedUrl": url, "path": storage_path}
 
 
 def generate_signed_url(bucket: str, storage_path: str, ttl_seconds: int | None = None) -> str:
     """Fresh signed read URL, generated on demand — never persisted to the database."""
     ttl = ttl_seconds or settings.SIGNED_URL_TTL_SECONDS
-    result = _with_retries(
+    url: str = _with_retries(
         "generate_signed_url",
-        lambda: get_client().storage.from_(bucket).create_signed_url(storage_path, ttl),
+        lambda: get_client().generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": storage_path},
+            ExpiresIn=ttl,
+        ),
     )
-    signed_url = result.get("signedURL")
-    if not signed_url:
-        raise RuntimeError(f"Supabase did not return a signedURL for {bucket}/{storage_path}")
-    return str(signed_url)
+    return url
 
 
 def download_to_temp(bucket: str, storage_path: str) -> Path:
@@ -122,7 +198,8 @@ def download_to_temp(bucket: str, storage_path: str) -> Path:
     # I/O, not a Storage call, and must run exactly once per successful
     # download regardless of how many network attempts it took.
     def _download() -> bytes:
-        return bytes(get_client().storage.from_(bucket).download(storage_path))
+        response = get_client().get_object(Bucket=bucket, Key=storage_path)
+        return bytes(response["Body"].read())
 
     data = _with_retries("download", _download)
     suffix = Path(storage_path).suffix
@@ -138,9 +215,12 @@ def download_bytes(bucket: str, storage_path: str) -> bytes:
     PIL). Found during the 2026-08-13 BACKGROUND_REMOVAL OOM investigation:
     download_to_temp().read_bytes() buffers the same object in memory twice.
     """
-    return bytes(
-        _with_retries("download", lambda: get_client().storage.from_(bucket).download(storage_path))
-    )
+
+    def _download() -> bytes:
+        response = get_client().get_object(Bucket=bucket, Key=storage_path)
+        return bytes(response["Body"].read())
+
+    return _with_retries("download", _download)
 
 
 def upload_from_temp(bucket: str, storage_path: str, local_path: Path, content_type: str) -> None:
@@ -151,10 +231,8 @@ def upload_from_temp(bucket: str, storage_path: str, local_path: Path, content_t
         data = f.read()
     _with_retries(
         "upload",
-        lambda: (
-            get_client()
-            .storage.from_(bucket)
-            .upload(storage_path, data, {"content-type": content_type})
+        lambda: get_client().put_object(
+            Bucket=bucket, Key=storage_path, Body=data, ContentType=content_type
         ),
     )
 
@@ -165,25 +243,52 @@ def upload_bytes(bucket: str, storage_path: str, data: bytes, content_type: str)
     provider's output directly, without a temp-file round trip."""
     _with_retries(
         "upload",
-        lambda: (
-            get_client()
-            .storage.from_(bucket)
-            .upload(storage_path, data, {"content-type": content_type})
+        lambda: get_client().put_object(
+            Bucket=bucket, Key=storage_path, Body=data, ContentType=content_type
         ),
     )
 
 
 def exists(bucket: str, storage_path: str) -> bool:
-    parent = str(Path(storage_path).parent)
-    filename = Path(storage_path).name
-    listing = _with_retries("list", lambda: get_client().storage.from_(bucket).list(parent))
-    return any(item.get("name") == filename for item in listing)
+    """Exact-key existence check.
+
+    A 404 means the object is absent and returns False. Every other error
+    response propagates: an AccessDenied swallowed as "absent" would make
+    callers like app/services/job_service.py (asset-ownership verification),
+    app/services/mask_validation.py, and app/services/image_validation.py
+    silently treat an object they merely lack permission to see as missing,
+    which is worse than failing loudly.
+
+    **Real-AWS IAM dependency, undocumented anywhere else:** this function's
+    404-vs-other-error correctness depends on the caller's IAM identity
+    holding `s3:ListBucket` on the bucket. On real S3, `HeadObject` against a
+    missing key returns 404 only with that permission present; without it, S3
+    returns 403 instead (AWS deliberately conflates "doesn't exist" and
+    "can't confirm existence" absent list access). moto does not enforce IAM
+    at all, so no test in this codebase can catch a regression here. Nothing
+    else in this module calls ListBucket directly (Task 4 removed the old
+    list-and-match implementation), which makes the permission look unused —
+    it is not. Never remove `s3:ListBucket` from the IAM policy this service
+    runs under.
+    """
+
+    def _head() -> bool:
+        try:
+            get_client().head_object(Bucket=bucket, Key=storage_path)
+        except ClientError as exc:
+            if exc.response["ResponseMetadata"]["HTTPStatusCode"] == 404:
+                return False
+            raise
+        return True
+
+    return _with_retries("head", _head)
 
 
 def delete(bucket: str, storage_path: str) -> None:
     """Removes bytes for a single object. Idempotent — deleting an object
     that is already gone does not raise, which is also what makes retrying
-    it safe. Used by the retention worker (app/workers/retention.py); never
-    deletes the Asset row itself.
+    it safe (S3's DeleteObject returns 204 for an absent key). Used by the
+    retention worker (app/workers/retention.py); never deletes the Asset row
+    itself.
     """
-    _with_retries("delete", lambda: get_client().storage.from_(bucket).remove([storage_path]))
+    _with_retries("delete", lambda: get_client().delete_object(Bucket=bucket, Key=storage_path))

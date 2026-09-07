@@ -53,8 +53,8 @@ Runner doesn't exist to verify against).
 | `API_BASE_PATH` | No | Default `/api/v2` fine |
 | `MOCK_MODE` | No | Must be `false` |
 | `DATABASE_URL` | **Yes** | Same Supabase session-pooler URL already in use. Same URL-encoding warning `docs/deployment.md` already documents — a raw `@`/`#`/`/`/`:` in the password breaks the URL parse the same way regardless of platform |
-| `SUPABASE_URL` | **Yes** | |
-| `SUPABASE_SERVICE_KEY` | **Yes** | Never logged — `docs/conventions.md` |
+| `S3_REGION` | No | Default `ap-south-1` fine unless the bucket region differs |
+| `S3_ENDPOINT_URL` | No | Leave unset for real AWS S3. Credentials are not an env var here either — App Runner's instance role supplies them via boto3's default chain, the same mechanism named in `app/config.py`'s own comment |
 | `BUCKET_INPUTS` | No | Default `jewelry-inputs` fine |
 | `BUCKET_OUTPUTS` | No | Default `jewelry-outputs` fine |
 | `SIGNED_URL_TTL_SECONDS` | No | Default `3600` fine |

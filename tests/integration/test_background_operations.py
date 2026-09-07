@@ -5,7 +5,8 @@ background.process worker + subject-preservation QA gate.
 
 Same stack as tests/integration/test_generate_real.py /
 tests/integration/test_qa_gate.py: testcontainers Postgres, real local
-Redis (idempotency, rate limiting), real Supabase Storage (never mocked),
+Redis (idempotency, rate limiting), real S3 storage (a session-scoped moto
+server; see tests/conftest.py::_moto_s3_server),
 fixture-driven Gemini (tests/conftest.py's autouse
 `_fake_gemini_success_by_default` / `_fake_qa_pass_by_default`). Under
 `task_always_eager` (also autouse), `background.process` and

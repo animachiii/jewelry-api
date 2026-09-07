@@ -22,20 +22,24 @@ class Settings(BaseSettings):
     # Session pooler (5432), NOT transaction pooler (6543) — SQLAlchemy uses prepared statements.
     DATABASE_URL: str
 
-    # --- Supabase Storage ---
-    SUPABASE_URL: str = ""
-    SUPABASE_SERVICE_KEY: str = ""
+    # --- S3 object storage ---
+    # Credentials come from boto3's default chain: environment variables
+    # locally, the EC2 instance profile in production. Never set explicitly.
+    S3_REGION: str = "ap-south-1"
+    # Set only to point at a non-AWS S3 endpoint — the moto server in tests,
+    # or MinIO in local docker-compose. None means real AWS.
+    S3_ENDPOINT_URL: str | None = None
     BUCKET_INPUTS: str = "jewelry-inputs"
     BUCKET_OUTPUTS: str = "jewelry-outputs"
     SIGNED_URL_TTL_SECONDS: int = 3600
-    # 2026-08-28 — every Supabase Storage call goes through
-    # storage_service._with_retries. A transient httpx.TransportError (a real
-    # network blip, never a real HTTP error response from Supabase, which
-    # raises storage3.StorageException instead and is never retried) was
-    # 500-ing real requests in production and, more visibly, failing CI
-    # nondeterministically on unrelated PRs -- five times in one week, always
-    # a different test, always this same signature. See
-    # storage_service.py's own module docstring.
+    # 2026-08-28 — every Storage call goes through storage_service._with_retries.
+    # A transient transport-level failure (a real network blip, never a real
+    # HTTP error response, which raises botocore's ClientError instead and is
+    # never retried) was 500-ing real requests in production and, more
+    # visibly, failing CI nondeterministically on unrelated PRs -- five times
+    # in one week, always a different test, always this same signature. See
+    # storage_service.py's own module docstring for the full history,
+    # including the object-storage backend this project used at the time.
     STORAGE_MAX_ATTEMPTS: int = 3
     STORAGE_RETRY_BACKOFF_SECONDS: float = 0.5
     # 2026-08-30 -- the QA judge call gets the same bounded in-process retry
