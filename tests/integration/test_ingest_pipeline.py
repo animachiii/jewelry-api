@@ -238,9 +238,7 @@ async def test_retention_worker_purges_bytes_but_keeps_row(
     storage_path = f"retention-test/{uuid.uuid4().hex}/FRONT/input_{uuid.uuid4().hex[:8]}.jpg"
     buf = io.BytesIO()
     Image.new("RGB", (8, 8)).save(buf, format="JPEG")
-    storage_service.upload_bytes(
-        settings.BUCKET_INPUTS, storage_path, buf.getvalue(), "image/jpeg"
-    )
+    storage_service.upload_bytes(settings.BUCKET_INPUTS, storage_path, buf.getvalue(), "image/jpeg")
     assert storage_service.exists(settings.BUCKET_INPUTS, storage_path)
 
     asset = Asset(

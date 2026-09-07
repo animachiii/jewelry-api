@@ -119,9 +119,7 @@ def test_with_retries_does_not_retry_a_real_error_response(
 
     def _boom() -> None:
         calls.append(1)
-        raise ClientError(
-            {"Error": {"Code": "NoSuchKey", "Message": "not found"}}, "GetObject"
-        )
+        raise ClientError({"Error": {"Code": "NoSuchKey", "Message": "not found"}}, "GetObject")
 
     with pytest.raises(ClientError):
         storage_service._with_retries("download", _boom)
