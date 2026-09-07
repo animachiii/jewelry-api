@@ -213,6 +213,17 @@ TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
 def get_client() -> S3Client:
     global _client
     if _client is None:
+        s3_addressing: dict[str, Any] = {}
+        if settings.S3_ENDPOINT_URL is not None:
+            # Path-style addressing (bucket/key in the path, not
+            # bucket.host in the hostname). Virtual-hosted-style — boto3's
+            # default — needs DNS resolution of a subdomain that only
+            # exists for real AWS endpoints; a local moto server or MinIO
+            # has no such DNS entry, so a non-None endpoint always means a
+            # non-AWS target that needs path style. Real AWS
+            # (S3_ENDPOINT_URL is None) never takes this branch and keeps
+            # boto3's default addressing.
+            s3_addressing["s3"] = {"addressing_style": "path"}
         _client = boto3.client(
             "s3",
             region_name=settings.S3_REGION,
@@ -224,10 +235,14 @@ def get_client() -> S3Client:
             config=Config(
                 signature_version="s3v4",
                 retries={"total_max_attempts": 1, "mode": "standard"},
+                **s3_addressing,
             ),
         )
     return _client
 ```
+
+`Any` here is the same `typing.Any` already imported at the top of
+`storage_service.py` — no new import needed.
 
 Then change `_with_retries`'s two `httpx.TransportError` references to
 `TRANSIENT_ERRORS`, and its `last_exc` annotation from
@@ -310,14 +325,29 @@ _with_retries remains the single tunable policy."
 
 Replace the `_FakeBucket`/`_FakeStorage`/`_FakeClient` classes and the
 `fake_client` fixture in `tests/unit/test_storage_service.py` with a real
-S3 double. moto uses genuine botocore serialization and signing, so the tests
-exercise the same code path production does — the same reasoning that replaced
-hand-written Gemini fixtures with the real SDK serializer in August.
+S3 double. **Use `moto.server.ThreadedMotoServer`, not `moto.mock_aws()`.**
+`mock_aws()` patches botocore's own transport — it never opens a real
+listening socket — so it does nothing for the tests later in this task file
+that hit a presigned URL with a raw `httpx.get`/`httpx.put`
+(`test_generate_signed_url_round_trips_with_httpx` and its neighbors in
+Task 5): that request would try to reach a real AWS hostname and fail.
+`ThreadedMotoServer` is a real local HTTP server, so any HTTP client —
+`httpx` included, not just botocore — can hit it directly.
+
+**This fixture depends on Task 1's `get_client()` already handling
+path-style addressing** (Task 1 Step 5 sets `s3={"addressing_style":
+"path"}` whenever `settings.S3_ENDPOINT_URL` is not `None` — virtual-
+hosted-style, boto3's default, needs DNS resolution of a subdomain that
+only exists for real AWS endpoints, which a local server doesn't have). If
+Task 1 landed correctly this needs no further change here; the fixture
+below just needs to construct its own throwaway boto3 client the same way,
+for the `create_bucket` call.
 
 ```python
 import boto3
 import pytest
-from moto import mock_aws
+from botocore.client import Config
+from moto.server import ThreadedMotoServer
 
 from app.config import settings
 from app.services import storage_service
@@ -327,15 +357,31 @@ TEST_BUCKET = "test-bucket"
 
 @pytest.fixture
 def s3(monkeypatch: pytest.MonkeyPatch):
-    """A live-behaving in-memory S3 with TEST_BUCKET created and
-    storage_service pointed at it."""
-    with mock_aws():
-        monkeypatch.setattr(settings, "S3_REGION", "us-east-1")
-        monkeypatch.setattr(settings, "S3_ENDPOINT_URL", None)
-        monkeypatch.setattr(storage_service, "_client", None)
-        client = boto3.client("s3", region_name="us-east-1")
-        client.create_bucket(Bucket=TEST_BUCKET)
-        yield client
+    """A real local S3-compatible HTTP server (moto), with TEST_BUCKET
+    created and storage_service pointed at it. A real server, not
+    mock_aws()'s pure transport interception, because Task 5's tests hit
+    presigned URLs with raw httpx — see this step's note above.
+    """
+    server = ThreadedMotoServer(port=0)
+    server.start()
+    host, port = server.get_host_and_port()
+    endpoint = f"http://{host}:{port}"
+
+    monkeypatch.setattr(settings, "S3_REGION", "us-east-1")
+    monkeypatch.setattr(settings, "S3_ENDPOINT_URL", endpoint)
+    monkeypatch.setattr(storage_service, "_client", None)
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        region_name="us-east-1",
+        config=Config(s3={"addressing_style": "path"}),
+    )
+    client.create_bucket(Bucket=TEST_BUCKET)
+
+    yield client
+
+    server.stop()
     monkeypatch.setattr(storage_service, "_client", None)
 ```
 
