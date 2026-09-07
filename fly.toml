@@ -3,10 +3,13 @@
 # deploy-production job, triggered only by a pushed `v*` tag.
 #
 # Secrets (never set here — `fly secrets set NAME=value -a jewelry-api`):
-# DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY, REDIS_URL,
-# CELERY_BROKER_URL, CELERY_RESULT_BACKEND, GEMINI_API_KEY,
+# DATABASE_URL, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_REGION,
+# REDIS_URL, CELERY_BROKER_URL, CELERY_RESULT_BACKEND, GEMINI_API_KEY,
 # GOOGLE_SERVICE_ACCOUNT_JSON, SENTRY_DSN — every var app/config.py::Settings
-# has no default for. See docs/deployment.md's checklist.
+# has no default for. AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY are the
+# temporary deploy-time IAM user's keys (Stage A Task 9 Step 2 — no instance
+# profile exists on this path either); they go away once Stage C's EC2
+# instance profile replaces them. See docs/deployment.md's checklist.
 
 app = "jewelry-api"
 primary_region = "iad"

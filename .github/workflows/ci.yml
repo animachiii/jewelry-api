@@ -48,15 +48,9 @@ jobs:
       REDIS_URL: redis://localhost:6379/0
       CELERY_BROKER_URL: redis://localhost:6379/1
       CELERY_RESULT_BACKEND: redis://localhost:6379/2
-      # Several tests hit real Supabase Storage by design (documented since
-      # Phase 1 — presign/PUT/signed-URL round trips are never mocked).
-      # Same gap as above: these secrets were never actually needed until
-      # this workflow got its first real CI run. Set SUPABASE_URL and
-      # SUPABASE_SERVICE_KEY as repo secrets (Settings -> Secrets and
-      # variables -> Actions) using the same project this repo's local
-      # .env already points at.
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      # Storage tests run against a local moto S3 server (Stage A, Task 6 —
+      # see tests/conftest.py::_moto_s3_server), not live AWS or any prior
+      # provider — no storage-related secrets are needed here.
 
     steps:
       - uses: actions/checkout@v4

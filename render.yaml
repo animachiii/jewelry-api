@@ -42,9 +42,12 @@ services:
       # it here would look like a working tuning knob and silently be
       # ignored. See render_start.sh's header for the measured per-process
       # memory numbers behind the solo-pool switch.
-      # DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY, REDIS_URL,
-      # CELERY_BROKER_URL, CELERY_RESULT_BACKEND, GEMINI_API_KEY,
+      # DATABASE_URL, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_REGION,
+      # REDIS_URL, CELERY_BROKER_URL, CELERY_RESULT_BACKEND, GEMINI_API_KEY,
       # GOOGLE_SERVICE_ACCOUNT_JSON, SENTRY_DSN are secrets — set them in
-      # the Render dashboard (Environment tab), never here. See
+      # the Render dashboard (Environment tab), never here. AWS_ACCESS_KEY_ID/
+      # AWS_SECRET_ACCESS_KEY are the temporary deploy-time IAM user's keys
+      # (Stage A Task 9 Step 2 — Render has no instance profile); they go
+      # away once Stage C's EC2 instance profile replaces them. See
       # docs/deployment-free-tier.md's checklist for the full list and
       # where each value comes from.

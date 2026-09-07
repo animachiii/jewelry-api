@@ -254,8 +254,22 @@ def exists(bucket: str, storage_path: str) -> bool:
 
     A 404 means the object is absent and returns False. Every other error
     response propagates: an AccessDenied swallowed as "absent" would make
-    the retention worker silently skip objects it cannot see, which is worse
-    than failing loudly.
+    callers like app/services/job_service.py (asset-ownership verification),
+    app/services/mask_validation.py, and app/services/image_validation.py
+    silently treat an object they merely lack permission to see as missing,
+    which is worse than failing loudly.
+
+    **Real-AWS IAM dependency, undocumented anywhere else:** this function's
+    404-vs-other-error correctness depends on the caller's IAM identity
+    holding `s3:ListBucket` on the bucket. On real S3, `HeadObject` against a
+    missing key returns 404 only with that permission present; without it, S3
+    returns 403 instead (AWS deliberately conflates "doesn't exist" and
+    "can't confirm existence" absent list access). moto does not enforce IAM
+    at all, so no test in this codebase can catch a regression here. Nothing
+    else in this module calls ListBucket directly (Task 4 removed the old
+    list-and-match implementation), which makes the permission look unused —
+    it is not. Never remove `s3:ListBucket` from the IAM policy this service
+    runs under.
     """
 
     def _head() -> bool:

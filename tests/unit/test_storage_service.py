@@ -302,9 +302,11 @@ def test_exists_reraises_a_403_rather_than_treating_it_as_absent(
     """The one correctness property that matters most in this task: a 404
     means absent, but every other error response — most importantly a 403
     AccessDenied — must propagate. If exists() swallowed AccessDenied as
-    False, the retention worker (app/workers/retention.py) would silently
-    skip real objects it merely lacks permission to see, rather than
-    failing loudly. This proves a 403-shaped ClientError is NOT swallowed.
+    False, callers like app/services/job_service.py (asset-ownership
+    verification), app/services/mask_validation.py, and
+    app/services/image_validation.py would silently treat real objects they
+    merely lack permission to see as absent, rather than failing loudly.
+    This proves a 403-shaped ClientError is NOT swallowed.
     """
     client = storage_service.get_client()
 

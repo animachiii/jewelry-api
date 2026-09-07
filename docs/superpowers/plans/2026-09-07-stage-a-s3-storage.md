@@ -1499,6 +1499,20 @@ those three buckets and nothing else. **This key is temporary and is deleted at
 the end of Stage C**, when the EC2 instance profile replaces it. Record it as
 an item to revoke.
 
+**`s3:ListBucket` must stay in this policy — and in whatever policy replaces
+it on Stage C's EC2 instance profile — even though nothing in this codebase
+calls `ListBucket` directly.** `app/services/storage_service.py::exists()`
+uses `head_object` (an exact-key check), and on real AWS S3, `HeadObject`
+against a missing key returns 404 only if the caller holds `s3:ListBucket` on
+the bucket; without it, S3 returns 403 instead. `exists()` deliberately
+propagates every non-404 response rather than treating it as "absent" (see
+its own docstring), so dropping this permission as apparently-unused would
+turn every missing-object check — used by asset-ownership verification and
+mask/image validation on `/generate`, `/recolor`, `/mix`, and
+`/background/*` — into a hard failure instead of a clean `False`. moto never
+enforces IAM, so no test catches this if it regresses; it can only be caught
+by keeping this note in whichever IAM policy is written next.
+
 - [ ] **Step 3: Set the environment variables in the Render dashboard**
 
 For `jewelry-api`: `S3_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`;
