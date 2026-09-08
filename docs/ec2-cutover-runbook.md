@@ -30,9 +30,22 @@ Do not start Section 1 until at least the first two of these are answered
    `sg-049bade1c2300e471` (Staging-SG). Confirm which IP actually got
    whitelisted — the rule the client already added didn't match connections
    from this session, so don't assume it's right without checking.
-2. **The real S3 bucket name** the client's IAM key is scoped to (the key
-   can't run `ListBuckets`, so it can't be discovered) — or explicit
-   permission to create your own buckets if none exists yet.
+2. **Bucket creation is blocked — confirmed, not assumed.** The client's
+   key (`image-enhancement-s3-user`) can't run `ListBuckets` (so an
+   existing bucket name can't be discovered) and was tested directly
+   against `s3:CreateBucket`, which came back `AccessDenied`. One of two
+   things needs to happen before Section 1 can run:
+   - **The client creates the two buckets themselves** (private,
+     block-all-public-access — `jewelry-inputs` and `jewelry-outputs`,
+     matching `app/config.py`'s existing `BUCKET_INPUTS`/`BUCKET_OUTPUTS`
+     defaults, or any names they prefer) and confirms the exact names, **or**
+   - **The client adds `s3:CreateBucket`** (plus ideally
+     `s3:PutBucketPolicy`/`s3:PutPublicAccessBlock` to lock them down
+     private) to that IAM user's policy, and this session creates them.
+
+   Either way, the key's policy also needs `s3:PutObject`/`s3:GetObject`/
+   `s3:DeleteObject`/`s3:ListBucket` scoped to whichever bucket ARNs end up
+   in use — not yet confirmed for either path.
 3. Whether that key's policy includes **`s3:ListBucket`** on the bucket —
    without it, `exists()` checks return 403 instead of a clean 404, which
    breaks asset-ownership validation on `/generate`, `/recolor`, `/mix`,
@@ -50,12 +63,12 @@ Do not start Section 1 until at least the first two of these are answered
 
 ---
 
-## 1. Verify S3 access
+## 1. Create the buckets (if that's the path), then verify S3 access
 
-From your own machine, once the bucket name (item 2 above) is known.
-Configure a scratch AWS CLI profile with the client's key — **never commit
-these values anywhere, and don't paste them back into chat once you've set
-them locally**:
+From your own machine, once item 2 in Section 0 is resolved. Configure a
+scratch AWS CLI profile with the client's key — **never commit these
+values anywhere, and don't paste them back into chat once you've set them
+locally**:
 
 ```bash
 aws configure set aws_access_key_id <the key> --profile zivoro
@@ -63,7 +76,30 @@ aws configure set aws_secret_access_key <the secret> --profile zivoro
 aws configure set region ap-south-1 --profile zivoro
 ```
 
-Real round-trip, not just a permissions check:
+**If the client granted `s3:CreateBucket`** (rather than creating the
+buckets themselves), create them here — private, with public access fully
+blocked, matching the design's own bucket rule:
+
+```bash
+for BUCKET in jewelry-inputs jewelry-outputs; do
+  aws s3api create-bucket --bucket "$BUCKET" --region ap-south-1 \
+    --create-bucket-configuration LocationConstraint=ap-south-1 --profile zivoro
+  aws s3api put-public-access-block --bucket "$BUCKET" --profile zivoro \
+    --public-access-block-configuration \
+    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+done
+```
+
+**CHECK:** both `create-bucket` calls succeed, and
+`aws s3api get-public-access-block --bucket jewelry-inputs --profile zivoro`
+(and the same for `jewelry-outputs`) shows all four settings `true`. If the
+client created the buckets themselves instead, skip this block and confirm
+directly with them that public access is already blocked before proceeding
+— don't assume it.
+
+Real round-trip, not just a permissions check — use the actual bucket
+name(s) from whichever path above applies (they may differ from
+`jewelry-inputs`/`jewelry-outputs` if the client picked their own names):
 
 ```bash
 BUCKET=<real bucket name from the client>
