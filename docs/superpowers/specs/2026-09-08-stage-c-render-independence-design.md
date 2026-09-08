@@ -1,22 +1,29 @@
 # Stage C (reordered) — Render Independence via EC2 + Docker Compose
 
 **Date:** 2026-09-08
-**Status:** Design, approved in conversation; not yet implemented
+**Status:** Implemented (compute+Redis) 2026-09-08; scope expanded same day
+to fold in RDS+S3 — see the Non-goals section's reversal note and
+`docs/ec2-cutover-runbook.md` for the current combined plan.
 **Supersedes for sequencing:** `2026-09-07-client-aws-migration-design.md`'s
 Stage A → B → C ordering (see "Deviation from the staged plan" below).
 
 ## Goal
 
-Stop both services depending on Render. Nothing else.
+Stop both services depending on Render. That was the whole goal when this
+was written. It no longer is — see the Non-goals section below for why the
+database and S3 storage cutover are now in scope too, decided the same day
+after the client sent working RDS and S3 credentials unprompted.
 
 `jewelry-api` (V2) and `jewellery-gen-backend` (V1) currently run as free-tier
 Render Web Services. This design moves both onto one EC2 instance running their
 existing Docker images under Docker Compose, and replaces the one Render-managed
-Redis with a container.
+Redis with a container. **V2's database and object storage now move too**
+(RDS Postgres, real S3 — see Non-goals); **V1's do not** — it has no Postgres
+dependency at all (state lives in Redis/Sheets), and its storage backend is
+unaffected by this expansion.
 
-**It does not migrate the database, does not complete the S3 storage cutover,
-and does not set up a domain or TLS.** Those are separate, independently
-sequenced pieces of work — see Non-goals.
+**Still explicitly out of scope: domain, DNS, TLS.** Those remain separate,
+independently sequenced work — see Non-goals.
 
 ## Why this is being done before Stage A's live verification
 
@@ -65,10 +72,24 @@ Two findings from the audit, both load-bearing for this design:
 
 Explicitly out of scope, to keep this one implementation plan:
 
-- **Task 9 / S3 live verification.** Storage config is carried across
-  byte-for-byte. Whatever works (or does not) on Render today works (or does
-  not) identically on EC2.
-- **Stage B / RDS.** The database stays on Supabase.
+- ~~**Task 9 / S3 live verification.**~~ ~~**Stage B / RDS.**~~ **Reversed,
+  2026-09-08, later the same day the design above was approved.** The client
+  sent real credentials unprompted: an S3-scoped IAM key and an RDS Postgres
+  instance (`zivoro-erp-test-db`, `AiImageEnhancement` database), confirmed
+  directly with the user to be the real long-term backend, not a rehearsal
+  ("backend is real, we will be just changing a domain later"). With genuine
+  RDS+S3 access in hand mid-implementation, deploying EC2 against a
+  Supabase database and Supabase-Storage-shaped config that both need
+  replacing days later was worse than folding the now-available stages in.
+  **User decision: fold Stage B and Task 9 into this cutover rather than
+  sequence them after.** See `docs/ec2-cutover-runbook.md` for the resulting
+  combined sequence — verify S3, verify RDS, migrate `api_clients` +
+  `config_versions`, launch EC2 already pointed at both. This reopens two
+  things the original design treated as settled: the database is no longer
+  staying on Supabase (contradicts the Goal section's "does not migrate the
+  database" — corrected there too), and Task 9's live-verification gate now
+  happens *before* EC2 exists rather than against the already-deployed
+  Render service the original Task 9 plan assumed.
 - **Domain, DNS, TLS.** No domain exists yet. Services are reached by
   `http://<elastic-ip>:<port>` until one does. Adding a reverse proxy later is
   additive and breaks nothing here.
