@@ -160,6 +160,26 @@ compose files unsafe to run as production, and each needs a committed fix.
 | `WORKER_IN_PROCESS=true` on Render (worker runs inside the API process). With a separate `worker` container that would run the worker loop twice. | `WORKER_IN_PROCESS=false` in `.env` — stated explicitly in the env checklist because it is the one value that must *differ* from Render's. |
 | No `restart:` policy. | `restart: unless-stopped`. |
 
+**Correction, 2026-09-08 (found while writing the implementation plan):**
+the table above understated what the V1 overlay needs. Running `docker
+compose config` against the unmodified base file showed two things not
+caught when this design was written:
+
+1. `api`/`worker` both hardcode `environment: REDIS_URL:
+   redis://redis:6379/0`, which wins over `env_file:` for the same key
+   regardless of what `.env` sets. Fixed by setting
+   `environment: REDIS_URL: ${REDIS_URL}` in the overlay, which
+   Compose interpolates from the same `.env` file at parse time.
+2. Both declare `depends_on: {redis: {condition: service_healthy}}`.
+   Compose starts a service's dependencies whether or not they're named
+   on the `up` command line, so naming only `api worker` on `up` was not
+   sufficient on its own to keep the local `redis` service from starting.
+   Fixed with `depends_on: !reset {}` on both in the overlay, in addition to
+   (not instead of) always naming services explicitly in the runbook.
+
+Both fixes are implemented in `docker-compose.prod.yml`
+(`docs/superpowers/plans/2026-09-08-ec2-render-independence.md` Task 3).
+
 ### Both repos — documentation
 
 `docs/deployment-ec2.md` in each repo: what runs where, how to deploy an
