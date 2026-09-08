@@ -16,9 +16,9 @@ up together:
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
-`migrate` runs `alembic upgrade head` once and exits; `api`, `worker`, `beat`,
-and `redis` wait for it and then run indefinitely with `restart:
-unless-stopped`.
+`migrate` itself waits for `redis` to start before it runs. `migrate` runs
+`alembic upgrade head` once and exits; `api`, `worker`, and `beat` wait for
+`migrate` and then run indefinitely with `restart: unless-stopped`.
 
 ## Env vars — deltas from the Render dashboard only
 
