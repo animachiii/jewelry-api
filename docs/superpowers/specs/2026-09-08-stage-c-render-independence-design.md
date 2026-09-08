@@ -268,27 +268,12 @@ it means the outstanding Task 9's own instruction to "confirm health reports
 `storage: ok`" was never a meaningful verification. Recorded here; fixing the
 health endpoint is out of scope for this design.
 
-## Open decision — AWS region
+## AWS region — decided
 
-`docs/superpowers/specs/2026-09-07-client-aws-migration-design.md` records the
-region as undecided, to be settled with the client, and requires compute, RDS,
-and S3 to share one region.
-
-Launching this instance effectively pre-commits that choice, or accepts moving
-the instance later. Two candidates:
-
-- **`ap-south-1` (Mumbai)** — recommended. Both repos' `.env.example` files
-  already default to it (`S3_REGION=ap-south-1`, `AWS_REGION=ap-south-1`), and
-  the client and its ERP are India-based, so it is the lowest-latency choice
-  and the one the rest of the config already assumes.
-- **`us-east-1`** — what the superseded App Runner runbook used, and where any
-  ECR repositories from that effort would already exist. Only an advantage if
-  that prior work gets reused, which this design does not.
-
-**Recommendation: `ap-south-1`.** Confirm with the client before launching, or
-accept an instance move later. Moving one stateless EC2 instance is cheap; a
-populated RDS instance in the wrong region is not, so this is worth settling
-now rather than at Stage B.
+**`ap-south-1` (Mumbai).** Confirmed 2026-09-08. Matches both repos'
+`.env.example` defaults (`S3_REGION`/`AWS_REGION=ap-south-1`) and the
+client/ERP's India location. The superseded App Runner runbook's `us-east-1`
+is not reused.
 
 ## Success criteria
 
