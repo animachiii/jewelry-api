@@ -30,10 +30,22 @@ steps are executed by the user, who reports results back.
   `-c ${IO_QUEUE_CONCURRENCY:-20}` must never be reachable in prod regardless
   of what `.env` does or doesn't set.
 - A `migrate` one-shot service runs `alembic upgrade head` before `api`,
-  `worker`, and `beat` start (`depends_on: {condition: service_completed_successfully}`)
-  — Compose replaces a service's `depends_on` list wholesale on override, so
-  every overlay that adds `migrate` as a dependency must also restate the
-  base's existing `redis` dependency, or it is silently dropped.
+  `worker`, and `beat` start (`depends_on: {condition: service_completed_successfully}`).
+- **Corrected during Tasks 1 and 3 execution (was wrong when this plan was
+  written):** Compose merges `depends_on` and `environment` (map-type fields)
+  by key union — a later file's key overrides the same key in an earlier
+  file, and new keys merge in without needing to restate existing ones.
+  **List-type fields (`ports`, `volumes`) merge by concatenation, not
+  replacement** — an overlay's `ports: []` does *not* clear a base file's
+  published ports. Clearing to empty needs the explicit `!reset` YAML tag
+  (`ports: !reset []`, `depends_on: !reset {}`). **Replacing with a genuinely
+  new, non-empty value needs `!override` instead — `!reset` combined with a
+  non-empty value discards the value too and clears the field to nothing.**
+  Both confirmed by testing directly against Docker Compose v5.2.0 (Task 1
+  found the clear-to-empty case; Task 3 found the replace-with-a-value case
+  when V1's port remap silently produced no published port at all under
+  `!reset`). See the ledger for both. This governs the redis-port fix below
+  and the V1 fixes two bullets down.
 - **V1's base `docker-compose.yml` hardcodes `environment: REDIS_URL:
   redis://redis:6379/0` on both `api` and `worker`, and both declare
   `depends_on: {redis: {condition: service_healthy}}`.** Confirmed by running
@@ -41,7 +53,8 @@ steps are executed by the user, who reports results back.
   writing this plan) — the environment override wins regardless of `.env`
   content, and the dependency means `redis` starts automatically even when
   not named on the `up` command line. **Both must be overridden in the V1
-  prod overlay** — this was not caught when the spec was written and is
+  prod overlay, and the depends_on override must use `!reset` per the
+  correction above** — this was not caught when the spec was written and is
   corrected as part of Task 3, with the spec file itself updated to record it.
 - V1's `.gitignore` excludes both `.env` and `.env.*` — no new tracked file in
   that repo may start with `.env.`, or it silently never gets committed.
@@ -94,7 +107,7 @@ services:
 
   redis:
     restart: unless-stopped
-    ports: []
+    ports: !reset []
 
   api:
     restart: unless-stopped
@@ -316,21 +329,32 @@ confirmed two things the design spec did not catch:
 services:
   api:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-    volumes: []
+    volumes: !reset []
     environment:
       REDIS_URL: ${REDIS_URL}
-    depends_on: {}
-    ports:
+    depends_on: !reset {}
+    ports: !override
       - "8001:8000"
     restart: unless-stopped
 
   worker:
-    volumes: []
+    volumes: !reset []
     environment:
       REDIS_URL: ${REDIS_URL}
-    depends_on: {}
+    depends_on: !reset {}
     restart: unless-stopped
 ```
+
+**`!override` vs `!reset`, precisely — found while implementing this task.**
+`!reset` clears a field to empty/null and discards anything written alongside
+it; testing `ports: !reset` followed by a non-empty list produced **no ports
+at all**, not the new value. `!override` is the separate tag that replaces a
+base field with a genuinely new, non-empty value. So: clearing a list/map to
+nothing (`volumes`, `depends_on` here) uses `!reset`; replacing one with a
+different non-empty value (`ports`, remapped from `8000:8000` to
+`8001:8000`) uses `!override`. Using `!reset` for the port remap here would
+have silently produced a container with no published port at all — a real
+found-in-implementation bug, not a hypothetical.
 
 `environment.REDIS_URL: ${REDIS_URL}` works because Compose interpolates
 `${VAR}` in a compose file from the project's own `.env` file at parse time —
@@ -339,7 +363,7 @@ container at runtime. So this line takes whatever real Upstash URL is in
 `.env` and uses it to override the base file's hardcoded local value, rather
 than introducing a second source of truth for it.
 
-`depends_on: {}` on both services means neither declares a dependency on
+`depends_on: !reset {}` on both services means neither declares a dependency on
 `redis` any more, so `docker compose up -d api worker` (Task 6's runbook
 always names services explicitly for this repo, as a second, independent
 safeguard) never starts it.
@@ -406,7 +430,7 @@ caught when this design was written:
    Compose starts a service's dependencies whether or not they're named
    on the `up` command line, so naming only `api worker` on `up` was not
    sufficient on its own to keep the local `redis` service from starting.
-   Fixed with `depends_on: {}` on both in the overlay, in addition to
+   Fixed with `depends_on: !reset {}` on both in the overlay, in addition to
    (not instead of) always naming services explicitly in the runbook.
 
 Both fixes are implemented in `docker-compose.prod.yml`
@@ -741,7 +765,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
 
 **CHECK:** only `api` and `worker` are listed and both show `Up` — if a
 `redis` container is also listed here, stop and report it; that means the
-`depends_on: {}` override in `docker-compose.prod.yml` didn't take effect
+`depends_on: !reset {}` override in `docker-compose.prod.yml` didn't take effect
 and the instance now has an unused local Redis nobody intended to run.
 
 ```bash
