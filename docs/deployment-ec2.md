@@ -20,6 +20,49 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 `alembic upgrade head` once and exits; `api`, `worker`, and `beat` wait for
 `migrate` and then run indefinitely with `restart: unless-stopped`.
 
+## nginx (added 2026-09-09)
+
+The client's security group exposes **port 80 only** — they declined to open
+8000/8001 ("We cannot directly expose the application on 0.0.0.0:<port>"), so
+nginx fronts both services on one port and routes by path:
+
+| Path | Upstream | Service |
+| :--- | :--- | :--- |
+| `/api/v2/`, `/ui` | `127.0.0.1:8000` | jewelry-api (V2) |
+| `/api/v1/`, `/health` | `127.0.0.1:8001` | jewellery-gen-backend (V1) |
+| `/s3-proxy/` | `image-enhancement-s3bucket.s3.amazonaws.com` | S3 upload passthrough |
+
+The config is version-controlled at `deploy/nginx/jewelry.conf`. Install it:
+
+```bash
+sudo cp deploy/nginx/jewelry.conf /etc/nginx/sites-available/jewelry.conf
+sudo ln -sf /etc/nginx/sites-available/jewelry.conf /etc/nginx/sites-enabled/jewelry.conf
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+sudo systemctl enable nginx   # must survive a reboot
+```
+
+**`/s3-proxy/` exists because the bucket has no CORS policy** and the client's
+IAM user is denied `s3:PutBucketCORS`. Browsers block a direct PUT to S3; the
+same request through this API's own origin is not cross-origin, so CORS never
+applies. It pairs with `S3_UPLOAD_PROXY_BASE` — set one without the other and
+uploads 404. Non-browser clients (including the production mobile ERP) are
+unaffected either way. See
+`docs/superpowers/plans/2026-09-09-s3-upload-proxy.md`.
+
+**The bucket host is hardcoded in `deploy/nginx/jewelry.conf` and must be kept
+in sync with the app's config by hand.** `proxy_pass` and the `Host` header
+in the `/s3-proxy/` block both hardcode `image-enhancement-s3bucket.s3.amazonaws.com`,
+which must always equal the host of the presigned URLs the app actually
+generates for `settings.BUCKET_INPUTS` (`app/config.py`). There is no
+automated link between them — a static nginx file can't be templated from
+Python config without a deploy step. If the app's bucket setting or region
+changes, or botocore's endpoint resolution behavior changes, and this file
+isn't updated to match, uploads will start failing with 403s (signature
+mismatch) or — if the hostnames happen to both resolve, just to different
+buckets — silently land in the wrong bucket. Whoever changes `BUCKET_INPUTS`
+must also update this file.
+
 ## Env vars — deltas from the Render dashboard
 
 **Updated 2026-09-08 — this list grew.** The database and object storage

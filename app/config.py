@@ -29,6 +29,19 @@ class Settings(BaseSettings):
     # Set only to point at a non-AWS S3 endpoint — the moto server in tests,
     # or MinIO in local docker-compose. None means real AWS.
     S3_ENDPOINT_URL: str | None = None
+    # Same-origin base URL that presigned *upload* URLs are rewritten onto —
+    # e.g. "http://13.203.97.235/s3-proxy". None (default) returns the raw S3
+    # URL, which is correct for every non-browser client.
+    #
+    # Exists because an S3 bucket has no CORS rules unless one is explicitly
+    # added, and the client's IAM user is denied s3:PutBucketCORS. A browser
+    # PUT straight to S3 is blocked before it leaves the browser; routing it
+    # through this API's own origin means CORS never applies. SigV4 signs
+    # host + path + query only, so nginx re-sending the signed Host makes the
+    # signature validate unchanged. Read URLs are deliberately NOT rewritten:
+    # <img src> is not subject to CORS. See
+    # docs/superpowers/plans/2026-09-09-s3-upload-proxy.md.
+    S3_UPLOAD_PROXY_BASE: str | None = None
     BUCKET_INPUTS: str = "jewelry-inputs"
     BUCKET_OUTPUTS: str = "jewelry-outputs"
     SIGNED_URL_TTL_SECONDS: int = 3600
