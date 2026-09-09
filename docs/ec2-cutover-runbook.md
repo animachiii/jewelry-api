@@ -27,18 +27,21 @@ Sections 2, 3 and 4 are **done** — RDS connectivity verified, all 22
 migrations applied against `AiImageEnhancement`, and `api_clients` (8 rows)
 + `config_versions` (active `version_number: 18`) migrated from Supabase.
 
-**S3 is deliberately deferred, decided directly with the user.** The bucket
-blocker in Section 0 item 2 is still unresolved and the cutover proceeds
-anyway: getting off Render is the priority, and the user explicitly accepted
-that image generation is temporarily broken in the meantime. Concretely —
-the app boots and reports healthy without S3 (`app/api/v2/health.py`
-hardcodes `storage: "ok"`, and every S3 setting in `app/config.py` has a
-default), but **every request that touches storage fails until the buckets
-exist**: `/uploads/presign`, `/generate`, `/background/*`, `/match`,
-`/recolor`, `/mix`, `/generate-with-cleanup`. `GET /config`, `GET /status`,
-and the ops routes still work. Section 1 and the job-submission half of
-Section 13 are the steps this defers; do them once the client resolves the
-bucket question, before telling anyone generation works again.
+**S3 is resolved, same day.** The earlier deferral below (bucket creation
+blocked, generation accepted as temporarily broken) **no longer applies** —
+the client provisioned a bucket, and Section 1's checks all passed against
+it from this machine: `head-bucket` succeeded, upload/download round-tripped,
+and a missing-key `head-object` returned a clean `404` (not `403`), meaning
+`s3:ListBucket` is actually granted. **One real bucket, not the two the
+design assumed** — `image-enhancement-s3bucket` in `ap-south-1`, used for
+**both** inputs and outputs (confirmed with the user, not assumed). This is
+safe: `app/services/storage_service.py` takes `bucket` as a parameter on
+every call, and the `{job_id}/{angle}/{kind}_{short_uuid}.{ext}` path
+convention already guarantees unique keys regardless of which bucket they
+land in — nothing hardcodes two distinct buckets. Section 9's `.env`
+guidance below sets **both** `BUCKET_INPUTS` and `BUCKET_OUTPUTS` to
+`image-enhancement-s3bucket`. Section 13's job-submission check is no longer
+expected to fail.
 
 **Access is via SSM Session Manager, not SSH** — Sections 5, 7 and 14 below
 reflect that. No key pair, no port 22 exposure.
@@ -48,38 +51,30 @@ reflect that. No key pair, no port 22 exposure.
 ## 0. Blocked on the client
 
 Originally: "do not start Section 1 until at least the first two of these
-are answered." **As of 2026-09-09 that gate no longer holds the cutover** —
-item 1 is resolved, and item 2 (S3) is deferred by decision rather than
-waited on, so Sections 5-15 proceed with item 2 still open. It remains the
-one thing standing between this deployment and working image generation.
+are answered." **As of 2026-09-09 both are resolved** — Sections 1-4 all
+ran successfully; nothing below blocks Sections 5-15 any more.
 
 1. ~~**Whitelist your own machine's public IP** on TCP 5432 in
    `sg-049bade1c2300e471` (Staging-SG).~~ **Resolved 2026-09-09** — a
    working rule is in place; Sections 2-4 all ran successfully from this
    machine against RDS.
-2. **Bucket creation is blocked — confirmed, not assumed.** *(Still open as
-   of 2026-09-09, and now explicitly deferred rather than blocking — see
-   Progress above.)* The client's
-   key (`image-enhancement-s3-user`) can't run `ListBuckets` (so an
-   existing bucket name can't be discovered) and was tested directly
-   against `s3:CreateBucket`, which came back `AccessDenied`. One of two
-   things needs to happen before Section 1 can run:
-   - **The client creates the two buckets themselves** (private,
+2. ~~**Bucket creation is blocked — confirmed, not assumed.**~~ **Resolved
+   2026-09-09** — the client provisioned `image-enhancement-s3bucket` in
+   `ap-south-1`, one shared bucket for both inputs and outputs (not the two
+   the original design assumed — see Progress above and Section 1's
+   results). The `s3:CreateBucket` question below is moot now that a bucket
+   already exists; kept for the record.
+   - ~~**The client creates the two buckets themselves** (private,
      block-all-public-access — `jewelry-inputs` and `jewelry-outputs`,
      matching `app/config.py`'s existing `BUCKET_INPUTS`/`BUCKET_OUTPUTS`
-     defaults, or any names they prefer) and confirms the exact names, **or**
-   - **The client adds `s3:CreateBucket`** (plus ideally
+     defaults, or any names they prefer) and confirms the exact names, **or**~~
+   - ~~**The client adds `s3:CreateBucket`** (plus ideally
      `s3:PutBucketPolicy`/`s3:PutPublicAccessBlock` to lock them down
-     private) to that IAM user's policy, and this session creates them.
-
-   Either way, the key's policy also needs `s3:PutObject`/`s3:GetObject`/
-   `s3:DeleteObject`/`s3:ListBucket` scoped to whichever bucket ARNs end up
-   in use — not yet confirmed for either path.
-3. Whether that key's policy includes **`s3:ListBucket`** on the bucket —
-   without it, `exists()` checks return 403 instead of a clean 404, which
-   breaks asset-ownership validation on `/generate`, `/recolor`, `/mix`,
-   and `/background/*` (see `docs/business-rules.md`'s note on this exact
-   failure mode from the original Task 9 plan).
+     private) to that IAM user's policy, and this session creates them.~~
+3. ~~Whether that key's policy includes **`s3:ListBucket`** on the bucket~~
+   — **Resolved 2026-09-09**, confirmed positively: a `head-object` against
+   a nonexistent key returned a clean `404`, not `403`. `exists()` will
+   behave correctly on `/generate`, `/recolor`, `/mix`, and `/background/*`.
 4. **VPC and subnet** for `zivoro-erp-test-db`, so the EC2 instance can
    optionally be placed alongside it for private connectivity. Not
    blocking — Section 6 has a fallback that works regardless (public IP
@@ -94,12 +89,17 @@ one thing standing between this deployment and working image generation.
 
 ## 1. Create the buckets (if that's the path), then verify S3 access
 
-**DEFERRED, 2026-09-09 — do not treat this as a prerequisite for Sections
-5-15.** The cutover proceeds without it by explicit decision (see Progress
-at the top). Come back and run this whole section, plus the job-submission
-half of Section 13, once the client either creates the buckets or grants
-`s3:CreateBucket`. Until then image generation is down by design, not by
-accident.
+**DONE 2026-09-09.** The client provisioned `image-enhancement-s3bucket`
+(`ap-south-1`) themselves rather than granting `s3:CreateBucket`, so the
+`create-bucket`/`put-public-access-block` block below was never run — skip
+straight to the round-trip check if you're replaying this. Results: public
+access could not be verified from here (`GetBucketPublicAccessBlock` itself
+is denied to `image-enhancement-s3-user` — confirm directly with the client
+that it's private rather than assuming), but the round-trip (`aws s3 cp` up
+and back) matched byte-for-byte and `head-object` on a nonexistent key
+returned a clean `404`, confirming `s3:ListBucket` is granted this time.
+**Only one bucket exists, used for both inputs and outputs** — see Progress
+at the top for why that's safe.
 
 From your own machine, once item 2 in Section 0 is resolved. Configure a
 scratch AWS CLI profile with the client's key — **never commit these
@@ -507,22 +507,18 @@ Render dashboard as before.
 they're still sitting in that dashboard — the app doesn't read them
 anymore.
 
-**S3, given the deferral (2026-09-09).** The buckets don't exist yet, so
-there are no "real bucket names from the client" to put here. Set:
+**S3 — resolved 2026-09-09, real values below** (superseding the earlier
+placeholder guidance):
 
-- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` — the client's real
-  `image-enhancement-s3-user` key. These *are* real and valid; the key
-  simply lacks bucket create/list permission.
+- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` — the `image-enhancement-s3-user`
+  key. Verified working from this machine (Section 1).
 - `S3_REGION=ap-south-1`
-- `BUCKET_INPUTS=jewelry-inputs` / `BUCKET_OUTPUTS=jewelry-outputs` — the
-  intended names, matching `app/config.py`'s defaults. **These are
-  placeholders until the client confirms the real names**, which may differ
-  if they create the buckets themselves. Re-check this line before
-  declaring generation fixed.
-
-The app boots fine with all of the above pointing at buckets that don't
-exist — nothing resolves a bucket at import or startup. Storage failures
-surface per-request, at call time.
+- `BUCKET_INPUTS=image-enhancement-s3bucket` / `BUCKET_OUTPUTS=image-enhancement-s3bucket`
+  — **the same bucket for both**, not `app/config.py`'s `jewelry-inputs`/
+  `jewelry-outputs` defaults. This is a deliberate override of those
+  defaults, not an oversight — confirmed with the user that only one bucket
+  exists and it serves both roles. Confirmed safe: object keys already
+  embed `job_id`/`angle`/`kind`, so nothing collides regardless of bucket.
 
 **CHECK:** `cat .env` — confirm `DATABASE_URL` points at
 `zivoro-erp-test-db...rds.amazonaws.com`, not Supabase; confirm
@@ -610,14 +606,10 @@ curl -s localhost:8001/health
 
 ## 13. Verify from outside the instance, and prove S3 for real
 
-**Read this first, 2026-09-09:** the first two checks below (health, and
-`GET /config` with a real key) are the ones that gate this cutover, and
-both work without S3. **The `/ui` job-submission check at the end cannot
-pass while the buckets are missing** — it will fail at the upload step. Run
-it anyway if you want to *see* the failure mode and confirm it's an S3
-error rather than something else, but do not treat it as a blocker, and do
-not tell anyone generation works until Section 1 is done and this check has
-actually passed.
+**Read this first, 2026-09-09:** the S3 deferral this section originally
+warned about is resolved (see Progress at the top) — the `/ui` job
+submission check below is now expected to actually pass, not fail. Run all
+of it.
 
 From your own machine, not the SSM session:
 
@@ -639,9 +631,6 @@ curl -s -H "X-API-Key: <a real client or ops key — should already exist, it mi
 **CHECK:** returns the real category/angle config, not a 401/500. A 401
 here means the API-client migration in Section 4 didn't actually carry the
 key you're testing with — check which client the key belongs to.
-
-**Everything from here to the end of this section is blocked on S3 —
-deferred, expected to fail today.**
 
 Then open `http://<ELASTIC_IP>:8000/ui` in a browser and submit one real
 test job. Watch it move off `PENDING` — this exercises Celery consuming
@@ -681,17 +670,12 @@ docker ps
 
 ## 15. Suspend (not delete) Render
 
-**The S3 deferral changes this section's tradeoff, in your favour and
-against it (2026-09-09).** In your favour: since no job can be created
-against S3 until the buckets exist, there is no divergent job history
-accumulating on RDS, so resuming Render stays a genuinely clean rollback
-for as long as generation is down. Against: suspending Render means
-generation is down *everywhere*, not just on the new stack — Render can
-still serve real jobs today, and the EC2 instance cannot. **If the client
-needs generation working at all in the meantime, do not suspend Render
-yet** — leave both running, and suspend only once S3 is resolved and
-Section 13's job check has actually passed on EC2. Decide that with the
-user explicitly rather than defaulting to it.
+**S3 is resolved (2026-09-09), so the earlier caveat about generation being
+down everywhere no longer applies** — suspend once Section 13's job check
+has actually passed on EC2, not before. The remaining real rollback
+consideration is ordinary: once real jobs exist on RDS/S3, resuming Render
+is not a clean rollback, since Render is still pointed at the old Supabase
+project (see the note a few lines down).
 
 Only after everything above checks out and you're satisfied. In the Render
 dashboard:
