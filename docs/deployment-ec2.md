@@ -50,6 +50,19 @@ uploads 404. Non-browser clients (including the production mobile ERP) are
 unaffected either way. See
 `docs/superpowers/plans/2026-09-09-s3-upload-proxy.md`.
 
+**The bucket host is hardcoded in `deploy/nginx/jewelry.conf` and must be kept
+in sync with the app's config by hand.** `proxy_pass` and the `Host` header
+in the `/s3-proxy/` block both hardcode `image-enhancement-s3bucket.s3.amazonaws.com`,
+which must always equal the host of the presigned URLs the app actually
+generates for `settings.BUCKET_INPUTS` (`app/config.py`). There is no
+automated link between them — a static nginx file can't be templated from
+Python config without a deploy step. If the app's bucket setting or region
+changes, or botocore's endpoint resolution behavior changes, and this file
+isn't updated to match, uploads will start failing with 403s (signature
+mismatch) or — if the hostnames happen to both resolve, just to different
+buckets — silently land in the wrong bucket. Whoever changes `BUCKET_INPUTS`
+must also update this file.
+
 ## Env vars — deltas from the Render dashboard
 
 **Updated 2026-09-08 — this list grew.** The database and object storage
