@@ -1,8 +1,8 @@
 # EC2 Cutover Runbook
 
-Execute this yourself in the AWS console, over SSH, and from your own
-machine — this session has no AWS credentials of its own, no SSH access to
-any instance, and won't be given the client's secrets to hold. Report back
+Execute this yourself in the AWS console, over SSM, and from your own
+machine — this session has no AWS credentials of its own, no shell access
+to any instance, and won't be given the client's secrets to hold. Report back
 what you see at each checkpoint (marked **CHECK**) before moving to the
 next section.
 
@@ -16,47 +16,71 @@ client RDS) and object storage (already coded, just needs real credentials
 — Stage A) as part of this same cutover, alongside compute and Redis. **V1
 (`jewellery-gen-backend`) is unaffected by RDS or S3** — it has no Postgres
 dependency at all (job state lives in Redis + Google Sheets), and its own
-storage backend stays whatever it is today. Sections 6 and 9 are the only
+storage backend stays whatever it is today. Sections 10 and 12 are the only
 V1-specific ones; everything about RDS/S3 below is V2-only.
+
+---
+
+## Progress, 2026-09-09
+
+Sections 2, 3 and 4 are **done** — RDS connectivity verified, all 22
+migrations applied against `AiImageEnhancement`, and `api_clients` (8 rows)
++ `config_versions` (active `version_number: 18`) migrated from Supabase.
+
+**S3 is resolved, same day.** The earlier deferral below (bucket creation
+blocked, generation accepted as temporarily broken) **no longer applies** —
+the client provisioned a bucket, and Section 1's checks all passed against
+it from this machine: `head-bucket` succeeded, upload/download round-tripped,
+and a missing-key `head-object` returned a clean `404` (not `403`), meaning
+`s3:ListBucket` is actually granted. **One real bucket, not the two the
+design assumed** — `image-enhancement-s3bucket` in `ap-south-1`, used for
+**both** inputs and outputs (confirmed with the user, not assumed). This is
+safe: `app/services/storage_service.py` takes `bucket` as a parameter on
+every call, and the `{job_id}/{angle}/{kind}_{short_uuid}.{ext}` path
+convention already guarantees unique keys regardless of which bucket they
+land in — nothing hardcodes two distinct buckets. Section 9's `.env`
+guidance below sets **both** `BUCKET_INPUTS` and `BUCKET_OUTPUTS` to
+`image-enhancement-s3bucket`. Section 13's job-submission check is no longer
+expected to fail.
+
+**Access is via SSM Session Manager, not SSH** — Sections 5, 7 and 14 below
+reflect that. No key pair, no port 22 exposure.
 
 ---
 
 ## 0. Blocked on the client
 
-Do not start Section 1 until at least the first two of these are answered
-— everything downstream depends on them:
+Originally: "do not start Section 1 until at least the first two of these
+are answered." **As of 2026-09-09 both are resolved** — Sections 1-4 all
+ran successfully; nothing below blocks Sections 5-15 any more.
 
-1. **Whitelist your own machine's public IP** on TCP 5432 in
-   `sg-049bade1c2300e471` (Staging-SG). Confirm which IP actually got
-   whitelisted — the rule the client already added didn't match connections
-   from this session, so don't assume it's right without checking.
-2. **Bucket creation is blocked — confirmed, not assumed.** The client's
-   key (`image-enhancement-s3-user`) can't run `ListBuckets` (so an
-   existing bucket name can't be discovered) and was tested directly
-   against `s3:CreateBucket`, which came back `AccessDenied`. One of two
-   things needs to happen before Section 1 can run:
-   - **The client creates the two buckets themselves** (private,
+1. ~~**Whitelist your own machine's public IP** on TCP 5432 in
+   `sg-049bade1c2300e471` (Staging-SG).~~ **Resolved 2026-09-09** — a
+   working rule is in place; Sections 2-4 all ran successfully from this
+   machine against RDS.
+2. ~~**Bucket creation is blocked — confirmed, not assumed.**~~ **Resolved
+   2026-09-09** — the client provisioned `image-enhancement-s3bucket` in
+   `ap-south-1`, one shared bucket for both inputs and outputs (not the two
+   the original design assumed — see Progress above and Section 1's
+   results). The `s3:CreateBucket` question below is moot now that a bucket
+   already exists; kept for the record.
+   - ~~**The client creates the two buckets themselves** (private,
      block-all-public-access — `jewelry-inputs` and `jewelry-outputs`,
      matching `app/config.py`'s existing `BUCKET_INPUTS`/`BUCKET_OUTPUTS`
-     defaults, or any names they prefer) and confirms the exact names, **or**
-   - **The client adds `s3:CreateBucket`** (plus ideally
+     defaults, or any names they prefer) and confirms the exact names, **or**~~
+   - ~~**The client adds `s3:CreateBucket`** (plus ideally
      `s3:PutBucketPolicy`/`s3:PutPublicAccessBlock` to lock them down
-     private) to that IAM user's policy, and this session creates them.
-
-   Either way, the key's policy also needs `s3:PutObject`/`s3:GetObject`/
-   `s3:DeleteObject`/`s3:ListBucket` scoped to whichever bucket ARNs end up
-   in use — not yet confirmed for either path.
-3. Whether that key's policy includes **`s3:ListBucket`** on the bucket —
-   without it, `exists()` checks return 403 instead of a clean 404, which
-   breaks asset-ownership validation on `/generate`, `/recolor`, `/mix`,
-   and `/background/*` (see `docs/business-rules.md`'s note on this exact
-   failure mode from the original Task 9 plan).
+     private) to that IAM user's policy, and this session creates them.~~
+3. ~~Whether that key's policy includes **`s3:ListBucket`** on the bucket~~
+   — **Resolved 2026-09-09**, confirmed positively: a `head-object` against
+   a nonexistent key returned a clean `404`, not `403`. `exists()` will
+   behave correctly on `/generate`, `/recolor`, `/mix`, and `/background/*`.
 4. **VPC and subnet** for `zivoro-erp-test-db`, so the EC2 instance can
    optionally be placed alongside it for private connectivity. Not
-   blocking — Section 1 has a fallback that works regardless (public IP
+   blocking — Section 6 has a fallback that works regardless (public IP
    whitelisting, same mechanism as your own machine).
 5. A **URL-safe RDS password**, if the client can reissue one. Not
-   blocking either — Section 4 covers encoding whatever password you
+   blocking either — Section 3 covers encoding whatever password you
    actually get — but worth asking, since the current one contains
    characters (`%`, `#`, `£`, `:`, `|`, `[`, `{`, `^`) that make every
    connection string a chance to get the encoding wrong.
@@ -64,6 +88,18 @@ Do not start Section 1 until at least the first two of these are answered
 ---
 
 ## 1. Create the buckets (if that's the path), then verify S3 access
+
+**DONE 2026-09-09.** The client provisioned `image-enhancement-s3bucket`
+(`ap-south-1`) themselves rather than granting `s3:CreateBucket`, so the
+`create-bucket`/`put-public-access-block` block below was never run — skip
+straight to the round-trip check if you're replaying this. Results: public
+access could not be verified from here (`GetBucketPublicAccessBlock` itself
+is denied to `image-enhancement-s3-user` — confirm directly with the client
+that it's private rather than assuming), but the round-trip (`aws s3 cp` up
+and back) matched byte-for-byte and `head-object` on a nonexistent key
+returned a clean `404`, confirming `s3:ListBucket` is granted this time.
+**Only one bucket exists, used for both inputs and outputs** — see Progress
+at the top for why that's safe.
 
 From your own machine, once item 2 in Section 0 is resolved. Configure a
 scratch AWS CLI profile with the client's key — **never commit these
@@ -126,6 +162,9 @@ aws s3 rm "s3://$BUCKET/ec2-cutover-test.txt" --profile zivoro
 
 ## 2. Verify RDS connectivity
 
+**DONE 2026-09-09** — returned a real row from `AiImageEnhancement` as
+`rakshit_team`.
+
 From your own machine, once your IP is actually whitelisted (item 1 above
 — confirm, don't assume).
 
@@ -143,6 +182,10 @@ retry blindly.
 ---
 
 ## 3. Run V2's schema migration against RDS
+
+**DONE 2026-09-09** — all 22 migrations (`0001` → `0022`) applied cleanly;
+`\dt` shows `api_clients`, `config_versions`, `jobs`, `sub_jobs`, `assets`,
+`cost_events`, `job_events` plus `alembic_version`. Do not re-run.
 
 Still from your own machine — cheaper to catch a migration problem here
 than after EC2 exists.
@@ -186,6 +229,23 @@ psql -h zivoro-erp-test-db.clks6mke4e4l.ap-south-1.rds.amazonaws.com \
 ---
 
 ## 4. Migrate `api_clients` and `config_versions` from Supabase
+
+**DONE 2026-09-09** — 26 `INSERT`s restored; RDS now holds 8 `api_clients`
+rows and one active `config_versions` row, `version_number: 18`. **Do not
+re-run** — `config_versions.version_number` is `UNIQUE` and `api_clients`
+has a unique `key_prefix`, so a second pass conflicts rather than
+duplicating silently, but don't rely on that as the safety net.
+
+**One deviation worth knowing:** Supabase runs Postgres 17.6 and the local
+`pg_dump` was 16.14, which refuses to dump a newer server — `postgresql@17`
+was installed via Homebrew (keg-only, *not* linked, so the system `psql`/
+`pg_dump` 16 are untouched) and `/opt/homebrew/opt/postgresql@17/bin/pg_dump`
+used explicitly. On restore, RDS rejected one line the 17-era dump emits —
+`SET transaction_timeout` — with `unrecognized configuration parameter`.
+Harmless: it's a session `SET`, not data, and since `psql` ran without
+`--single-transaction` it continued past it and all 26 `INSERT`s landed.
+Expect the same error, and confirm the row counts rather than the absence
+of errors, if this is ever re-run against a similarly older engine.
 
 **Only these two tables.** Job history stays behind — the existing rows are
 seeded demo data and your own test runs, not client data, and every
@@ -261,9 +321,27 @@ AWS Console → EC2 → Launch instance, region **ap-south-1**:
 | Name | `jewelry-render-independence` |
 | AMI | Ubuntu Server 22.04 LTS (64-bit x86) |
 | Instance type | `t3.small` |
-| Key pair | create new, download the `.pem`, keep it — you'll SSH with it |
+| Key pair | **"Proceed without a key pair"** — access is via SSM, see below |
+| Advanced details → IAM instance profile | a role with `AmazonSSMManagedInstanceCore` attached |
 | Network settings → Create security group | see table below |
 | Storage | 20 GiB gp3 (default is usually fine, just confirm it's gp3) |
+
+**Access is SSM Session Manager, not SSH** (decided 2026-09-09). No key
+pair to lose, and no port 22 open to anything. Two requirements, both at
+launch time:
+
+- **The IAM instance profile is the one thing that cannot be skipped.**
+  Without a role carrying `AmazonSSMManagedInstanceCore`, the instance
+  never registers with SSM and you will have *no* way in — no key pair
+  either. If you forget it, you can attach the role afterwards (EC2 →
+  Actions → Security → Modify IAM role) and reboot; it is recoverable, just
+  annoying.
+- **A network path to the SSM endpoints.** A public subnet with auto-assign
+  public IP (or the Elastic IP from Section 6) is enough. Only a fully
+  private subnet needs SSM VPC endpoints, which this runbook doesn't set up.
+
+The SSM Agent itself ships preinstalled on Canonical's Ubuntu 22.04 AMI —
+nothing to do for it.
 
 If item 4 in Section 0 (RDS's VPC/subnet) is known by now, launch into that
 same VPC for private RDS connectivity — otherwise launch normally and use
@@ -274,12 +352,19 @@ Security group rules:
 
 | Type | Port | Source |
 | :--- | :--- | :--- |
-| SSH | 22 | My IP (not `0.0.0.0/0`) |
 | Custom TCP | 8000 | Anywhere (`0.0.0.0/0`) |
 | Custom TCP | 8001 | Anywhere (`0.0.0.0/0`) |
 
-Do not add a rule for 6379 — Redis stays unreachable from outside the
-instance.
+**No SSH rule, deliberately** — SSM needs no inbound rule at all; the agent
+opens an outbound connection to AWS. Do not add a rule for 6379 either —
+Redis stays unreachable from outside the instance.
+
+The 8000/8001 rules are what the Flutter ERP and your own Section 13 checks
+reach. If you'd rather not expose them publicly at all, you can drop both
+and reach them through SSM port forwarding instead — see Section 7's note —
+but then nothing outside your laptop can call the API, which is not the end
+state you want for the ERP. Keep them open unless you're deliberately
+staging that.
 
 Launch it.
 
@@ -296,6 +381,10 @@ launched.
 **CHECK:** note the Elastic IP address here — every step below refers to it
 as `<ELASTIC_IP>`.
 
+**SSM does not change any of this.** Session Manager is how *you* reach the
+instance's shell; it has nothing to do with how the *app* reaches RDS. The
+whitelist rule below is still required.
+
 **This instance needs its own RDS whitelist entry, separate from your
 laptop's.** Add `<ELASTIC_IP>/32` on TCP 5432 to `sg-049bade1c2300e471` —
 the same security group from Section 0, but a new rule. The app running on
@@ -309,13 +398,47 @@ a follow-up, not required to proceed now.
 
 ---
 
-## 7. SSH in and bootstrap
+## 7. Connect over SSM and bootstrap
+
+From your own machine (needs the Session Manager plugin installed locally —
+`brew install --cask session-manager-plugin` if `start-session` complains
+about it):
 
 ```bash
-ssh -i /path/to/your-key.pem ubuntu@<ELASTIC_IP>
+aws ssm start-session --target <instance-id>
 ```
 
-Once connected:
+**CHECK:** you get a shell prompt. If it fails with a target-not-connected
+error, the instance hasn't registered with SSM — confirm the IAM instance
+profile from Section 5 is actually attached (EC2 → the instance → Security
+tab), and give it a minute after boot. Check EC2 → the instance →
+"Fleet Manager"/Session Manager readiness rather than guessing.
+
+**You land as `ssm-user`, not `ubuntu`.** That matters for the rest of this
+runbook, because Section 8 chowns `/opt/jewelry` to `ubuntu`. Switch to the
+`ubuntu` user immediately on every session so paths, file ownership, and
+docker group membership all match what the following sections assume:
+
+```bash
+sudo -iu ubuntu
+```
+
+Do this every time you start a session — it is not persistent.
+
+**Optional, if you closed 8000/8001 in Section 5:** SSM can port-forward
+them to your laptop instead of exposing them publicly —
+
+```bash
+aws ssm start-session --target <instance-id> \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["8000"],"localPortNumber":["8000"]}'
+```
+
+Then Section 13's "from outside" checks become `localhost:8000` rather than
+`<ELASTIC_IP>:8000` — which proves the app is up, but does *not* prove it's
+reachable by the Flutter ERP. Don't confuse the two.
+
+Once connected (as `ubuntu`):
 
 ```bash
 sudo apt-get update
@@ -332,8 +455,11 @@ sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plug
 sudo usermod -aG docker ubuntu
 ```
 
-Log out and back in (`exit`, then SSH again) so the `docker` group
-membership takes effect without needing `sudo` for every command.
+Log out and back in so the `docker` group membership takes effect without
+needing `sudo` for every command — with SSM that means `exit` out of both
+the `ubuntu` shell *and* the session, then `aws ssm start-session` again
+followed by `sudo -iu ubuntu`. A `sudo -iu ubuntu` alone within the same
+session will not pick up the new group.
 
 ```bash
 docker --version
@@ -380,6 +506,19 @@ Render dashboard as before.
 **Do not copy `SUPABASE_URL`/`SUPABASE_SERVICE_KEY`** from Render even if
 they're still sitting in that dashboard — the app doesn't read them
 anymore.
+
+**S3 — resolved 2026-09-09, real values below** (superseding the earlier
+placeholder guidance):
+
+- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` — the `image-enhancement-s3-user`
+  key. Verified working from this machine (Section 1).
+- `S3_REGION=ap-south-1`
+- `BUCKET_INPUTS=image-enhancement-s3bucket` / `BUCKET_OUTPUTS=image-enhancement-s3bucket`
+  — **the same bucket for both**, not `app/config.py`'s `jewelry-inputs`/
+  `jewelry-outputs` defaults. This is a deliberate override of those
+  defaults, not an oversight — confirmed with the user that only one bucket
+  exists and it serves both roles. Confirmed safe: object keys already
+  embed `job_id`/`angle`/`kind`, so nothing collides regardless of bucket.
 
 **CHECK:** `cat .env` — confirm `DATABASE_URL` points at
 `zivoro-erp-test-db...rds.amazonaws.com`, not Supabase; confirm
@@ -467,7 +606,12 @@ curl -s localhost:8001/health
 
 ## 13. Verify from outside the instance, and prove S3 for real
 
-From your own machine, not the SSH session:
+**Read this first, 2026-09-09:** the S3 deferral this section originally
+warned about is resolved (see Progress at the top) — the `/ui` job
+submission check below is now expected to actually pass, not fail. Run all
+of it.
+
+From your own machine, not the SSM session:
 
 ```bash
 curl -s http://<ELASTIC_IP>:8000/api/v2/health
@@ -508,7 +652,10 @@ final status and whether the image opens, either way.
 sudo reboot
 ```
 
-Wait about a minute, then SSH back in:
+Wait about a minute, then start a new SSM session (`aws ssm start-session
+--target <instance-id>`, then `sudo -iu ubuntu`). Note the reboot also
+re-tests SSM itself — if the agent or IAM role were misconfigured you'd
+find out here rather than at the worst possible moment:
 
 ```bash
 docker ps
@@ -522,6 +669,13 @@ docker ps
 ---
 
 ## 15. Suspend (not delete) Render
+
+**S3 is resolved (2026-09-09), so the earlier caveat about generation being
+down everywhere no longer applies** — suspend once Section 13's job check
+has actually passed on EC2, not before. The remaining real rollback
+consideration is ordinary: once real jobs exist on RDS/S3, resuming Render
+is not a clean rollback, since Render is still pointed at the old Supabase
+project (see the note a few lines down).
 
 Only after everything above checks out and you're satisfied. In the Render
 dashboard:
