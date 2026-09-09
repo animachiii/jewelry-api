@@ -402,3 +402,42 @@ def test_generate_upload_url_round_trips_with_httpx(s3: Any) -> None:
 
     assert response.status_code == 200
     assert storage_service.download_bytes(TEST_BUCKET, "a/b/input_1.jpg") == b"uploaded-bytes"
+
+
+def test_generate_upload_url_is_unchanged_when_proxy_base_is_unset(s3: Any) -> None:
+    """Default is off — the presigned URL points straight at S3."""
+    result = storage_service.generate_upload_url(TEST_BUCKET, "a/b/input_1.jpg")
+
+    assert "/s3-proxy/" not in result["signedUrl"]
+    assert result["signedUrl"].startswith(settings.S3_ENDPOINT_URL or "https://")
+
+
+def test_generate_upload_url_rewrites_origin_when_proxy_base_is_set(
+    s3: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only scheme+host change. Path and the whole X-Amz-* query string are
+    what SigV4 signed, so both must survive byte-identical."""
+    from urllib.parse import urlsplit
+
+    direct = storage_service.generate_upload_url(TEST_BUCKET, "a/b/input_1.jpg")["signedUrl"]
+    monkeypatch.setattr(settings, "S3_UPLOAD_PROXY_BASE", "http://example.test/s3-proxy")
+
+    proxied = storage_service.generate_upload_url(TEST_BUCKET, "a/b/input_1.jpg")["signedUrl"]
+
+    assert proxied.startswith("http://example.test/s3-proxy/")
+    assert urlsplit(proxied).path == "/s3-proxy" + urlsplit(direct).path
+    assert "X-Amz-Signature=" in urlsplit(proxied).query
+    assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in urlsplit(proxied).query
+
+
+def test_generate_upload_url_proxy_base_tolerates_a_trailing_slash(
+    s3: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator writing the env var with a trailing slash must not produce
+    a double slash, which would change the signed path."""
+    monkeypatch.setattr(settings, "S3_UPLOAD_PROXY_BASE", "http://example.test/s3-proxy/")
+
+    proxied = storage_service.generate_upload_url(TEST_BUCKET, "a/b/input_1.jpg")["signedUrl"]
+
+    assert "//a/b/input_1.jpg" not in proxied
+    assert "/s3-proxy/" in proxied

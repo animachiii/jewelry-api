@@ -54,6 +54,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import boto3
 import structlog
@@ -160,6 +161,22 @@ def build_storage_path(job_id: uuid.UUID, angle: str, kind: AssetKind, ext: str)
 _UPLOAD_URL_TTL_SECONDS = 600
 
 
+def _apply_upload_proxy(url: str) -> str:
+    """Swap the presigned URL's scheme+host for settings.S3_UPLOAD_PROXY_BASE.
+
+    Path and query are preserved exactly — SigV4 signs the canonical path and
+    the X-Amz-* query parameters, so touching either would invalidate the
+    signature. The Host header is signed too, which is why the nginx side must
+    re-send the original S3 host; see deploy/nginx/jewelry.conf.
+    """
+    base = settings.S3_UPLOAD_PROXY_BASE
+    if not base:
+        return url
+    parts = urlsplit(url)
+    proxied = f"{base.rstrip('/')}{parts.path}"
+    return f"{proxied}?{parts.query}" if parts.query else proxied
+
+
 def generate_upload_url(bucket: str, storage_path: str) -> dict[str, Any]:
     """Returns a short-lived presigned URL the client can PUT a file to directly.
 
@@ -176,7 +193,7 @@ def generate_upload_url(bucket: str, storage_path: str) -> dict[str, Any]:
             ExpiresIn=_UPLOAD_URL_TTL_SECONDS,
         ),
     )
-    return {"signedUrl": url, "path": storage_path}
+    return {"signedUrl": _apply_upload_proxy(url), "path": storage_path}
 
 
 def generate_signed_url(bucket: str, storage_path: str, ttl_seconds: int | None = None) -> str:
